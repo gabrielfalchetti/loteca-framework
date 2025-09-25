@@ -1,162 +1,145 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ingest_odds.py — Odds 1X2 com de-vig e validação (API-Football via RapidAPI)
+ingest_odds.py — Busca odds 1X2 POR JOGO (fixture) na API-Football (RapidAPI),
+converte em probabilidades, remove a margem (de-vig), aplica filtros de sanidade
+e agrega por mediana.
 
-Corrige o erro UnboundLocalError de 'pd' garantindo:
-- import pandas as pd no topo
-- nenhuma variável local chamada 'pd' no escopo da função
+Saída: data/processed/odds_<rodada>.csv com colunas: match_id, p_home, p_draw, p_away
 """
 
-import os
-import sys
-import argparse
-import yaml
-import requests
-import pandas as pd       # <- manter este import
-import numpy as np
+import os, sys, argparse, yaml, requests, pandas as pd, numpy as np
 from pathlib import Path
+from time import sleep
 
-
-def load_cfg() -> dict:
-    with open("config/config.yaml", "r", encoding="utf-8") as f:
+def load_cfg():
+    with open("config/config.yaml","r",encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-
 def build_headers(hcfg: dict, token_env: str) -> dict:
-    """Monta headers substituindo ${TOKEN} e sanitiza o token de quebras de linha/tabs."""
     raw = os.getenv(token_env, "")
-    tok = (raw or "").strip().replace("\r", "").replace("\n", "")
+    tok = (raw or "").strip().replace("\r","").replace("\n","")
     if not tok:
-        print(f"[ERRO] token ausente no env: {token_env}", file=sys.stderr)
-        sys.exit(1)
+        print(f"[ERRO] token ausente no env: {token_env}", file=sys.stderr); sys.exit(1)
     if any(c in tok for c in (" ", "\t")):
-        print("[ERRO] token contém espaço/tab. Edite o Secret para 1 linha, sem espaços.", file=sys.stderr)
-        sys.exit(1)
-    out = {}
-    for k, v in (hcfg or {}).items():
-        out[k] = v.replace("${TOKEN}", tok)
-    return out
-
+        print("[ERRO] token contém espaço/tab. Edite o Secret p/ 1 linha.", file=sys.stderr); sys.exit(1)
+    return {k: v.replace("${TOKEN}", tok) for k,v in (hcfg or {}).items()}
 
 def implied_prob(odd):
     try:
         o = float(odd)
-        if o <= 1.0:
-            return np.nan
+        if o <= 1.0: return np.nan
         return 1.0 / o
     except Exception:
         return np.nan
 
-
 def devig(p_home, p_draw, p_away):
     s = (p_home or 0.0) + (p_draw or 0.0) + (p_away or 0.0)
-    if s <= 0:
-        return np.nan, np.nan, np.nan, np.nan
+    if s <= 0: return np.nan, np.nan, np.nan, np.nan
     vig = max(0.0, s - 1.0)
-    return (p_home / s if s else np.nan,
-            p_draw / s if s else np.nan,
-            p_away / s if s else np.nan,
-            vig)
+    return p_home/s, p_draw/s, p_away/s, vig
 
-
-def fetch_odds(url_odds: str, headers_http: dict, params: dict) -> pd.DataFrame:
-    r = requests.get(url_odds, headers=headers_http, params=params, timeout=40)
-    if r.status_code >= 400:
-        print(f"[WARN] odds HTTP {r.status_code}: {r.text[:400]}", file=sys.stderr)
-    r.raise_for_status()
-    j = r.json()
-    response = j.get("response", j)
-    return pd.json_normalize(response)
-
+def get_fixture_odds(url_odds, headers_http, fixture_id, timeout=30, retries=2, backoff=1.5):
+    """Busca odds para UM fixture. Tenta algumas vezes (retries)."""
+    params = {"fixture": int(fixture_id)}
+    for i in range(retries+1):
+        try:
+            r = requests.get(url_odds, headers=headers_http, params=params, timeout=timeout)
+            if r.status_code >= 400:
+                print(f"[WARN] fixture={fixture_id} HTTP {r.status_code}: {r.text[:200]}", file=sys.stderr)
+            r.raise_for_status()
+            j = r.json()
+            return j.get("response", j)
+        except requests.RequestException as e:
+            if i == retries: raise
+            sleep(backoff**i)
+    return []
 
 def main(rodada: str):
-    cfg = load_cfg()
-    provider = cfg.get("provider", {})
-    fx = cfg["fixtures_odds"]
-    sanity = cfg.get("sanity", {})
+    C = load_cfg()
+    prov = C.get("provider", {})
+    fx   = C["fixtures_odds"]
+    sanity = C.get("sanity", {})
+    min_books = int(sanity.get("min_bookmakers", 2))  # um pouco mais permissivo
+    max_vig   = float(sanity.get("max_vig", 0.15))    # idem
 
-    min_books = int(sanity.get("min_bookmakers", 3))
-    max_vig = float(sanity.get("max_vig", 0.12))
+    # arquivos de entrada/saída
+    fixtures_out = C["paths"]["fixtures_out"].replace("${rodada}", rodada)
+    if not Path(fixtures_out).exists():
+        print(f"[ERRO] fixtures não encontrado: {fixtures_out}", file=sys.stderr); sys.exit(2)
+    df_fix = pd.read_csv(fixtures_out)
+    if df_fix.empty:
+        print("[ERRO] fixtures vazio.", file=sys.stderr); sys.exit(2)
 
     # headers e endpoint
     headers_http = build_headers(fx["api_headers"], fx["api_token_env"])
-    url_odds = fx["api_url_odds"].replace("${base_url}", provider["base_url"])
-    # por padrão aqui usamos a liga BR configurada; ajuste se quiser outra liga
-    params = {
-        "league": provider.get("league_br"),
-        "season": provider.get("season"),
-    }
+    url_odds = fx["api_url_odds"].replace("${base_url}", prov["base_url"])
 
-    df_odds_raw = fetch_odds(url_odds, headers_http, params)
-
-    # parse estrutura: fixture.id -> bookmakers -> bets -> values (Home/Draw/Away)
     rows = []
-    for rec in df_odds_raw.to_dict("records"):
-        match_id = rec.get("fixture.id")
-        bookmakers = rec.get("bookmakers", [])
-        if not isinstance(bookmakers, list) or not bookmakers:
+    # para cada jogo, pedir odds por fixture
+    for rec in df_fix.to_dict("records"):
+        match_id = rec.get("fixture.id") or rec.get("match_id")
+        if pd.isna(match_id): continue
+        try:
+            resp = get_fixture_odds(url_odds, headers_http, int(match_id))
+        except Exception as e:
+            print(f"[WARN] odds falharam p/ match_id={match_id}: {e}", file=sys.stderr)
             continue
-        for bm in bookmakers:
-            bname = bm.get("name")
-            bets = bm.get("bets", [])
-            for bet in bets:
-                market = (bet.get("name") or "").lower()
-                if ("match winner" in market) or ("1x2" in market) or ("winner" in market):
-                    vals = bet.get("values", [])
-                    # mapear value -> odd
-                    map_vals = {str(v.get("value", "")).lower(): v.get("odd") for v in vals}
-                    odd_home = map_vals.get("home") or map_vals.get("1") or map_vals.get("local_team") or map_vals.get("home team")
-                    odd_draw = map_vals.get("draw") or map_vals.get("x")
-                    odd_away = map_vals.get("away") or map_vals.get("2") or map_vals.get("away team") or map_vals.get("visitor_team")
 
-                    p_home_raw = implied_prob(odd_home)
-                    p_draw_raw = implied_prob(odd_draw)
-                    p_away_raw = implied_prob(odd_away)
+        # normaliza bookmakers/bets/values
+        df = pd.json_normalize(resp)
+        if df.empty:
+            continue
 
-                    p_home, p_draw, p_away, vig = devig(p_home_raw, p_draw_raw, p_away_raw)
-
-                    rows.append({
-                        "match_id": match_id,
-                        "bookmaker": bname,
-                        "odd_home": odd_home,
-                        "odd_draw": odd_draw,
-                        "odd_away": odd_away,
-                        "p_home_raw": p_home_raw,
-                        "p_draw_raw": p_draw_raw,
-                        "p_away_raw": p_away_raw,
-                        "p_home": p_home,
-                        "p_draw": p_draw,
-                        "p_away": p_away,
-                        "vig": vig
-                    })
+        for r in df.to_dict("records"):
+            bms = r.get("bookmakers", [])
+            if not isinstance(bms, list): continue
+            for bm in bms:
+                bname = bm.get("name")
+                bets = bm.get("bets", [])
+                for bet in bets:
+                    market = (bet.get("name") or "").lower()
+                    if ("match winner" in market) or ("1x2" in market) or ("winner" in market):
+                        vals = bet.get("values", [])
+                        d = {str(v.get("value","")).lower(): v.get("odd") for v in vals}
+                        oh = d.get("home") or d.get("1") or d.get("local_team") or d.get("home team")
+                        od = d.get("draw") or d.get("x")
+                        oa = d.get("away") or d.get("2") or d.get("away team") or d.get("visitor_team")
+                        ph = implied_prob(oh); pdp = implied_prob(od); pa = implied_prob(oa)
+                        ph2, pd2, pa2, vig = devig(ph, pdp, pa)
+                        rows.append({
+                            "match_id": int(match_id),
+                            "bookmaker": bname,
+                            "odd_home": oh, "odd_draw": od, "odd_away": oa,
+                            "p_home_raw": ph, "p_draw_raw": pdp, "p_away_raw": pa,
+                            "p_home": ph2, "p_draw": pd2, "p_away": pa2,
+                            "vig": vig
+                        })
 
     out = pd.DataFrame(rows)
-
-    odds_out = cfg["paths"]["odds_out"].replace("${rodada}", rodada)
+    odds_out = C["paths"]["odds_out"].replace("${rodada}", rodada)
     Path(odds_out).parent.mkdir(parents=True, exist_ok=True)
 
     if out.empty:
-        print("[WARN] Nenhuma odds encontrada (verifique plano/endpoints).")
+        print("[WARN] Nenhuma odds por fixture encontrada. Verifique plano/limites/rodada.")
+        # ainda assim escreve arquivo vazio para auditoria
         out.to_csv(odds_out, index=False)
         print(f"[OK] odds (vazia) → {odds_out}")
         return
 
-    # filtros de sanidade
-    out = out[out["vig"] <= max_vig].copy()
-    # exigir mínimo de casas por jogo
+    # Regras de sanidade
+    out = out[out["vig"].astype(float) <= max_vig].copy()
     bm_counts = out.groupby("match_id")["bookmaker"].nunique()
     keep_ids = set(bm_counts[bm_counts >= min_books].index)
     filtered = out[out["match_id"].isin(keep_ids)].copy()
     if filtered.empty:
-        print("[WARN] Odds filtradas ficaram vazias; mantendo sem filtro.")
+        print("[WARN] filtro deixou vazio; mantendo sem filtro.")
         filtered = out.copy()
 
-    # agregação robusta (mediana) por match
-    best = filtered.groupby("match_id", as_index=False)[["p_home", "p_draw", "p_away"]].median()
+    # Agrega por mediana
+    best = filtered.groupby("match_id", as_index=False)[["p_home","p_draw","p_away"]].median()
     best.to_csv(odds_out, index=False)
     print(f"[OK] odds → {odds_out}")
-
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
