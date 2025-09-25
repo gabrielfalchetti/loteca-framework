@@ -1,142 +1,229 @@
 #!/usr/bin/env python3
-import argparse, os, pandas as pd, numpy as np, yaml
-from pathlib import Path
-from sklearn.linear_model import LogisticRegression
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import log_loss
-import warnings
+# -*- coding: utf-8 -*-
 
-# (Opcional) Weights & Biases
+"""
+join_features.py — versão simples e didática (cola-e-usa)
+
+O que este script faz:
+1) Lê a configuração em config/config.yaml (caminhos e opções).
+2) Carrega a tabela de jogos (matches.csv) da rodada.
+3) (Opcional) Agrega clima (weather) por partida, se existir.
+4) Monta um dataset "joined" mínimo e salva em data/processed/joined_<rodada>.csv.
+5) Se houver histórico com rótulo (result) e is_past=1, treina
+   uma Regressão Logística com calibração (Platt "sigmoid").
+   Caso contrário, usa as probabilidades de mercado do CSV.
+6) Gera o relatório final com p_home, p_draw, p_away e context_score
+   em reports/context_scores_<rodada>.csv.
+7) Integra com Weights & Biases (W&B) de forma opcional/segura:
+   - Só ativa se a lib 'wandb' estiver instalada E se WANDB_API_KEY existir no ambiente.
+"""
+
+import argparse
+import os
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import log_loss
+
+# ---- W&B: liga/desliga automático e seguro ----
 USE_WANDB = True
 try:
-    import wandb
+    import wandb  # type: ignore
 except Exception:
     USE_WANDB = False
+# ------------------------------------------------
 
+
+# -------------------- utilidades --------------------
 def load_cfg():
-    with open("config/config.yaml","r",encoding="utf-8") as f:
+    """Carrega config/config.yaml como dicionário."""
+    with open("config/config.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-def safe_merge(df_left, path_right, on_cols, how="left"):
-    if not Path(path_right).exists():
-        return df_left
-    right = pd.read_csv(path_right)
-    return df_left.merge(right, on=on_cols, how=how)
 
-def build_joined(cfg, rodada):
-    # Começa do matches
-    base = pd.read_csv(cfg["paths"]["matches_csv"].replace("${rodada}", rodada))
+def safe_read_csv(path: str) -> pd.DataFrame:
+    """Lê CSV se existir; senão retorna DataFrame vazio."""
+    p = Path(path)
+    if p.exists():
+        return pd.read_csv(p)
+    return pd.DataFrame()
 
-    # Anexa standings (opcional se você quiser usar)
-    # base = safe_merge(base, cfg["paths"]["standings_out"].replace("${rodada}", rodada), on_cols=["home","away"], how="left")
 
-    # Anexa weather (opcional): agregue uma hora de referência (ex.: mais próxima do kickoff)
-    weather_path = cfg["paths"]["weather_out"].replace("${rodada}", rodada)
-    if Path(weather_path).exists():
-        w = pd.read_csv(weather_path)
-        # Exemplo simples: média por match_id
-        agg = w.groupby("match_id").agg({
-            "precipitation_probability":"mean",
-            "wind_speed_10m":"mean",
-            "precipitation":"mean",
-            "temperature_2m":"mean"
-        }).reset_index()
-        agg.columns = ["match_id","weather_precipitation_probability","weather_wind_speed_10m","weather_precipitation","weather_temperature_2m"]
-        base = base.merge(agg, on="match_id", how="left")
-
-    # Anexa sinais de news (já está no matches.csv como news_home_hits/news_away_hits; se quiser cruzar, leia cfg["paths"]["news_out"])
-
-    # Salva joined
-    out_join = cfg["paths"]["joined_out"].replace("${rodada}", rodada)
-    Path(out_join).parent.mkdir(parents=True, exist_ok=True)
-    base.to_csv(out_join, index=False)
-    return out_join
-
-def prepare_features(df):
-    # Features mínimas (coerentes com matches.csv de exemplo)
-    feats = [
-        "home_prob_market","draw_prob_market","away_prob_market",
-        "home_form5","away_form5","home_rest_days","away_rest_days",
-        "news_home_hits","news_away_hits",
-        "weather_precipitation_probability","weather_wind_speed_10m"
-    ]
-    for c in feats:
+def ensure_cols(df: pd.DataFrame, cols, fill=0.0):
+    """Garante que as colunas existam; se não houver, cria com fill."""
+    for c in cols:
         if c not in df.columns:
-            df[c] = 0.0
-    X = df[feats].astype(float).fillna(0.0).to_numpy()
-    return X, feats
+            df[c] = fill
+    return df
 
-def main(rodada):
+
+# --------------- construção do "joined" ---------------
+def build_joined(cfg: dict, rodada: str) -> str:
+    """
+    Monta um joined mínimo a partir do matches + (opcional) weather agregado por partida.
+    Salva e retorna o caminho do joined.
+    """
+    matches_path = cfg["paths"]["matches_csv"].replace("${rodada}", rodada)
+    dfm = safe_read_csv(matches_path)
+    if dfm.empty:
+        raise SystemExit(f"[ERRO] Arquivo de partidas não encontrado ou vazio: {matches_path}")
+
+    # WEATHER (opcional): agrega média por match_id
+    weather_path = cfg["paths"]["weather_out"].replace("${rodada}", rodada)
+    w = safe_read_csv(weather_path)
+    if not w.empty:
+        # tenta agregar colunas comuns; cria nomes padronizados
+        agg = w.groupby("match_id").agg({
+            "precipitation_probability": "mean",
+            "wind_speed_10m": "mean",
+            "precipitation": "mean",
+            "temperature_2m": "mean",
+        }).reset_index()
+        agg.columns = [
+            "match_id",
+            "weather_precipitation_probability",
+            "weather_wind_speed_10m",
+            "weather_precipitation",
+            "weather_temperature_2m",
+        ]
+        dfm = dfm.merge(agg, on="match_id", how="left")
+
+    # salva joined mínimo
+    joined_out = cfg["paths"]["joined_out"].replace("${rodada}", rodada)
+    Path(joined_out).parent.mkdir(parents=True, exist_ok=True)
+    dfm.to_csv(joined_out, index=False)
+    return joined_out
+
+
+# --------------------- features ----------------------
+FEATURES_MIN = [
+    # probabilidades de mercado (já devigadas, se possível)
+    "home_prob_market",
+    "draw_prob_market",
+    "away_prob_market",
+    # forma/descanso/notícias — colunas que sugerimos no CSV de matches
+    "home_form5",
+    "away_form5",
+    "home_rest_days",
+    "away_rest_days",
+    "news_home_hits",
+    "news_away_hits",
+    # clima agregado
+    "weather_precipitation_probability",
+    "weather_wind_speed_10m",
+]
+
+
+def prepare_X(df: pd.DataFrame, feat_list=FEATURES_MIN) -> np.ndarray:
+    """Prepara matriz X com as FEATURES_MIN, preenchendo ausentes com 0."""
+    ensure_cols(df, feat_list, fill=0.0)
+    return df[feat_list].astype(float).fillna(0.0).to_numpy()
+
+
+# -------------------- pipeline main -------------------
+def main(rodada: str):
     cfg = load_cfg()
+
+    # --- iniciar W&B (se a chave existir no ambiente) ---
+    if USE_WANDB and os.getenv("WANDB_API_KEY"):
+        wandb.login(key=os.getenv("WANDB_API_KEY"))
+        run = wandb.init(project="loteca-framework", config={"rodada": rodada})
+        # Log de “batimento” pra você ver algo no painel
+        wandb.log({"wandb_ping": 1})
+    else:
+        run = None
+    # -----------------------------------------------------
+
+    # 1) montar o "joined"
     joined_path = build_joined(cfg, rodada)
     df = pd.read_csv(joined_path)
 
-    # Se tiver histórico (is_past=1), treinamos; senão usamos fallback: as probs de mercado já calibradas
-    has_past = "is_past" in df.columns and df["is_past"].sum() > 0
-    out = df[["match_id","home","away"]].copy()
+    # 2) separar jogos passados e futuros (se houver a coluna is_past)
+    has_past_flag = "is_past" in df.columns
+    df_future = df.copy()
+    df_past = pd.DataFrame()
+    if has_past_flag:
+        df_past = df[df["is_past"] == 1].copy()
+        df_future = df[df["is_past"] == 0].copy()
 
-    if has_past:
-        train = df[df["is_past"]==1].copy()
-        test  = df[df["is_past"]==0].copy()
+    # 3) checar se temos rótulos de resultado no passado (H/D/A)
+    has_labels = not df_past.empty and ("result" in df_past.columns) and df_past["result"].notna().any()
 
-        # Precisa da coluna 'result' no histórico (H/D/A). Se não tiver, cai no fallback abaixo.
-        if "result" in train.columns and train["result"].notna().any():
-            ymap = {"H":0,"D":1,"A":2}
-            ytr = train["result"].map(ymap)
-            Xtr,_ = prepare_features(train)
-            Xte,_ = prepare_features(test)
+    out = df[["match_id", "home", "away"]].copy()
 
-            base = LogisticRegression(max_iter=2000, multi_class="multinomial")
-            model = CalibratedClassifierCV(base, method="sigmoid", cv=5)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                model.fit(Xtr, ytr)
+    if has_labels:
+        # 3a) Treinar modelo com calibração (multiclasse H/D/A)
+        ymap = {"H": 0, "D": 1, "A": 2}
+        ytr = df_past["result"].map(ymap).to_numpy()
 
-            # métricas treino (se possível)
-            try:
-                p_tr = model.predict_proba(Xtr)
-                ll = float(log_loss(ytr, p_tr))
-            except Exception:
-                ll = None
+        Xtr = prepare_X(df_past)
+        Xte = prepare_X(df_future) if not df_future.empty else np.zeros((0, len(FEATURES_MIN)))
 
+        base = LogisticRegression(max_iter=2000, multi_class="multinomial")
+        model = CalibratedClassifierCV(base, method="sigmoid", cv=5)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(Xtr, ytr)
+
+        # métrica simples no treino (logloss)
+        try:
+            p_tr = model.predict_proba(Xtr)
+            ll = float(log_loss(ytr, p_tr))
+            if USE_WANDB and run is not None:
+                wandb.log({"logloss_train": ll})
+        except Exception:
+            pass
+
+        # previsões para jogos futuros (is_past=0)
+        if not df_future.empty:
             p = model.predict_proba(Xte)
-            out_te = test[["match_id","home","away"]].copy()
-            out_te["p_home"] = p[:,0]; out_te["p_draw"] = p[:,1]; out_te["p_away"] = p[:,2]
-            out = pd.concat([out, out_te], ignore_index=True).drop_duplicates("match_id", keep="last")
-
-            # W&B
-            if USE_WANDB and os.getenv("WANDB_API_KEY"):
-                wandb.login(key=os.getenv("WANDB_API_KEY"))
-                run = wandb.init(project="loteca-framework", config={"rodada": rodada})
-                if ll is not None:
-                    wandb.log({"logloss_train": ll})
+            future_out = df_future[["match_id", "home", "away"]].copy()
+            future_out["p_home"] = p[:, 0]
+            future_out["p_draw"] = p[:, 1]
+            future_out["p_away"] = p[:, 2]
+            out = pd.concat([out, future_out], ignore_index=True).drop_duplicates("match_id", keep="last")
         else:
-            # Fallback sem 'result': usa probs do mercado
-            out["p_home"] = df["home_prob_market"]
-            out["p_draw"] = df["draw_prob_market"]
-            out["p_away"] = df["away_prob_market"]
+            # caso extremo: só passado; ainda assim manter as colunas
+            out["p_home"] = np.nan
+            out["p_draw"] = np.nan
+            out["p_away"] = np.nan
+
     else:
-        # Sem histórico: usa probs do mercado
-        out["p_home"] = df["home_prob_market"]
-        out["p_draw"] = df["draw_prob_market"]
-        out["p_away"] = df["away_prob_market"]
+        # 3b) Sem histórico rotulado: usar probabilidades de mercado como fallback
+        out["p_home"] = df.get("home_prob_market", pd.Series([np.nan] * len(df)))
+        out["p_draw"] = df.get("draw_prob_market", pd.Series([np.nan] * len(df)))
+        out["p_away"] = df.get("away_prob_market", pd.Series([np.nan] * len(df)))
 
-    # Context score (exemplo simples ponderado)
-    out["context_score"] = (out["p_home"]*1.0 + out["p_draw"]*0.5 + out["p_away"]*0.0)
+    # 4) context score simples (p_home*1 + p_draw*0.5 + p_away*0)
+    #    ajuste os pesos se quiser outra “função valor”
+    out["context_score"] = out["p_home"].astype(float) * 1.0 + out["p_draw"].astype(float) * 0.5
 
+    # 5) salvar relatório final
     report_path = cfg["paths"]["context_score_out"].replace("${rodada}", rodada)
     Path(report_path).parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(report_path, index=False)
     print(f"[OK] context score → {report_path}")
 
-    # W&B: salvar relatório
-    if USE_WANDB and os.getenv("WANDB_API_KEY"):
+    # 6) subir o arquivo final para a run do W&B (aparece em Files)
+    if USE_WANDB and run is not None:
         try:
             wandb.save(report_path)
+        except Exception:
+            pass
+        try:
             wandb.finish()
         except Exception:
             pass
 
+
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(); ap.add_argument("--rodada", required=True)
-    main(ap.parse_args().rodada)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True, help="Ex.: 2025-09-20_21")
+    args = ap.parse_args()
+    main(args.rodada)
