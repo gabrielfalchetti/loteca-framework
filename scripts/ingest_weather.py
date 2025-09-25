@@ -44,7 +44,7 @@ def main(rodada):
                 vals = series.get(k, [])
                 row[k] = vals[idx] if idx < len(vals) else None
             rows.append(row)
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     out = pd.DataFrame(rows)
     out_path = cfg["paths"]["weather_out"].replace("${rodada}", rodada)
