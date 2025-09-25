@@ -28,4 +28,40 @@ jobs:
         echo "PWD=$(pwd)"
         echo "Pastas até 3 níveis:"
         find . -maxdepth 3 -type d -print | sed 's/^/  - /'
-        echo "Procurando ingest_matches_
+        echo "Procurando ingest_matches.py / scorecard.py:"
+        find . -maxdepth 7 -type f \( -name "ingest_matches.py" -o -name "scorecard.py" \) -print | sed 's/^/  - /'
+
+    - name: Detectar pasta dos scripts (auto)
+      id: detect
+      run: |
+        set -e
+        # Tente caminhos comuns:
+        for base in scripts pipeline/scripts src/loteca_framework/scripts ; do
+          if [ -f "$base/ingest_matches.py" ] && [ -f "$base/scorecard.py" ]; then
+            echo "SCRIPTS_DIR=$base" >> $GITHUB_ENV
+            echo "Encontrado em: $base"
+            exit 0
+          fi
+        done
+        echo "NÃO ENCONTREI os dois arquivos (ingest_matches.py e scorecard.py)."
+        echo "Crie-os (ou mova-os) e rode novamente."
+        exit 2
+
+    - name: Validar estrutura mínima
+      run: |
+        python - << 'PY'
+from pathlib import Path
+import os, sys
+base = os.environ.get("SCRIPTS_DIR", "")
+need = [Path(base)/"ingest_matches.py", Path(base)/"scorecard.py"]
+miss = [str(p) for p in need if not p.exists()]
+if miss:
+    print("[ERRO] Arquivos faltando:\n - " + "\n - ".join(miss))
+    sys.exit(2)
+print(f"[OK] Achei: {need[0]} e {need[1]}")
+PY
+
+    - name: Rodar ingest e scorecard
+      run: |
+        python "$SCRIPTS_DIR/ingest_matches.py" --rodada "${{ env.LOTECA_RODADA }}"
+        python "$SCRIPTS_DIR/scorecard.py" --rodada "${{ env.LOTECA_RODADA }}"
