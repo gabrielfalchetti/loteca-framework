@@ -4,25 +4,27 @@ rodada_id: "2025-09-20_21"
 provider:
   name: "api_football"
   base_url: "https://api-football-v1.p.rapidapi.com/v3"
-  # Ligas foco (ajuste conforme seu alvo)
-  league_br: "71"    # Brasileirão Série A (confirme no seu plano)
+  # Ligas foco (ajuste conforme seu alvo/ID do seu plano)
+  league_br: "71"    # Brasileirão Série A
   league_lib: "13"   # Libertadores
   league_epl: "39"   # Premier League
   season: "2025"
 
-headers_rapidapi:
-  X-RapidAPI-Key: "${TOKEN}"
-  X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
+# >>> NÃO use referência por string tipo ${headers_rapidapi} <<<
+# Em vez disso, escreva o MAPA de headers diretamente em cada seção:
+#   X-RapidAPI-Key usa ${TOKEN} e o script substitui pelo valor do secret RAPIDAPI_KEY.
 
 fixtures_odds:
   api_url_fixtures: "${base_url}/fixtures"
   api_url_odds:     "${base_url}/odds"
   api_token_env: "RAPIDAPI_KEY"
-  api_headers: ${headers_rapidapi}
+  api_headers:
+    X-RapidAPI-Key: "${TOKEN}"
+    X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
   params_fixtures:
-    league: "${league_br}"   # mude para league_lib/league_epl quando quiser
+    league: "${league_br}"   # troque para ${league_lib} ou ${league_epl} quando quiser
     season: "${season}"
-    round: "${rodada}"       # será convertido para "Regular Season - NN"
+    round: "${rodada}"       # script converte para "Regular Season - NN" automaticamente
   params_odds:
     league: "${league_br}"
     season: "${season}"
@@ -31,14 +33,18 @@ standings:
   mode: "api"
   api_url: "${base_url}/standings"
   api_token_env: "RAPIDAPI_KEY"
-  api_headers: ${headers_rapidapi}
+  api_headers:
+    X-RapidAPI-Key: "${TOKEN}"
+    X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
   api_params:
     league: "${league_br}"
     season: "${season}"
 
 availability:
   api_token_env: "RAPIDAPI_KEY"
-  api_headers: ${headers_rapidapi}
+  api_headers:
+    X-RapidAPI-Key: "${TOKEN}"
+    X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
   endpoints:
     lineups:   "${base_url}/fixtures/lineups"   # ?fixture=<id>
     injuries:  "${base_url}/injuries"           # ?fixture=<id>
