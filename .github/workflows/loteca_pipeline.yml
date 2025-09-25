@@ -14,49 +14,47 @@ jobs:
     steps:
       - name: Checkout do código
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: recursive
 
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Diagnóstico rápido (mostrar pastas e tentar achar arquivos)
+      - name: Diagnóstico rápido
+        shell: bash
         run: |
           echo "PWD=$(pwd)"
-          echo "Pastas até 3 níveis:"
-          find . -maxdepth 3 -type d -print
-          echo "Procurando ingest_matches.py:"
-          find . -maxdepth 7 -type f -name "ingest_matches.py" -print
-          echo "Procurando scorecard.py:"
-          find . -maxdepth 7 -type f -name "scorecard.py" -print
+          echo "Pastas (até 2 níveis):"
+          find . -maxdepth 2 -type d -print
+          echo "Arquivos alvo:"
+          find . -maxdepth 6 -type f -name "ingest_matches.py" -print
+          find . -maxdepth 6 -type f -name "scorecard.py" -print
 
-      - name: Detectar pasta dos scripts (auto)
+      - name: Detectar pasta dos scripts
         id: detect
         shell: bash
         run: |
           set -euo pipefail
           for base in scripts pipeline/scripts src/loteca_framework/scripts ; do
-            if [[ -f "$base/ingest_matches.py" && -f "$base/scorecard.py" ]]; then
+            if [ -f "$base/ingest_matches.py" ] && [ -f "$base/scorecard.py" ]; then
               echo "SCRIPTS_DIR=$base" >> "$GITHUB_ENV"
               echo "Encontrado em: $base"
               exit 0
             fi
           done
-          echo "NÃO ENCONTREI os dois arquivos (ingest_matches.py e scorecard.py)."
-          echo "Crie-os (ou mova-os) e rode novamente."
+          echo "ERROR: Não encontrei ingest_matches.py e scorecard.py."
           exit 2
 
       - name: Validar estrutura mínima
+        shell: bash
         run: |
-          python -c "import os,sys,pathlib; base=os.environ.get('SCRIPTS_DIR',''); \
-p1=pathlib.Path(base)/'ingest_matches.py'; p2=pathlib.Path(base)/'scorecard.py'; \
-miss=[str(p) for p in (p1,p2) if not p.exists()]; \
-print(f'[OK] Achei: {p1} e {p2}') if not miss else (print('[ERRO] Arquivos faltando:\\n - ' + '\\n - '.join(miss)) or sys.exit(2))"
+          set -euo pipefail
+          if [ ! -f "$SCRIPTS_DIR/ingest_matches.py" ]; then echo "Falta $SCRIPTS_DIR/ingest_matches.py"; exit 2; fi
+          if [ ! -f "$SCRIPTS_DIR/scorecard.py" ]; then echo "Falta $SCRIPTS_DIR/scorecard.py"; exit 2; fi
+          echo "OK: scripts encontrados em $SCRIPTS_DIR"
 
       - name: Rodar ingest e scorecard
+        shell: bash
         run: |
           python "$SCRIPTS_DIR/ingest_matches.py" --rodada "${{ env.LOTECA_RODADA }}"
           python "$SCRIPTS_DIR/scorecard.py" --rodada "${{ env.LOTECA_RODADA }}"
