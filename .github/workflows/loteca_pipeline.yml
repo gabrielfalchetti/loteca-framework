@@ -2,85 +2,10 @@ name: Loteca Pipeline
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
- env:
-  WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install requirements
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-      - name: Detect scripts dir
-        id: detect
-        shell: bash
-        run: |
-          set -e
-          for d in pipeline/scripts scripts .; do
-            if [ -f "$d/ingest_standings.py" ] && [ -f "$d/ingest_weather.py" ] && [ -f "$d/ingest_lineups_news.py" ] && [ -f "$d/join_features.py" ]; then
-              echo "SCRIPTS_DIR=$d" >> $GITHUB_ENV
-              echo "Encontrado SCRIPTS_DIR=$d"
-              exit 0
-            fi
-          done
-          echo "ERRO: Não encontrei todos os scripts (ingest_standings.py, ingest_weather.py, ingest_lineups_news.py, join_features.py)."
-          exit 2
-
-      - name: Path diag
-        shell: bash
-        run: |
-          echo "PWD=$(pwd)"
-          echo "SCRIPTS_DIR=$SCRIPTS_DIR"
-          find . -maxdepth 6 -type f \( -name "ingest_*.py" -o -name "join_features.py" \) -print | sed 's/^/  - /'
-
-      - name: Check STANDINGS_API_TOKEN (safe)
-        shell: bash
-        run: |
-          if [ -n "$STANDINGS_API_TOKEN" ]; then
-            echo "STANDINGS_API_TOKEN OK"
-          else
-            echo "Aviso: sem STANDINGS_API_TOKEN (tudo bem se standings.mode=csv)."
-          fi
-
-      - name: Ingest standings
-        shell: bash
-        run: |
-          python "$SCRIPTS_DIR/ingest_standings.py" --rodada "${{ env.LOTECA_RODADA }}"
-
-      - name: Ingest weather
-        shell: bash
-        run: |
-          python "$SCRIPTS_DIR/ingest_weather.py" --rodada "${{ env.LOTECA_RODADA }}"
-
-      - name: Ingest lineups/news
-        shell: bash
-        run: |
-          python "$SCRIPTS_DIR/ingest_lineups_news.py" --rodada "${{ env.LOTECA_RODADA }}"
-
-      - name: Join & context score
-        shell: bash
-        run: |
-          python "$SCRIPTS_DIR/join_features.py" --rodada "${{ env.LOTECA_RODADA }}"
-
-      - name: Upload reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: reports-${{ env.LOTECA_RODADA }}
-          path: reports/
+      - name: Hello
+        run: echo "workflow válido"
