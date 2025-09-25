@@ -3,13 +3,16 @@ name: Loteca Pipeline
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       LOTECA_RODADA: "2025-09-20_21"
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}
 
     steps:
       - name: Checkout
@@ -20,29 +23,34 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install requirements
+      - name: Diagnóstico rápido de caminhos
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          echo "PWD=$(pwd)"
+          echo "Pastas (até 3 níveis):"
+          find . -maxdepth 3 -type d -print | sed 's/^/  - /'
+          echo "Procurando scripts essenciais:"
+          find . -maxdepth 6 -type f -name "ingest_*.py" -print | sed 's/^/  - /'
 
-      - name: Export secrets to env
-        run: echo "secrets available"
-        env:
-          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-          STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}
+      - name: Ingest standings (CSV por padrão)
+        shell: bash
+        run: |
+          python pipeline/scripts/ingest_standings.py --rodada "${{ env.LOTECA_RODADA }}"
 
-      - name: Ingest standings
-        run: python scripts/ingest_standings.py --rodada "${{ env.LOTECA_RODADA }}"
-
-
-     - name: Ingest weather (Open-Meteo)
-       run: python pipeline/scripts/ingest_weather.py --rodada "${{ env.LOTECA_RODADA }}"
+      - name: Ingest weather (Open-Meteo)
+        shell: bash
+        run: |
+          python pipeline/scripts/ingest_weather.py --rodada "${{ env.LOTECA_RODADA }}"
 
       - name: Ingest lineups/news
-        run: python pipeline/scripts/ingest_lineups_news.py --rodada "${{ env.LOTECA_RODADA }}"
+        shell: bash
+        run: |
+          python pipeline/scripts/ingest_lineups_news.py --rodada "${{ env.LOTECA_RODADA }}"
 
       - name: Join & context score
-        run: python pipeline/scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
+        shell: bash
+        run: |
+          python pipeline/scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
 
       - name: Upload reports
         uses: actions/upload-artifact@v4
