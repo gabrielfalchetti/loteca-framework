@@ -32,7 +32,8 @@ jobs:
           STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}
 
       - name: Ingest standings
-        run: python pipeline/scripts/ingest_standings.py --rodada "${{ env.LOTECA_RODADA }}"
+        run: python scripts/ingest_standings.py --rodada "${{ env.LOTECA_RODADA }}"
+
 
       - name: Ingest weather (Open-Meteo)
         run: python pipeline/scripts/ingest_weather.py --rodada "${{ env.LOTECA_RODADA }}"
