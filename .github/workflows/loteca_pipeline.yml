@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # ajuste a rodada e o concurso aqui
+      # Ajuste aqui a rodada e o concurso quando quiser
       LOTECA_RODADA: "2025-09-20_21"
       LOTECA_CONCURSO: "1213"
 
@@ -40,32 +40,18 @@ jobs:
           selectolax" > requirements.txt
           pip install -r requirements.txt
 
-      # ======= AUTO-DETECTA A PASTA DOS SCRIPTS =======
+      # Detecta automaticamente a pasta dos scripts
       - name: Detect scripts dir (auto)
         shell: bash
         run: |
           set -e
-          echo "Procurando ingest_fixtures_odds.py..."
           FOUND="$(find . -maxdepth 4 -type f -name 'ingest_fixtures_odds.py' | head -n 1 || true)"
           if [ -z "$FOUND" ]; then
-            echo "ERRO: não encontrei ingest_fixtures_odds.py em até 4 níveis."
-            echo "Estrutura do repo (3 níveis):"
-            find . -maxdepth 3 -type d -print | sed 's/^/  - /'
-            exit 2
+            echo "ERRO: não encontrei ingest_fixtures_odds.py"; exit 2
           fi
           DIR="$(dirname "$FOUND")"
           echo "SCRIPTS_DIR=$DIR" >> "$GITHUB_ENV"
           echo "Usando SCRIPTS_DIR=$DIR"
-          echo "Listando scripts encontrados nesse dir:"
-          ls -l "$DIR" || true
-          echo "Também procurando outros scripts esperados:"
-          for f in ingest_odds.py ingest_standings.py ingest_weather.py ingest_availability.py join_features.py make_picks.py; do
-            if [ -f "$DIR/$f" ]; then
-              echo "  - OK $f"
-            else
-              echo "  - WARN: $f não encontrado em $DIR"
-            fi
-          done
 
       - name: Check RAPIDAPI_KEY (safe)
         shell: bash
@@ -89,7 +75,7 @@ jobs:
           if [ -f "$SCRIPTS_DIR/ingest_odds.py" ]; then
             python "$SCRIPTS_DIR/ingest_odds.py" --rodada "${{ env.LOTECA_RODADA }}"
           else
-            echo "WARN: $SCRIPTS_DIR/ingest_odds.py não existe; pulando este passo."
+            echo "WARN: ingest_odds.py não encontrado; pulando."
           fi
 
       - name: Ingest standings
@@ -97,7 +83,7 @@ jobs:
           if [ -f "$SCRIPTS_DIR/ingest_standings.py" ]; then
             python "$SCRIPTS_DIR/ingest_standings.py" --rodada "${{ env.LOTECA_RODADA }}"
           else
-            echo "WARN: $SCRIPTS_DIR/ingest_standings.py não existe; pulando este passo."
+            echo "WARN: ingest_standings.py não encontrado; pulando."
           fi
 
       - name: Ingest weather (Open-Meteo)
@@ -105,7 +91,7 @@ jobs:
           if [ -f "$SCRIPTS_DIR/ingest_weather.py" ]; then
             python "$SCRIPTS_DIR/ingest_weather.py" --rodada "${{ env.LOTECA_RODADA }}"
           else
-            echo "WARN: $SCRIPTS_DIR/ingest_weather.py não existe; pulando este passo."
+            echo "WARN: ingest_weather.py não encontrado; pulando."
           fi
 
       - name: Ingest availability (lineups + injuries)
@@ -113,7 +99,7 @@ jobs:
           if [ -f "$SCRIPTS_DIR/ingest_availability.py" ]; then
             python "$SCRIPTS_DIR/ingest_availability.py" --rodada "${{ env.LOTECA_RODADA }}"
           else
-            echo "WARN: $SCRIPTS_DIR/ingest_availability.py não existe; pulando este passo."
+            echo "WARN: ingest_availability.py não encontrado; pulando."
           fi
 
       - name: Join & context score
@@ -121,22 +107,36 @@ jobs:
           if [ -f "$SCRIPTS_DIR/join_features.py" ]; then
             python "$SCRIPTS_DIR/join_features.py" --rodada "${{ env.LOTECA_RODADA }}"
           else
-            echo "WARN: $SCRIPTS_DIR/join_features.py não existe; pulando este passo."
+            echo "WARN: join_features.py não encontrado; pulando."
           fi
 
-      - name: Make Picks (gera 14 secos + duplos)
+      # >>> GERA O VOLANTE EM FORMATO LOTECA (Markdown), SEM CSV <<<
+      - name: Make Volante (formato Loteca)
         run: |
-          if [ -f "$SCRIPTS_DIR/make_picks.py" ]; then
-            python "$SCRIPTS_DIR/make_picks.py" \
+          if [ -f "$SCRIPTS_DIR/make_volante.py" ]; then
+            python "$SCRIPTS_DIR/make_volante.py" \
               --rodada "${{ env.LOTECA_RODADA }}" \
               --duplos 4 \
               --triplos 0 \
               --concurso "${{ env.LOTECA_CONCURSO }}"
           else
-            echo "WARN: $SCRIPTS_DIR/make_picks.py não existe; pulando este passo."
+            echo "ERRO: make_volante.py não encontrado em $SCRIPTS_DIR"; exit 2
           fi
 
-      - name: Upload reports (inclui os picks)
+      # Imprime o volante no log do Actions (para você ver sem baixar nada)
+      - name: Mostrar Volante no log
+        shell: bash
+        run: |
+          set -e
+          VOL_MD="reports/volante_concurso_${{ env.LOTECA_CONCURSO }}.md"
+          if [ ! -f "$VOL_MD" ]; then
+            VOL_MD="reports/volante_${{ env.LOTECA_RODADA }}.md"
+          fi
+          echo "================= VOLANTE (Markdown) ================="
+          cat "$VOL_MD" || (echo "Volante não encontrado"; exit 2)
+          echo "======================================================"
+
+      - name: Upload reports (inclui o volante .md)
         uses: actions/upload-artifact@v4
         with:
           name: reports-${{ env.LOTECA_RODADA }}
