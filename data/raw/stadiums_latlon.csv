@@ -1,3 +1,5 @@
 stadium_id,stadium_name,lat,lon
-maracana,Maracanã,-22.9122,-43.2302
-allianz_parque,Allianz Parque,-23.5275,-46.6781
+maracana,Maracanã,-22.91216,-43.23018
+allianz_parque,Allianz Parque,-23.5275,-46.6783
+morumbi,Morumbi,-23.5990,-46.7219
+# ...
