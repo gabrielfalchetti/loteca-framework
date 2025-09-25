@@ -2,10 +2,28 @@ name: Loteca Pipeline
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      LOTECA_RODADA: "2025-09-20_21"
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}
+
     steps:
-      - name: Hello
-        run: echo "workflow válido"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
