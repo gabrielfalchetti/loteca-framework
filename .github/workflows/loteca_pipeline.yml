@@ -42,6 +42,21 @@ jobs:
           done
           echo "ERRO: não achei todos os scripts."; exit 2
 
+          - name: Check RAPIDAPI_KEY (safe)
+  shell: bash
+  run: |
+    python - << 'PY'
+import os, sys
+t = os.getenv("RAPIDAPI_KEY", "")
+if not t:
+    print("ERRO: RAPIDAPI_KEY ausente no ambiente."); sys.exit(2)
+if any(c in t for c in "\r\n\t"):
+    print("ERRO: RAPIDAPI_KEY contém quebra de linha/tab. Edite o Secret para ser 1 linha, sem espaços nem ENTER.")
+    sys.exit(2)
+print("OK: RAPIDAPI_KEY parece limpa (tamanho:", len(t), ")")
+PY
+
+
       - name: Ingest fixtures & odds
         run: |
           python "$SCRIPTS_DIR/ingest_fixtures_odds.py" --rodada "${{ env.LOTECA_RODADA }}"
