@@ -1,0 +1,3 @@
+match_id,home,away,stadium_id,kickoff_utc,home_prob_market,draw_prob_market,away_prob_market,home_form5,away_form5,home_rest_days,away_rest_days,news_home_hits,news_away_hits,is_past
+001,Time A,Time B,maracana,2025-09-20T19:00:00Z,0.55,0.26,0.19,8,6,5,4,2,1,0
+002,Time C,Time D,allianz_parque,2025-09-20T21:00:00Z,0.48,0.28,0.24,7,7,6,5,1,2,0
