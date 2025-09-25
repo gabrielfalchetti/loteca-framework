@@ -60,3 +60,19 @@ jobs:
         run: |
           python "$SCRIPTS_DIR/ingest_matches.py" --rodada "${{ env.LOTECA_RODADA }}"
           python "$SCRIPTS_DIR/scorecard.py" --rodada "${{ env.LOTECA_RODADA }}"
+      - name: Check secrets presence (safe)
+        shell: bash
+        run: |
+          if [ -n "$WANDB_API_KEY" ]; then
+            echo "WANDB_API_KEY: OK (detectado)"
+          else
+            echo "ERRO: WANDB_API_KEY não está disponível."
+            exit 2
+          fi
+
+          # Só checa o de standings se você estiver usando mode=api:
+          if [ "$STANDINGS_API_TOKEN" != "" ]; then
+            echo "STANDINGS_API_TOKEN: OK (detectado)"
+          else
+            echo "Aviso: STANDINGS_API_TOKEN ausente (tudo bem se standings.mode=csv)."
+          fi
