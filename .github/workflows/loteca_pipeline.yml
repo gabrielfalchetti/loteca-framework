@@ -28,6 +28,30 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+                - name: Ingest fixtures & odds
+        run: python "$SCRIPTS_DIR/ingest_fixtures_odds.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Ingest standings
+        run: python "$SCRIPTS_DIR/ingest_standings.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Ingest weather (Open-Meteo)
+        run: python "$SCRIPTS_DIR/ingest_weather.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Ingest lineups/news
+        run: python "$SCRIPTS_DIR/ingest_lineups_news.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Join & context score
+        run: python "$SCRIPTS_DIR/join_features.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      # (Opcional) Recortar os 14 jogos do concurso
+      # - name: Loteca 14 recorte
+      #   run: python "$SCRIPTS_DIR/map_loteca.py" --rodada "${{ env.LOTECA_RODADA }}" --contest "1023"
+
+      # Para fechar a rodada (em outro momento ou agendado):
+      # - name: Ingest results (placares finais)
+      #   run: python "$SCRIPTS_DIR/ingest_results.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+
           
       - name: Detect scripts dir
         id: detect
