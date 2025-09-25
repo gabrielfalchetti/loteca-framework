@@ -11,9 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LOTECA_RODADA: "2025-09-20_21"
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
 
     steps:
       - name: Checkout
@@ -27,29 +26,32 @@ jobs:
       - name: Install requirements
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          echo "pandas
+          pyyaml
+          requests
+          scikit-learn
+          wandb
+          lxml
+          feedparser
+          selectolax" > requirements.txt
+          pip install -r requirements.txt
 
       - name: Detect scripts dir
         id: detect
         run: |
           set -e
           for d in pipeline/scripts scripts .; do
-            if [ -f "$d/ingest_standings.py" ] && [ -f "$d/ingest_weather.py" ] && [ -f "$d/ingest_lineups_news.py" ] && [ -f "$d/join_features.py" ]; then
+            if [ -f "$d/ingest_fixtures_odds.py" ] && \
+               [ -f "$d/ingest_standings.py" ] && \
+               [ -f "$d/ingest_weather.py" ] && \
+               [ -f "$d/ingest_availability.py" ] && \
+               [ -f "$d/join_features.py" ]; then
               echo "SCRIPTS_DIR=$d" >> "$GITHUB_ENV"
               echo "Encontrado SCRIPTS_DIR=$d"
               exit 0
             fi
           done
-          echo "ERRO: não achei todos os scripts (ingest_*.py e join_features.py)."
-          exit 2
-
-      - name: Path diag (opcional)
-        run: |
-          echo "PWD=$(pwd)"
-          echo "SCRIPTS_DIR=$SCRIPTS_DIR"
-          find . -maxdepth 3 -type d -print | sed 's/^/  - /'
-          # lista scripts encontrados
-          find . -maxdepth 6 -type f \( -name "ingest_*.py" -o -name "join_features.py" \) -print | sed 's/^/  - /'
+          echo "ERRO: não achei scripts necessários."; exit 2
 
       - name: Check RAPIDAPI_KEY (safe)
         shell: bash
@@ -60,13 +62,17 @@ jobs:
           fi
           case "$RAPIDAPI_KEY" in
             *$'\n'*|*$'\r'*|*$'\t'*)
-              echo "ERRO: RAPIDAPI_KEY contém quebra de linha/tab. Edite o Secret p/ 1 linha, sem espaços."; exit 2;;
+              echo "ERRO: RAPIDAPI_KEY contém quebra de linha/tab. Edite o Secret p/ 1 linha."; exit 2;;
           esac
           echo "OK: RAPIDAPI_KEY limpa (len=$(printf %s "$RAPIDAPI_KEY" | wc -c))"
 
-      - name: Ingest fixtures & odds
+      - name: Ingest fixtures & odds (fixtures)
         run: |
           python "$SCRIPTS_DIR/ingest_fixtures_odds.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Ingest odds (1X2, de-vig, sanity)
+        run: |
+          python "$SCRIPTS_DIR/ingest_odds.py" --rodada "${{ env.LOTECA_RODADA }}"
 
       - name: Ingest standings
         run: |
@@ -76,9 +82,9 @@ jobs:
         run: |
           python "$SCRIPTS_DIR/ingest_weather.py" --rodada "${{ env.LOTECA_RODADA }}"
 
-      - name: Ingest lineups/news
+      - name: Ingest availability (lineups + injuries)
         run: |
-          python "$SCRIPTS_DIR/ingest_lineups_news.py" --rodada "${{ env.LOTECA_RODADA }}"
+          python "$SCRIPTS_DIR/ingest_availability.py" --rodada "${{ env.LOTECA_RODADA }}"
 
       - name: Join & context score
         run: |
