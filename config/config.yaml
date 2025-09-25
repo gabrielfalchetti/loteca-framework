@@ -1,0 +1,30 @@
+timezone: "America/Sao_Paulo"
+rodada_id: "2025-09-20_21"
+
+standings:
+  mode: "csv"     # csv|api
+  csv_path: "data/raw/rodada_${rodada}/standings.csv"
+  api_url: "https://SUA_API_DE_TABELA/standings"
+  api_token_env: "STANDINGS_API_TOKEN"
+
+weather:
+  hourly: ["temperature_2m", "precipitation_probability", "precipitation", "wind_speed_10m"]
+  forecast_days: 5
+  past_days: 0
+
+news:
+  rss_sources:
+    - "https://ge.globo.com/rss/football.xml"
+    - "https://www.espn.com.br/rss"
+  html_sources:
+    - "https://www.gazetaesportiva.com"
+    - "https://www.terra.com.br/esportes"
+
+paths:
+  matches_csv: "data/raw/rodada_${rodada}/matches.csv"
+  stadiums_csv: "data/raw/stadiums_latlon.csv"
+  standings_out: "data/processed/standings_${rodada}.csv"
+  weather_out: "data/processed/weather_${rodada}.csv"
+  news_out: "data/processed/lineups_news_${rodada}.csv"
+  joined_out: "data/processed/joined_${rodada}.csv"
+  context_score_out: "reports/context_scores_${rodada}.csv"
