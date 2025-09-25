@@ -6,3 +6,13 @@ requests==2.32.3
 beautifulsoup4==4.12.3
 pyarrow==17.0.0
 tqdm==4.66.4
+requests
+pandas
+scikit-learn
+feedparser
+selectolax
+wandb
+python-dateutil
+pyyaml
+# DVC só se você optar usar (ver Parte G):
+# dvc
