@@ -1,0 +1,4 @@
+match_id,temp_c,humidity,wind_kmh,rain_mm,desc
+1,24,78,12,0,clear
+2,22,81,9,1,light-rain
+3,19,70,15,0,clear
