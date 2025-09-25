@@ -35,7 +35,7 @@ jobs:
           set -e
           for d in pipeline/scripts scripts .; do
             if [ -f "$d/ingest_standings.py" ] && [ -f "$d/ingest_weather.py" ] && [ -f "$d/ingest_lineups_news.py" ] && [ -f "$d/join_features.py" ]; then
-              echo "SCRIPTS_DIR=$d" >> $GITHUB_ENV
+              echo "SCRIPTS_DIR=$d" >> "$GITHUB_ENV"
               echo "Encontrado SCRIPTS_DIR=$d"
               exit 0
             fi
@@ -48,19 +48,21 @@ jobs:
           echo "PWD=$(pwd)"
           echo "SCRIPTS_DIR=$SCRIPTS_DIR"
           find . -maxdepth 3 -type d -print | sed 's/^/  - /'
+          # lista scripts encontrados
           find . -maxdepth 6 -type f \( -name "ingest_*.py" -o -name "join_features.py" \) -print | sed 's/^/  - /'
 
       - name: Check RAPIDAPI_KEY (safe)
+        shell: bash
         run: |
-          python - << 'PY'
-import os, sys
-t = os.getenv("RAPIDAPI_KEY", "")
-if not t:
-  print("ERRO: RAPIDAPI_KEY ausente."); sys.exit(2)
-if any(c in t for c in "\r\n\t"):
-  print("ERRO: RAPIDAPI_KEY tem quebra de linha/tab. Edite o Secret p/ 1 linha, sem espaços."); sys.exit(2)
-print("OK: RAPIDAPI_KEY limpa (len=%d)" % len(t))
-PY
+          set -e
+          if [ -z "${RAPIDAPI_KEY:-}" ]; then
+            echo "ERRO: RAPIDAPI_KEY ausente no ambiente."; exit 2
+          fi
+          case "$RAPIDAPI_KEY" in
+            *$'\n'*|*$'\r'*|*$'\t'*)
+              echo "ERRO: RAPIDAPI_KEY contém quebra de linha/tab. Edite o Secret p/ 1 linha, sem espaços."; exit 2;;
+          esac
+          echo "OK: RAPIDAPI_KEY limpa (len=$(printf %s "$RAPIDAPI_KEY" | wc -c))"
 
       - name: Ingest fixtures & odds
         run: |
