@@ -2,9 +2,10 @@ timezone: "America/Sao_Paulo"
 rodada_id: "2025-09-20_21"
 
 standings:
-  mode: "api"
-  api_url: "https://SUA_API_DE_TABELA/standings"   # coloque a URL real da sua API
-  api_token_env: "STANDINGS_API_TOKEN"             # já está assim; mantém
+  mode: "csv"     # <— troque para csv
+  csv_path: "data/raw/rodada_${rodada}/standings.csv"
+  api_url: "https://SUA_API_DE_TABELA/standings"
+  api_token_env: "STANDINGS_API_TOKEN"
 
   csv_path: "data/raw/rodada_${rodada}/standings.csv"
   api_url: "https://SUA_API_DE_TABELA/standings"
