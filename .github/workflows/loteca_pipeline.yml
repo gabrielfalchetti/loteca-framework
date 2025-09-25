@@ -28,3 +28,26 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Detect scripts dir
+        id: detect
+        shell: bash
+        run: |
+          set -e
+          for d in pipeline/scripts scripts .; do
+            if [ -f "$d/ingest_standings.py" ] && [ -f "$d/ingest_weather.py" ] && [ -f "$d/ingest_lineups_news.py" ] && [ -f "$d/join_features.py" ]; then
+              echo "SCRIPTS_DIR=$d" >> $GITHUB_ENV
+              echo "Encontrado SCRIPTS_DIR=$d"
+              exit 0
+            fi
+          done
+          echo "ERRO: Não encontrei todos os scripts (ingest_standings.py, ingest_weather.py, ingest_lineups_news.py, join_features.py)."
+          exit 2
+
+      - name: Path diag
+        shell: bash
+        run: |
+          echo "PWD=$(pwd)"
+          echo "SCRIPTS_DIR=$SCRIPTS_DIR"
+          echo "Arquivos ingest_* e join_features:"
+          find . -maxdepth 6 -type f \( -name "ingest_*.py" -o -name "join_features.py" \) -print | sed 's/^/  - /'
