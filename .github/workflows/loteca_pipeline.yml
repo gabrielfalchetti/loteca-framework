@@ -35,8 +35,8 @@ jobs:
         run: python scripts/ingest_standings.py --rodada "${{ env.LOTECA_RODADA }}"
 
 
-      - name: Ingest weather (Open-Meteo)
-        run: python pipeline/scripts/ingest_weather.py --rodada "${{ env.LOTECA_RODADA }}"
+     - name: Ingest weather (Open-Meteo)
+       run: python pipeline/scripts/ingest_weather.py --rodada "${{ env.LOTECA_RODADA }}"
 
       - name: Ingest lineups/news
         run: python pipeline/scripts/ingest_lineups_news.py --rodada "${{ env.LOTECA_RODADA }}"
