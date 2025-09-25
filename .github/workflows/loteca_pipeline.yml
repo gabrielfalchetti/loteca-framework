@@ -52,6 +52,17 @@ jobs:
           echo "Listar scripts encontrados:"
           find . -maxdepth 6 -type f -name "ingest_*.py" -print | sed 's/^/  - /'
           find . -maxdepth 6 -type f -name "join_features.py" -print | sed 's/^/  - /'
+          
+- name: Check STANDINGS_API_TOKEN (safe)
+  shell: bash
+  run: |
+    if [ -n "$STANDINGS_API_TOKEN" ]; then
+      echo "STANDINGS_API_TOKEN: OK (detectado no ambiente)"
+    else
+      echo "ERRO: STANDINGS_API_TOKEN não está disponível no ambiente."
+      echo "Verifique: (1) existe como secret no repo; (2) está no 'env:' do job; (3) não é PR de fork."
+      exit 2
+    fi
 
       - name: Ingest standings
         shell: bash
