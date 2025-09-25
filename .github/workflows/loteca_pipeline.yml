@@ -10,7 +10,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
+      # >>> ajuste a rodada e o concurso aqui quando precisar <<<
       LOTECA_RODADA: "2025-09-20_21"
+      LOTECA_CONCURSO: "1213"
+
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
 
@@ -27,6 +30,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           echo "pandas
+          numpy
           pyyaml
           requests
           scikit-learn
@@ -36,22 +40,14 @@ jobs:
           selectolax" > requirements.txt
           pip install -r requirements.txt
 
-      - name: Detect scripts dir
-        id: detect
+      - name: Detect scripts dir (fixo)
         run: |
-          set -e
-          for d in pipeline/scripts scripts .; do
-            if [ -f "$d/ingest_fixtures_odds.py" ] && \
-               [ -f "$d/ingest_standings.py" ] && \
-               [ -f "$d/ingest_weather.py" ] && \
-               [ -f "$d/ingest_availability.py" ] && \
-               [ -f "$d/join_features.py" ]; then
-              echo "SCRIPTS_DIR=$d" >> "$GITHUB_ENV"
-              echo "Encontrado SCRIPTS_DIR=$d"
-              exit 0
-            fi
-          done
-          echo "ERRO: não achei scripts necessários."; exit 2
+          if [ -f "pipeline/scripts/ingest_fixtures_odds.py" ]; then
+            echo "SCRIPTS_DIR=pipeline/scripts" >> "$GITHUB_ENV"
+            echo "Usando SCRIPTS_DIR=pipeline/scripts"
+          else
+            echo "ERRO: pipeline/scripts não encontrado."; exit 2
+          fi
 
       - name: Check RAPIDAPI_KEY (safe)
         shell: bash
@@ -78,7 +74,7 @@ jobs:
         run: |
           python "$SCRIPTS_DIR/ingest_standings.py" --rodada "${{ env.LOTECA_RODADA }}"
 
-      - name: Ingest weather
+      - name: Ingest weather (Open-Meteo)
         run: |
           python "$SCRIPTS_DIR/ingest_weather.py" --rodada "${{ env.LOTECA_RODADA }}"
 
@@ -90,8 +86,20 @@ jobs:
         run: |
           python "$SCRIPTS_DIR/join_features.py" --rodada "${{ env.LOTECA_RODADA }}"
 
-      - name: Upload reports
+      # >>> ESTE É O STEP QUE GERA OS PALPITES <<<
+      - name: Make Picks (gera 14 secos + duplos)
+        run: |
+          python "$SCRIPTS_DIR/make_picks.py" \
+            --rodada "${{ env.LOTECA_RODADA }}" \
+            --duplos 4 \
+            --triplos 0 \
+            --concurso "${{ env.LOTECA_CONCURSO }}"
+
+      - name: Upload reports (inclui os picks)
         uses: actions/upload-artifact@v4
         with:
           name: reports-${{ env.LOTECA_RODADA }}
-          path: reports/
+          path: |
+            reports/
+            data/processed/
+            data/raw/rodada_${{ env.LOTECA_RODADA }}/
