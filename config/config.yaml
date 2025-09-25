@@ -4,68 +4,62 @@ rodada_id: "2025-09-20_21"
 provider:
   name: "api_football"
   base_url: "https://api-football-v1.p.rapidapi.com/v3"
-  # parâmetros fixos da sua competição
-  league: "71"      # EXEMPLO: ajuste para sua liga
-  season: "2025"    # EXEMPLO: temporada alvo
+  # Ligas foco (ajuste conforme seu alvo)
+  league_br: "71"    # Brasileirão Série A (confirme no seu plano)
+  league_lib: "13"   # Libertadores
+  league_epl: "39"   # Premier League
+  season: "2025"
 
-standings:
-  mode: "api"
-  api_url: "${base_url}/standings"
-  api_token_env: "RAPIDAPI_KEY"
-  api_headers:
-    X-RapidAPI-Key: "${TOKEN}"
-    X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
-  api_params:
-    league: "${league}"
-    season: "${season}"
+headers_rapidapi:
+  X-RapidAPI-Key: "${TOKEN}"
+  X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
 
 fixtures_odds:
   api_url_fixtures: "${base_url}/fixtures"
   api_url_odds:     "${base_url}/odds"
   api_token_env: "RAPIDAPI_KEY"
-  api_headers:
-    X-RapidAPI-Key: "${TOKEN}"
-    X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
+  api_headers: ${headers_rapidapi}
   params_fixtures:
-    league: "${league}"
+    league: "${league_br}"   # mude para league_lib/league_epl quando quiser
     season: "${season}"
-    round: "${rodada}"     # usamos sua rodada_id aqui
+    round: "${rodada}"       # será convertido para "Regular Season - NN"
   params_odds:
-    league: "${league}"
+    league: "${league_br}"
     season: "${season}"
 
-results:
-  api_url: "${base_url}/fixtures"
+standings:
+  mode: "api"
+  api_url: "${base_url}/standings"
   api_token_env: "RAPIDAPI_KEY"
-  api_headers:
-    X-RapidAPI-Key: "${TOKEN}"
-    X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
-  params:
-    league: "${league}"
+  api_headers: ${headers_rapidapi}
+  api_params:
+    league: "${league_br}"
     season: "${season}"
-    round: "${rodada}"     # mesmo filtro da rodada
+
+availability:
+  api_token_env: "RAPIDAPI_KEY"
+  api_headers: ${headers_rapidapi}
+  endpoints:
+    lineups:   "${base_url}/fixtures/lineups"   # ?fixture=<id>
+    injuries:  "${base_url}/injuries"           # ?fixture=<id>
 
 weather:
   hourly: ["temperature_2m", "precipitation_probability", "precipitation", "wind_speed_10m"]
   forecast_days: 5
   past_days: 0
 
-news:
-  rss_sources:
-    - "https://ge.globo.com/rss/football.xml"
-    - "https://www.espn.com.br/rss"
-  html_sources:
-    - "https://www.gazetaesportiva.com"
-    - "https://www.terra.com.br/esportes"
+sanity:
+  min_bookmakers: 3
+  max_vig: 0.12
+  max_prob_shift: 0.20
 
 paths:
-  matches_csv: "data/raw/rodada_${rodada}/matches.csv"          # preenchido pelo fixtures
+  matches_csv: "data/raw/rodada_${rodada}/matches.csv"
   stadiums_csv: "data/raw/stadiums_latlon.csv"
-  standings_out: "data/processed/standings_${rodada}.csv"
   fixtures_out: "data/processed/fixtures_${rodada}.csv"
   odds_out: "data/processed/odds_${rodada}.csv"
-  results_out: "data/processed/results_${rodada}.csv"
+  standings_out: "data/processed/standings_${rodada}.csv"
+  availability_out: "data/processed/availability_${rodada}.csv"
   weather_out: "data/processed/weather_${rodada}.csv"
-  news_out: "data/processed/lineups_news_${rodada}.csv"
   joined_out: "data/processed/joined_${rodada}.csv"
   context_score_out: "reports/context_scores_${rodada}.csv"
