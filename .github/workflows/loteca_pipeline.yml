@@ -27,3 +27,27 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Detect scripts dir
+        id: detect
+        run: |
+          set -e
+          for d in pipeline/scripts scripts .; do
+            if [ -f "$d/ingest_standings.py" ] && [ -f "$d/ingest_weather.py" ] && [ -f "$d/ingest_lineups_news.py" ] && [ -f "$d/join_features.py" ]; then
+              echo "SCRIPTS_DIR=$d" >> $GITHUB_ENV
+              echo "Encontrado SCRIPTS_DIR=$d"
+              exit 0
+            fi
+          done
+          echo "ERRO: não achei todos os scripts."; exit 2
+
+      - name: Ingest standings
+        run: python "$SCRIPTS_DIR/ingest_standings.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Ingest weather
+        run: python "$SCRIPTS_DIR/ingest_weather.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Ingest lineups/news
+        run: python "$SCRIPTS_DIR/ingest_lineups_news.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Join & context score
+        run: python "$SCRIPTS_DIR/join_features.py" --rodada "${{ env.LOTECA_RODADA }}"
