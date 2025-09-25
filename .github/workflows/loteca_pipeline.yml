@@ -10,69 +10,41 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LOTECA_RODADA: "2025-09-20_21"
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}
 
     steps:
-      - name: Checkout do código
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configurar Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Diagnóstico rápido
-        shell: bash
+      - name: Install requirements
         run: |
-          echo "PWD=$(pwd)"
-          echo "Pastas (até 2 níveis):"
-          find . -maxdepth 2 -type d -print
-          echo "Arquivos alvo:"
-          find . -maxdepth 6 -type f -name "ingest_matches.py" -print
-          find . -maxdepth 6 -type f -name "scorecard.py" -print
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Detectar pasta dos scripts
-        id: detect
-        shell: bash
-        run: |
-          set -euo pipefail
-          for base in scripts pipeline/scripts src/loteca_framework/scripts ; do
-            if [ -f "$base/ingest_matches.py" ] && [ -f "$base/scorecard.py" ]; then
-              echo "SCRIPTS_DIR=$base" >> "$GITHUB_ENV"
-              echo "Encontrado em: $base"
-              exit 0
-            fi
-          done
-          echo "ERROR: Não encontrei ingest_matches.py e scorecard.py."
-          exit 2
+      - name: Export secrets to env
+        run: echo "secrets available"
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}
 
-      - name: Validar estrutura mínima
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ ! -f "$SCRIPTS_DIR/ingest_matches.py" ]; then echo "Falta $SCRIPTS_DIR/ingest_matches.py"; exit 2; fi
-          if [ ! -f "$SCRIPTS_DIR/scorecard.py" ]; then echo "Falta $SCRIPTS_DIR/scorecard.py"; exit 2; fi
-          echo "OK: scripts encontrados em $SCRIPTS_DIR"
+      - name: Ingest standings
+        run: python pipeline/scripts/ingest_standings.py --rodada "${{ env.LOTECA_RODADA }}"
 
-      - name: Rodar ingest e scorecard
-        shell: bash
-        run: |
-          python "$SCRIPTS_DIR/ingest_matches.py" --rodada "${{ env.LOTECA_RODADA }}"
-          python "$SCRIPTS_DIR/scorecard.py" --rodada "${{ env.LOTECA_RODADA }}"
-      - name: Check secrets presence (safe)
-        shell: bash
-        run: |
-          if [ -n "$WANDB_API_KEY" ]; then
-            echo "WANDB_API_KEY: OK (detectado)"
-          else
-            echo "ERRO: WANDB_API_KEY não está disponível."
-            exit 2
-          fi
+      - name: Ingest weather (Open-Meteo)
+        run: python pipeline/scripts/ingest_weather.py --rodada "${{ env.LOTECA_RODADA }}"
 
-          # Só checa o de standings se você estiver usando mode=api:
-          if [ "$STANDINGS_API_TOKEN" != "" ]; then
-            echo "STANDINGS_API_TOKEN: OK (detectado)"
-          else
-            echo "Aviso: STANDINGS_API_TOKEN ausente (tudo bem se standings.mode=csv)."
-          fi
+      - name: Ingest lineups/news
+        run: python pipeline/scripts/ingest_lineups_news.py --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Join & context score
+        run: python pipeline/scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ env.LOTECA_RODADA }}
+          path: reports/
