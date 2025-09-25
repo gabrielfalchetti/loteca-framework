@@ -12,7 +12,7 @@ jobs:
     env:
       LOTECA_RODADA: "2025-09-20_21"
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}
+      STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}   # <- IMPORTANTE
 
     steps:
       - name: Checkout
