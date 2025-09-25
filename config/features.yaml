@@ -1,0 +1,11 @@
+use_features:
+  odds: true
+  table: true
+  weather: true
+  news: true
+
+weights:
+  odds: 0.55
+  table: 0.20
+  weather: 0.10
+  news: 0.15
