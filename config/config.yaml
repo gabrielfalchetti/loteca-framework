@@ -1,16 +1,49 @@
 timezone: "America/Sao_Paulo"
 rodada_id: "2025-09-20_21"
 
+provider:
+  name: "api_football"
+  base_url: "https://api-football-v1.p.rapidapi.com/v3"
+  # parâmetros fixos da sua competição
+  league: "71"      # EXEMPLO: ajuste para sua liga
+  season: "2025"    # EXEMPLO: temporada alvo
+
 standings:
-  mode: "csv"
-  csv_path: "data/raw/rodada_${rodada}/standings.csv"
-  api_url: "https://EXEMPLO-NAO-USADO"
-  api_token_env: "STANDINGS_API_TOKEN"
+  mode: "api"
+  api_url: "${base_url}/standings"
+  api_token_env: "RAPIDAPI_KEY"
+  api_headers:
+    X-RapidAPI-Key: "${TOKEN}"
+    X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
+  api_params:
+    league: "${league}"
+    season: "${season}"
 
+fixtures_odds:
+  api_url_fixtures: "${base_url}/fixtures"
+  api_url_odds:     "${base_url}/odds"
+  api_token_env: "RAPIDAPI_KEY"
+  api_headers:
+    X-RapidAPI-Key: "${TOKEN}"
+    X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
+  params_fixtures:
+    league: "${league}"
+    season: "${season}"
+    round: "${rodada}"     # usamos sua rodada_id aqui
+  params_odds:
+    league: "${league}"
+    season: "${season}"
 
-  csv_path: "data/raw/rodada_${rodada}/standings.csv"
-  api_url: "https://SUA_API_DE_TABELA/standings"
-  api_token_env: "STANDINGS_API_TOKEN"
+results:
+  api_url: "${base_url}/fixtures"
+  api_token_env: "RAPIDAPI_KEY"
+  api_headers:
+    X-RapidAPI-Key: "${TOKEN}"
+    X-RapidAPI-Host: "api-football-v1.p.rapidapi.com"
+  params:
+    league: "${league}"
+    season: "${season}"
+    round: "${rodada}"     # mesmo filtro da rodada
 
 weather:
   hourly: ["temperature_2m", "precipitation_probability", "precipitation", "wind_speed_10m"]
@@ -26,9 +59,12 @@ news:
     - "https://www.terra.com.br/esportes"
 
 paths:
-  matches_csv: "data/raw/rodada_${rodada}/matches.csv"
+  matches_csv: "data/raw/rodada_${rodada}/matches.csv"          # preenchido pelo fixtures
   stadiums_csv: "data/raw/stadiums_latlon.csv"
   standings_out: "data/processed/standings_${rodada}.csv"
+  fixtures_out: "data/processed/fixtures_${rodada}.csv"
+  odds_out: "data/processed/odds_${rodada}.csv"
+  results_out: "data/processed/results_${rodada}.csv"
   weather_out: "data/processed/weather_${rodada}.csv"
   news_out: "data/processed/lineups_news_${rodada}.csv"
   joined_out: "data/processed/joined_${rodada}.csv"
