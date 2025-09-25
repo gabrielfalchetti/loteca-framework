@@ -9,83 +9,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      LOTECA_RODADA: "2025-09-20_21"
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      STANDINGS_API_TOKEN: ${{ secrets.STANDINGS_API_TOKEN }}   # <- IMPORTANTE
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Instalar dependências
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Detectar pasta dos scripts
-        id: detect
+      - name: Hello
         shell: bash
-        run: |
-          set -e
-          for d in pipeline/scripts scripts .; do
-            if [ -f "$d/ingest_standings.py" ] && [ -f "$d/ingest_weather.py" ] && [ -f "$d/ingest_lineups_news.py" ] && [ -f "$d/join_features.py" ]; then
-              echo "SCRIPTS_DIR=$d" >> $GITHUB_ENV
-              echo "Encontrado SCRIPTS_DIR=$d"
-              exit 0
-            fi
-          done
-          echo "ERRO: Não encontrei todos os scripts (ingest_standings.py, ingest_weather.py, ingest_lineups_news.py, join_features.py)."
-          echo "Dica: crie/posicione-os em 'pipeline/scripts' ou 'scripts'."
-          exit 2
-
-      - name: Diagnóstico de caminhos
-        shell: bash
-        run: |
-          echo "PWD=$(pwd)"
-          echo "SCRIPTS_DIR=$SCRIPTS_DIR"
-          echo "Listar scripts encontrados:"
-          find . -maxdepth 6 -type f -name "ingest_*.py" -print | sed 's/^/  - /'
-          find . -maxdepth 6 -type f -name "join_features.py" -print | sed 's/^/  - /'
-          
-- name: Check STANDINGS_API_TOKEN (safe)
-  shell: bash
-  run: |
-    if [ -n "$STANDINGS_API_TOKEN" ]; then
-      echo "STANDINGS_API_TOKEN: OK (detectado no ambiente)"
-    else
-      echo "ERRO: STANDINGS_API_TOKEN não está disponível no ambiente."
-      echo "Verifique: (1) existe como secret no repo; (2) está no 'env:' do job; (3) não é PR de fork."
-      exit 2
-    fi
-
-      - name: Ingest standings
-        shell: bash
-        run: |
-          python "$SCRIPTS_DIR/ingest_standings.py" --rodada "${{ env.LOTECA_RODADA }}"
-
-      - name: Ingest weather (Open-Meteo)
-        shell: bash
-        run: |
-          python "$SCRIPTS_DIR/ingest_weather.py" --rodada "${{ env.LOTECA_RODADA }}"
-
-      - name: Ingest lineups/news
-        shell: bash
-        run: |
-          python "$SCRIPTS_DIR/ingest_lineups_news.py" --rodada "${{ env.LOTECA_RODADA }}"
-
-      - name: Join & context score
-        shell: bash
-        run: |
-          python "$SCRIPTS_DIR/join_features.py" --rodada "${{ env.LOTECA_RODADA }}"
-
-      - name: Upload reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: reports-${{ env.LOTECA_RODADA }}
-          path: reports/
+        run: echo "Workflow válido e rodando."
