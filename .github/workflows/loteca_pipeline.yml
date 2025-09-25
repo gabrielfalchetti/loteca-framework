@@ -40,22 +40,27 @@ jobs:
               exit 0
             fi
           done
-          echo "ERRO: não achei todos os scripts."; exit 2
+          echo "ERRO: não achei todos os scripts (ingest_*.py e join_features.py)."
+          exit 2
 
-          - name: Check RAPIDAPI_KEY (safe)
-  shell: bash
-  run: |
-    python - << 'PY'
+      - name: Path diag (opcional)
+        run: |
+          echo "PWD=$(pwd)"
+          echo "SCRIPTS_DIR=$SCRIPTS_DIR"
+          find . -maxdepth 3 -type d -print | sed 's/^/  - /'
+          find . -maxdepth 6 -type f \( -name "ingest_*.py" -o -name "join_features.py" \) -print | sed 's/^/  - /'
+
+      - name: Check RAPIDAPI_KEY (safe)
+        run: |
+          python - << 'PY'
 import os, sys
 t = os.getenv("RAPIDAPI_KEY", "")
 if not t:
-    print("ERRO: RAPIDAPI_KEY ausente no ambiente."); sys.exit(2)
+  print("ERRO: RAPIDAPI_KEY ausente."); sys.exit(2)
 if any(c in t for c in "\r\n\t"):
-    print("ERRO: RAPIDAPI_KEY contém quebra de linha/tab. Edite o Secret para ser 1 linha, sem espaços nem ENTER.")
-    sys.exit(2)
-print("OK: RAPIDAPI_KEY parece limpa (tamanho:", len(t), ")")
+  print("ERRO: RAPIDAPI_KEY tem quebra de linha/tab. Edite o Secret p/ 1 linha, sem espaços."); sys.exit(2)
+print("OK: RAPIDAPI_KEY limpa (len=%d)" % len(t))
 PY
-
 
       - name: Ingest fixtures & odds
         run: |
@@ -76,3 +81,9 @@ PY
       - name: Join & context score
         run: |
           python "$SCRIPTS_DIR/join_features.py" --rodada "${{ env.LOTECA_RODADA }}"
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ env.LOTECA_RODADA }}
+          path: reports/
