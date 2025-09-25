@@ -1,0 +1,14 @@
+matches:
+  required: ["match_id","date_utc","league","home","away","venue"]
+
+odds:
+  required: ["match_id","market","odd_home","odd_draw","odd_away","provider","ts_utc"]
+
+table:
+  required: ["team","points","position","last5","gf","ga","gd"]
+
+weather:
+  required: ["match_id","temp_c","humidity","wind_kmh","rain_mm","desc"]
+
+news:
+  required: ["team","ts_utc","source","headline","label_injury","label_suspension","label_rest"]
