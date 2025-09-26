@@ -2,20 +2,22 @@ name: Loteca Pipeline
 
 on:
   workflow_dispatch:
+    inputs:
+      rodada:
+        description: "Identificador da rodada (ex.: 2025-09-20_21)"
+        required: true
+        type: string
   push:
-    branches:
-      - main
+    branches: ["main"]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/loteca_pipeline.yml"
 
 jobs:
-  build:
+  build-loteca:
     runs-on: ubuntu-latest
     env:
-      # Ajuste aqui a rodada e o concurso quando quiser
-      LOTECA_RODADA: "2025-09-20_21"
-      LOTECA_CONCURSO: "1213"
-
-      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      LOTECA_RODADA: ${{ inputs.rodada }}
 
     steps:
       - name: Checkout
@@ -26,121 +28,42 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install requirements
+      - name: Install deps
         run: |
-          python -m pip install --upgrade pip
-          echo "pandas
-          numpy
-          pyyaml
-          requests
-          scikit-learn
-          wandb
-          lxml
-          feedparser
-          selectolax" > requirements.txt
-          pip install -r requirements.txt
+          pip install pandas
 
-      # Detecta automaticamente a pasta dos scripts
-      - name: Detect scripts dir (auto)
-        shell: bash
+      - name: Ingest matches
         run: |
-          set -e
-          FOUND="$(find . -maxdepth 4 -type f -name 'ingest_fixtures_odds.py' | head -n 1 || true)"
-          if [ -z "$FOUND" ]; then
-            echo "ERRO: não encontrei ingest_fixtures_odds.py"; exit 2
-          fi
-          DIR="$(dirname "$FOUND")"
-          echo "SCRIPTS_DIR=$DIR" >> "$GITHUB_ENV"
-          echo "Usando SCRIPTS_DIR=$DIR"
+          python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente ou vazio"; exit 2; }
+          wc -l "data/out/${LOTECA_RODADA}/matches.csv" || true
+          head -n 3 "data/out/${LOTECA_RODADA}/matches.csv" || true
 
-      - name: Check RAPIDAPI_KEY (safe)
-        shell: bash
+      - name: Ingest odds
         run: |
-          set -e
-          if [ -z "${RAPIDAPI_KEY:-}" ]; then
-            echo "ERRO: RAPIDAPI_KEY ausente no ambiente."; exit 2
-          fi
-          case "$RAPIDAPI_KEY" in
-            *$'\n'*|*$'\r'*|*$'\t'*)
-              echo "ERRO: RAPIDAPI_KEY contém quebra de linha/tab. Edite o Secret p/ 1 linha."; exit 2;;
-          esac
-          echo "OK: RAPIDAPI_KEY limpa (len=$(printf %s "$RAPIDAPI_KEY" | wc -c))"
+          python scripts/ingest_odds.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente ou vazio"; exit 2; }
+          wc -l "data/out/${LOTECA_RODADA}/odds.csv" || true
+          head -n 3 "data/out/${LOTECA_RODADA}/odds.csv" || true
 
-      - name: Ingest fixtures & odds (fixtures)
+      - name: Build features
         run: |
-          python "$SCRIPTS_DIR/ingest_fixtures_odds.py" --rodada "${{ env.LOTECA_RODADA }}"
+          python scripts/build_features.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/features.csv" || { echo "::error::features.csv ausente ou vazio"; exit 2; }
+          wc -l "data/out/${LOTECA_RODADA}/features.csv" || true
+          head -n 3 "data/out/${LOTECA_RODADA}/features.csv" || true
 
-      - name: Ingest odds (1X2, de-vig, sanity)
+      - name: Join features
         run: |
-          if [ -f "$SCRIPTS_DIR/ingest_odds.py" ]; then
-            python "$SCRIPTS_DIR/ingest_odds.py" --rodada "${{ env.LOTECA_RODADA }}"
-          else
-            echo "WARN: ingest_odds.py não encontrado; pulando."
-          fi
+          # Ative soft-mode se quiser que NÃO QUEBRE quando matches estiver vazio:
+          # export JOIN_SOFT=1
+          python scripts/join_features.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::joined.csv ausente ou vazio"; exit 2; }
+          wc -l "data/out/${LOTECA_RODADA}/joined.csv" || true
+          head -n 3 "data/out/${LOTECA_RODADA}/joined.csv" || true
 
-      - name: Ingest standings
-        run: |
-          if [ -f "$SCRIPTS_DIR/ingest_standings.py" ]; then
-            python "$SCRIPTS_DIR/ingest_standings.py" --rodada "${{ env.LOTECA_RODADA }}"
-          else
-            echo "WARN: ingest_standings.py não encontrado; pulando."
-          fi
-
-      - name: Ingest weather (Open-Meteo)
-        run: |
-          if [ -f "$SCRIPTS_DIR/ingest_weather.py" ]; then
-            python "$SCRIPTS_DIR/ingest_weather.py" --rodada "${{ env.LOTECA_RODADA }}"
-          else
-            echo "WARN: ingest_weather.py não encontrado; pulando."
-          fi
-
-      - name: Ingest availability (lineups + injuries)
-        run: |
-          if [ -f "$SCRIPTS_DIR/ingest_availability.py" ]; then
-            python "$SCRIPTS_DIR/ingest_availability.py" --rodada "${{ env.LOTECA_RODADA }}"
-          else
-            echo "WARN: ingest_availability.py não encontrado; pulando."
-          fi
-
-      - name: Join & context score
-        run: |
-          if [ -f "$SCRIPTS_DIR/join_features.py" ]; then
-            python "$SCRIPTS_DIR/join_features.py" --rodada "${{ env.LOTECA_RODADA }}"
-          else
-            echo "WARN: join_features.py não encontrado; pulando."
-          fi
-
-      # >>> GERA O VOLANTE EM FORMATO LOTECA (Markdown), SEM CSV <<<
-      - name: Make Volante (formato Loteca)
-        run: |
-          if [ -f "$SCRIPTS_DIR/make_volante.py" ]; then
-            python "$SCRIPTS_DIR/make_volante.py" \
-              --rodada "${{ env.LOTECA_RODADA }}" \
-              --duplos 4 \
-              --triplos 0 \
-              --concurso "${{ env.LOTECA_CONCURSO }}"
-          else
-            echo "ERRO: make_volante.py não encontrado em $SCRIPTS_DIR"; exit 2
-          fi
-
-      # Imprime o volante no log do Actions (para você ver sem baixar nada)
-      - name: Mostrar Volante no log
-        shell: bash
-        run: |
-          set -e
-          VOL_MD="reports/volante_concurso_${{ env.LOTECA_CONCURSO }}.md"
-          if [ ! -f "$VOL_MD" ]; then
-            VOL_MD="reports/volante_${{ env.LOTECA_RODADA }}.md"
-          fi
-          echo "================= VOLANTE (Markdown) ================="
-          cat "$VOL_MD" || (echo "Volante não encontrado"; exit 2)
-          echo "======================================================"
-
-      - name: Upload reports (inclui o volante .md)
+      - name: Upload joined
         uses: actions/upload-artifact@v4
         with:
-          name: reports-${{ env.LOTECA_RODADA }}
-          path: |
-            reports/
-            data/processed/
-            data/raw/rodada_${{ env.LOTECA_RODADA }}/
+          name: joined-${{ env.LOTECA_RODADA }}
+          path: data/out/${{ env.LOTECA_RODADA }}/joined.csv
