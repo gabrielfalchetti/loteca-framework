@@ -29,14 +29,14 @@ jobs:
           pip install --upgrade pip
           pip install pandas requests rapidfuzz==3.9.7
 
-      - name: Show rodada
-        run: echo "Rodada=${LOTECA_RODADA}"
-
-      - name: Ensure matches exists
+      # 1) GERA matches.csv a partir do matches_source.csv
+      - name: Ingest matches (gera data/out/<RODADA>/matches.csv)
         run: |
-          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente/vazio em data/out/${LOTECA_RODADA}/"; exit 2; }
+          python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
           echo "Prévia matches.csv:" && head -n 5 "data/out/${LOTECA_RODADA}/matches.csv" || true
 
+      # 2) Coleta ODDS reais
       - name: Ingest odds (TheOddsAPI - real)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
@@ -56,18 +56,21 @@ jobs:
           test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente/vazio"; exit 2; }
           echo "Prévia odds.csv:" && head -n 10 "data/out/${LOTECA_RODADA}/odds.csv" || true
 
+      # 3) Constrói features
       - name: Build features
         run: |
           python scripts/build_features.py --rodada "${LOTECA_RODADA}"
           test -s "data/out/${LOTECA_RODADA}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
           echo "Prévia features.csv:" && head -n 5 "data/out/${LOTECA_RODADA}/features.csv" || true
 
+      # 4) Junta tudo
       - name: Join features
         run: |
           python scripts/join_features.py --rodada "${LOTECA_RODADA}"
           test -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
           echo "Prévia joined.csv:" && head -n 5 "data/out/${LOTECA_RODADA}/joined.csv" || true
 
+      # 5) Publica artefato
       - name: Upload joined
         uses: actions/upload-artifact@v4
         with:
