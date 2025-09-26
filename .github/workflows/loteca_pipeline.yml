@@ -1,4 +1,4 @@
-name: Loteca Pipeline (PRO) – Odds + RapidAPI + Enrichment + Optimizer + W&B
+name: Loteca Pipeline (PRO+) – Odds + RapidAPI + Injuries + Weather + Optimizer + W&B
 
 on:
   workflow_dispatch:
@@ -130,7 +130,7 @@ jobs:
           python scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
 
-      # 7) Enrichment (lesões) -> joined_enriched.csv e sobrepõe joined.csv
+      # 7) Injuries -> joined_enriched.csv e sobrepõe joined.csv
       - name: Adjust by injuries (RapidAPI/API-Football)
         env:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
@@ -139,7 +139,16 @@ jobs:
           test -s "data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv" || { echo "::error::joined_enriched.csv ausente/vazio"; exit 2; }
           cp "data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
 
-      # 8) Cartão (otimizador: 4 duplos, 2 triplos)
+      # 8) Weather -> joined_weather.csv e sobrepõe joined.csv
+      - name: Adjust by weather (Open-Meteo + API-Football)
+        env:
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        run: |
+          python scripts/adjust_probs_weather.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --altitude-threshold 1500
+          test -s "data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv" || { echo "::error::joined_weather.csv ausente/vazio"; exit 2; }
+          cp "data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
+
+      # 9) Cartão (Optimizer)
       - name: Plan bet (optimizer)
         run: |
           python scripts/plan_bet_opt.py --rodada "${{ env.LOTECA_RODADA }}" --max-duplos 4 --max-triplos 2
@@ -164,5 +173,6 @@ jobs:
           path: |
             data/out/${{ env.LOTECA_RODADA }}/joined.csv
             data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv
+            data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv
             data/out/${{ env.LOTECA_RODADA }}/cartao.csv
             data/out/${{ env.LOTECA_RODADA }}/odds.csv
