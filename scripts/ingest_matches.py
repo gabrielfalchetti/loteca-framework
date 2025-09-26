@@ -24,7 +24,10 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("home", "away"):
         if col in df.columns:
             df[col] = (
-                df[col].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+                df[col]
+                .astype(str)
+                .str.strip()
+                .str.replace(r"\s+", " ", regex=True)
             )
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
