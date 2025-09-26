@@ -1,4 +1,4 @@
-# scripts/ingest_odds.py (PROD + pesos externos opcionais)
+# scripts/ingest_odds.py (PROD + robusto ao PyYAML ausente)
 from __future__ import annotations
 import argparse, os, json
 from pathlib import Path
@@ -8,18 +8,27 @@ import pandas as pd
 import numpy as np
 import requests
 from rapidfuzz import fuzz
-import yaml
+
+# yaml é opcional: se não existir a lib, seguimos com pesos padrão
+try:
+    import yaml  # type: ignore
+except Exception:
+    yaml = None  # fallback
 
 DEFAULT_WEIGHTS = {"pinnacle": 2.0, "betfair": 1.8}
 
 def load_weights() -> Dict[str, float]:
+    """Carrega pesos do arquivo config/bookmaker_weights.yaml se possível.
+    Caso PyYAML não esteja instalado ou arquivo inválido, usa DEFAULT_WEIGHTS."""
     cfg = Path("config/bookmaker_weights.yaml")
+    if yaml is None:
+        return DEFAULT_WEIGHTS
     if cfg.exists() and cfg.stat().st_size > 0:
         try:
             data = yaml.safe_load(cfg.read_text()) or {}
-            return {str(k).lower(): float(v) for k,v in data.items()}
+            return {str(k).lower(): float(v) for k, v in data.items()}
         except Exception:
-            pass
+            return DEFAULT_WEIGHTS
     return DEFAULT_WEIGHTS
 
 def norm_team(s: str) -> str:
