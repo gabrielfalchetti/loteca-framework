@@ -1,4 +1,4 @@
-name: Loteca Pipeline (MULTI-LIGAS + CARTÃO + RapidAPI)
+name: Loteca Pipeline (MULTI-LIGAS + CARTÃO + RapidAPI + W&B)
 
 on:
   workflow_dispatch:
@@ -16,6 +16,10 @@ jobs:
       LOTECA_RODADA: ${{ github.event.inputs.rodada }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      WANDB_PROJECT: loteca-framework
+      # Opcional: configure sua entidade/org do W&B aqui:
+      WANDB_ENTITY: ""
 
     steps:
       - name: Checkout
@@ -29,7 +33,22 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas requests rapidfuzz==3.9.7 PyYAML==6.0.2
+          pip install pandas requests rapidfuzz==3.9.7 PyYAML==6.0.2 wandb
+
+      # (W&B) start run
+      - name: Weights & Biases - start run
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: |
+          python - << 'PY'
+          import os, wandb
+          key=os.environ.get("WANDB_API_KEY","")
+          if not key: 
+            print("WANDB_API_KEY ausente; seguindo sem W&B.")
+          else:
+            wandb.login(key=key)
+          PY
+          python scripts/wandb_hook.py start --rodada "${{ env.LOTECA_RODADA }}" --project "${{ env.WANDB_PROJECT }}" --entity "${{ env.WANDB_ENTITY }}"
 
       # 1) Gera matches.csv
       - name: Ingest matches
@@ -37,7 +56,7 @@ jobs:
           python scripts/ingest_matches.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
 
-      # 2) Odds reais via TheOddsAPI (BR/EPL/LaLiga)
+      # 2) Odds via TheOddsAPI (BR/EPL/LaLiga)
       - name: Ingest odds Brasil (Série A)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
@@ -64,7 +83,7 @@ jobs:
             --min-match 88 --allow-partial
           mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_esp.csv" || true
 
-      # 3) Odds complementares via RapidAPI (API-Football) – cobre Copas/regionais/Série B etc.
+      # 3) Odds complementares via RapidAPI (API-Football)
       - name: Ingest odds (RapidAPI - API-Football)
         env:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
@@ -75,13 +94,12 @@ jobs:
               --allow-partial \
               --country-hint "Brazil" \
               --days-window 2 \
-              --min-match 85 \
-              --debug
+              --min-match 85
           else
             echo "RAPIDAPI_KEY não definido; pulando passo API-Football."
           fi
 
-      # 4) Merge de todas as fontes em data/out/<RODADA>/odds.csv
+      # 4) Merge odds
       - name: Merge odds
         run: |
           set -e
@@ -110,19 +128,32 @@ jobs:
           python scripts/build_features.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
 
-      # 6) Join final
+      # 6) Join
       - name: Join features
         run: |
           python scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
 
-      # 7) Planejar aposta (4 duplos, 2 triplos)
+      # 7) Cartão (4 duplos, 2 triplos)
       - name: Plan bet (cartão Loteca)
         run: |
           python scripts/plan_bet.py --rodada "${{ env.LOTECA_RODADA }}" --max-duplos 4 --max-triplos 2
           test -s "data/out/${{ env.LOTECA_RODADA }}/cartao.csv" || { echo "::error::cartao.csv não gerado"; exit 2; }
 
-      # 8) Artefatos finais
+      # (W&B) log metrics + artifacts
+      - name: Weights & Biases - log artifacts
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: |
+          python - << 'PY'
+          import os, wandb
+          key=os.environ.get("WANDB_API_KEY","")
+          if key:
+            wandb.login(key=key)
+          PY
+          python scripts/wandb_hook.py log --rodada "${{ env.LOTECA_RODADA }}" --project "${{ env.WANDB_PROJECT }}" --entity "${{ env.WANDB_ENTITY }}"
+
+      # 8) Artefatos Github
       - name: Upload outputs
         uses: actions/upload-artifact@v4
         with:
