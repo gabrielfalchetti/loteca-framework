@@ -1,108 +1,141 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-import argparse, os, warnings
+# scripts/join_features.py
+# Versão simples e tolerante a CSV vazio
+
+import argparse
 from pathlib import Path
-import numpy as np, pandas as pd, yaml
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import log_loss
+import pandas as pd
+from pandas.errors import EmptyDataError
 
-# W&B opcional
-USE_WANDB = True
-try:
-    import wandb
-except Exception:
-    USE_WANDB = False
+def safe_read_csv(path: str, **kwargs) -> pd.DataFrame:
+    """
+    Lê CSV com segurança:
+    - Se não existir ou estiver vazio, retorna DataFrame() vazio.
+    - Se der EmptyDataError, retorna DataFrame() vazio.
+    """
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(p, **kwargs)
+    except EmptyDataError:
+        return pd.DataFrame()
 
-def load_cfg():
-    return yaml.safe_load(open("config/config.yaml","r",encoding="utf-8"))
+def padroniza_colunas(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    # tudo minúsculo
+    df = df.rename(columns={c: c.lower() for c in df.columns})
+    # mapeamentos comuns para facilitar merge
+    mapa = {
+        "mandante": "home",
+        "visitante": "away",
+        "time_casa": "home",
+        "time_fora": "away",
+        "casa": "home",
+        "fora": "away",
+        "home_team": "home",
+        "away_team": "away",
+        "data_jogo": "date",
+        "data": "date",
+        "matchdate": "date",
+    }
+    inter = {k: v for k, v in mapa.items() if k in df.columns}
+    if inter:
+        df = df.rename(columns=inter)
 
-FEATURES_MIN = [
-    "home_prob_market","draw_prob_market","away_prob_market",
-    "starters_missing","bench_depth","keeper_out","defenders_out","mids_out","forwards_out",
-    "temperature_2m","precipitation_probability","precipitation","wind_speed_10m",
-]
+    # normaliza strings
+    for col in ("home", "away"):
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.strip()
+                .str.replace(r"\s+", " ", regex=True)
+            )
 
-def ensure_cols(df: pd.DataFrame, cols, fill=0.0):
-    for c in cols:
-        if c not in df.columns: df[c] = fill
+    # tenta converter data
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
     return df
 
-def prepare_X(df: pd.DataFrame, feat_list=FEATURES_MIN) -> np.ndarray:
-    ensure_cols(df, feat_list, fill=0.0)
-    return df[feat_list].astype(float).fillna(0.0).to_numpy()
+def escolhe_chaves(a: pd.DataFrame, b: pd.DataFrame):
+    # prioridade por match_id; depois (home, away, date) e (home, away)
+    if "match_id" in a.columns and "match_id" in b.columns:
+        return ["match_id"]
+    cand = [("home", "away", "date"), ("home", "away")]
+    for cols in cand:
+        if all(c in a.columns for c in cols) and all(c in b.columns for c in cols):
+            return list(cols)
+    return []  # sem chave clara
 
-def main(rodada: str):
-    cfg = load_cfg()
+def main():
+    ap = argparse.ArgumentParser(description="Junta matches + odds + features de forma tolerante.")
+    ap.add_argument("--rodada", required=True, help="Ex.: 2025-09-20_21")
+    ap.add_argument("--matches", default=None)
+    ap.add_argument("--odds", default=None)
+    ap.add_argument("--features", default=None)
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args()
 
-    # W&B
-    if USE_WANDB and os.getenv("WANDB_API_KEY"):
-        wandb.login(key=os.getenv("WANDB_API_KEY"))
-        run = wandb.init(project="loteca-framework", config={"rodada": rodada})
-        wandb.log({"wandb_ping": 1})
-    else:
-        run = None
+    base = f"data/out/{args.rodada}"
+    matches_path  = args.matches  or f"{base}/matches.csv"
+    odds_path     = args.odds     or f"{base}/odds.csv"
+    features_path = args.features or f"{base}/features.csv"
+    out_path      = args.out      or f"{base}/joined.csv"
 
-    # carregar datasets
-    paths = cfg["paths"]
-    matches = pd.read_csv(paths["matches_csv"].replace("${rodada}", rodada))
-    odds    = pd.read_csv(paths["odds_out"].replace("${rodada}", rodada)) if Path(paths["odds_out"].replace("${rodada}", rodada)).exists() else pd.DataFrame()
-    weather = pd.read_csv(paths["weather_out"].replace("${rodada}", rodada)) if Path(paths["weather_out"].replace("${rodada}", rodada)).exists() else pd.DataFrame()
-    avail   = pd.read_csv(paths["availability_out"].replace("${rodada}", rodada)) if Path(paths["availability_out"].replace("${rodada}", rodada)).exists() else pd.DataFrame()
+    # leituras seguras (não quebram se arquivo estiver vazio)
+    matches  = safe_read_csv(matches_path)
+    odds     = safe_read_csv(odds_path)
+    features = safe_read_csv(features_path)
 
-    # merge por match_id
+    # padroniza nomes
+    matches  = padroniza_colunas(matches)
+    odds     = padroniza_colunas(odds)
+    features = padroniza_colunas(features)
+
+    # regra mínima: precisamos de matches com algo
+    if matches.empty:
+        raise RuntimeError(f"[join_features] matches vazio/ausente: {matches_path}")
+
     df = matches.copy()
-    if not odds.empty:    df = df.merge(odds.rename(columns={"p_home":"home_prob_market","p_draw":"draw_prob_market","p_away":"away_prob_market"}), on="match_id", how="left")
-    if not weather.empty: df = df.merge(weather, on="match_id", how="left")
-    if not avail.empty:   df = df.merge(avail, on="match_id", how="left")
 
-    joined_out = paths["joined_out"].replace("${rodada}", rodada)
-    Path(joined_out).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(joined_out, index=False)
-
-    # separar passado/futuro (se existir is_past/result)
-    has_past = "is_past" in df.columns
-    df_past = df[df["is_past"]==1].copy() if has_past else pd.DataFrame()
-    df_future = df[df["is_past"]==0].copy() if has_past else df.copy()
-    has_labels = (not df_past.empty) and ("result" in df_past.columns) and df_past["result"].notna().any()
-
-    out = df[["match_id","home","away"]].copy()
-
-    if has_labels:
-        ymap = {"H":0,"D":1,"A":2}; ytr = df_past["result"].map(ymap).to_numpy()
-        Xtr = prepare_X(df_past); Xte = prepare_X(df_future) if not df_future.empty else np.zeros((0,len(FEATURES_MIN)))
-        base = LogisticRegression(max_iter=2000, multi_class="multinomial")
-        model = CalibratedClassifierCV(base, method="sigmoid", cv=5)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore"); model.fit(Xtr, ytr)
-        try:
-            p_tr = model.predict_proba(Xtr); ll = float(log_loss(ytr, p_tr))
-            if USE_WANDB and run is not None: wandb.log({"logloss_train": ll})
-        except Exception: pass
-        if not df_future.empty:
-            p = model.predict_proba(Xte)
-            fut = df_future[["match_id","home","away"]].copy()
-            fut["p_home"],fut["p_draw"],fut["p_away"] = p[:,0],p[:,1],p[:,2]
-            out = pd.concat([out, fut], ignore_index=True).drop_duplicates("match_id", keep="last")
+    # junta ODDS (se houver)
+    if not odds.empty:
+        keys = escolhe_chaves(df, odds)
+        if keys:
+            df = df.merge(odds, on=keys, how="left", suffixes=("", "_odds"))
         else:
-            out["p_home"]=np.nan; out["p_draw"]=np.nan; out["p_away"]=np.nan
-    else:
-        out["p_home"] = df.get("home_prob_market", pd.Series([np.nan]*len(df)))
-        out["p_draw"] = df.get("draw_prob_market", pd.Series([np.nan]*len(df)))
-        out["p_away"] = df.get("away_prob_market", pd.Series([np.nan]*len(df)))
+            # fallback simples: tenta por home/away
+            comuns = [c for c in ("home", "away") if c in df.columns and c in odds.columns]
+            if comuns:
+                df = df.merge(odds, on=comuns, how="left", suffixes=("", "_odds"))
+            # se não tiver como, segue sem odds
 
-    out["context_score"] = out["p_home"].astype(float)*1.0 + out["p_draw"].astype(float)*0.5
-    report_path = cfg["paths"]["context_score_out"].replace("${rodada}", rodada)
-    Path(report_path).parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(report_path, index=False)
-    print(f"[OK] context score → {report_path}")
+    # junta FEATURES (se houver)
+    if not features.empty:
+        keys = escolhe_chaves(df, features)
+        if keys:
+            df = df.merge(features, on=keys, how="left", suffixes=("", "_feat"))
+        else:
+            comuns = [c for c in ("match_id", "home", "away") if c in df.columns and c in features.columns]
+            if comuns:
+                df = df.merge(features, on=comuns, how="left", suffixes=("", "_feat"))
+            else:
+                # sem chave clara — melhor avisar cedo
+                raise RuntimeError(
+                    "[join_features] Não achei chaves para juntar features. "
+                    "Garanta pelo menos match_id ou (home/away[/date])."
+                )
 
-    if USE_WANDB and run is not None:
-        try: wandb.save(report_path)
-        except Exception: pass
-        try: wandb.finish()
-        except Exception: pass
+    # salva resultado
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    if df is None or df.empty:
+        raise RuntimeError(f"[join_features] Resultado final vazio — não vou salvar: {out_path}")
+    df.to_csv(out_path, index=False)
+
+    print(f"[join_features] OK: {len(df)} linhas -> {out_path}")
+    print(f"[join_features] Origens: matches={len(matches)} | odds={len(odds)} | features={len(features)}")
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(); ap.add_argument("--rodada", required=True)
-    main(ap.parse_args().rodada)
+    main()
