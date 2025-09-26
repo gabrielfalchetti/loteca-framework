@@ -1,4 +1,4 @@
-name: Loteca Pipeline (PRO+) – Odds + RapidAPI + Injuries + Weather + Optimizer + W&B
+name: Loteca Pipeline (ELITE) – Odds + RapidAPI + Injuries + Weather + Referee + OddsWatch + Optimizer + W&B
 
 on:
   workflow_dispatch:
@@ -52,7 +52,7 @@ jobs:
           python scripts/ingest_matches.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
 
-      # 2) Odds – TheOddsAPI
+      # 2) Odds – TheOddsAPI (múltiplas ligas) + RapidAPI complementar
       - name: Ingest odds Brasil (Série A)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
@@ -79,7 +79,6 @@ jobs:
             --min-match 88 --allow-partial
           mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_esp.csv" || true
 
-      # 3) Odds – RapidAPI (API-Football)
       - name: Ingest odds (RapidAPI - API-Football)
         env:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
@@ -95,7 +94,6 @@ jobs:
             echo "RAPIDAPI_KEY não definido; pulando passo API-Football."
           fi
 
-      # 4) Merge odds
       - name: Merge odds
         run: |
           set -e
@@ -118,19 +116,18 @@ jobs:
           awk -F, 'NR>1 && !seen[$1]++ { print }' "${OUT}" >> "${TMP}"
           mv "${TMP}" "${OUT}"
 
-      # 5) Features
+      # 3) Features + Join
       - name: Build features
         run: |
           python scripts/build_features.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
 
-      # 6) Join
       - name: Join features
         run: |
           python scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
 
-      # 7) Injuries -> joined_enriched.csv e sobrepõe joined.csv
+      # 4) Injuries
       - name: Adjust by injuries (RapidAPI/API-Football)
         env:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
@@ -139,7 +136,7 @@ jobs:
           test -s "data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv" || { echo "::error::joined_enriched.csv ausente/vazio"; exit 2; }
           cp "data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
 
-      # 8) Weather -> joined_weather.csv e sobrepõe joined.csv
+      # 5) Weather
       - name: Adjust by weather (Open-Meteo + API-Football)
         env:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
@@ -148,7 +145,22 @@ jobs:
           test -s "data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv" || { echo "::error::joined_weather.csv ausente/vazio"; exit 2; }
           cp "data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
 
-      # 9) Cartão (Optimizer)
+      # 6) Referee (opcional com tabela)
+      - name: Adjust by referee
+        env:
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        run: |
+          python scripts/adjust_probs_referee.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --bias-cap 0.04
+          test -s "data/out/${{ env.LOTECA_RODADA }}/joined_referee.csv" || { echo "::error::joined_referee.csv ausente/vazio"; exit 2; }
+          cp "data/out/${{ env.LOTECA_RODADA }}/joined_referee.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
+
+      # 7) Odds movement watch (alertas)
+      - name: Odds movement watch
+        run: |
+          python scripts/odds_movement_watch.py --rodada "${{ env.LOTECA_RODADA }}"
+          test -s "data/out/${{ env.LOTECA_RODADA }}/alerts_odds_movement.csv" || { echo "::error::alerts_odds_movement.csv ausente/vazio"; exit 2; }
+
+      # 8) Cartão (Optimizer)
       - name: Plan bet (optimizer)
         run: |
           python scripts/plan_bet_opt.py --rodada "${{ env.LOTECA_RODADA }}" --max-duplos 4 --max-triplos 2
@@ -174,5 +186,8 @@ jobs:
             data/out/${{ env.LOTECA_RODADA }}/joined.csv
             data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv
             data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv
+            data/out/${{ env.LOTECA_RODADA }}/joined_referee.csv
+            data/out/${{ env.LOTECA_RODADA }}/alerts_odds_movement.csv
             data/out/${{ env.LOTECA_RODADA }}/cartao.csv
             data/out/${{ env.LOTECA_RODADA }}/odds.csv
+            data/out/${{ env.LOTECA_RODADA }}/odds_baseline.csv
