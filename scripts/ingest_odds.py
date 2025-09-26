@@ -138,11 +138,13 @@ def main():
 
     base=Path(f"data/out/{args.rodada}")
     base.mkdir(parents=True, exist_ok=True)
-    if args.dump-api:
+    # >>> corrigido: atributo com underscore
+    if args.dump_api:
         (base/"odds_api_raw.json").write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
     evs=parse_events(data)
-    if args.print-map:
+    # >>> corrigido: atributo com underscore
+    if args.print_map:
         print(f"[ingest_odds] API retornou {len(evs)} pares (home,away). Exemplos:")
         for i,(k,v) in enumerate(evs.items()):
             print("  -", k, "| bookies:", ",".join(sorted(v.keys())))
