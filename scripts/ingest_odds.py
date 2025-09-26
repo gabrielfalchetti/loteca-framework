@@ -86,21 +86,23 @@ def parse_events(data: List[dict]) -> Dict[Tuple[str,str], Dict[str,Tuple[float,
     return evs
 
 def devig_prop(oh: float, od: float, oa: float):
-    ph,pd,pa = 1/oh,1/od,1/oa
-    s=ph+pd+pa; over=s
-    if s<=0: return ph,pd,pa,over
-    return ph/s, pd/s, pa/s, over
+    p_home, p_draw, p_away = 1/oh, 1/od, 1/oa
+    s = p_home + p_draw + p_away
+    over = s
+    if s <= 0:
+        return p_home, p_draw, p_away, over
+    return p_home/s, p_draw/s, p_away/s, over
 
 def consensus(book_odds: Dict[str,Tuple[float,float,float]]):
     if not book_odds: raise ValueError("sem bookmakers")
     probs=[]; overs=[]; wts=[]
     for bk,(oh,od,oa) in book_odds.items():
-        ph,pd,pa,over = devig_prop(oh,od,oa)
-        probs.append((ph,pd,pa)); overs.append(over)
+        p_home, p_draw, p_away, over = devig_prop(oh,od,oa)
+        probs.append((p_home, p_draw, p_away)); overs.append(over)
         wts.append(BOOK_WEIGHTS_DEFAULT.get(bk.lower(),1.0))
     probs=np.array(probs); wts=np.array(wts).reshape(-1,1)
     p=np.sum(probs*wts,axis=0)/np.sum(wts)
-    return float(p[0]),float(p[1]),float(p[2]), float(np.mean(overs)), len(book_odds)
+    return float(p[0]), float(p[1]), float(p[2]), float(np.mean(overs)), len(book_odds)
 
 def match_with_fuzzy(matches: pd.DataFrame,
                      evs: Dict[Tuple[str,str],Dict[str,Tuple[float,float,float]]],
@@ -138,12 +140,10 @@ def main():
 
     base=Path(f"data/out/{args.rodada}")
     base.mkdir(parents=True, exist_ok=True)
-    # >>> corrigido: atributo com underscore
     if args.dump_api:
         (base/"odds_api_raw.json").write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
     evs=parse_events(data)
-    # >>> corrigido: atributo com underscore
     if args.print_map:
         print(f"[ingest_odds] API retornou {len(evs)} pares (home,away). Exemplos:")
         for i,(k,v) in enumerate(evs.items()):
@@ -161,24 +161,26 @@ def main():
         book_odds = evs.get((hh,aa),{})
         if not book_odds:
             missing.append(int(mid)); continue
-        ph,pd,pa,over,n = consensus(book_odds)
-        oh,od,oa = round(1.0/ph,4), round(1.0/pd,4), round(1.0/pa,4)
+        p_home, p_draw, p_away, over, n = consensus(book_odds)
+        odd_home = round(1.0/p_home, 4)
+        odd_draw = round(1.0/p_draw, 4)
+        odd_away = round(1.0/p_away, 4)
         providers = ",".join(sorted(book_odds.keys()))
         rows.append({
-            "match_id":mid,
-            "odd_home":oh,"odd_draw":od,"odd_away":oa,
-            "n_bookmakers":n,"overround_mean":round(over,4),
-            "providers":providers
+            "match_id": mid,
+            "odd_home": odd_home, "odd_draw": odd_draw, "odd_away": odd_away,
+            "n_bookmakers": n, "overround_mean": round(over,4),
+            "providers": providers
         })
 
     if missing and not args.allow_partial:
         raise RuntimeError(f"[ingest_odds] Sem odds para match_id: {sorted(missing)} (use --allow-partial para prosseguir).")
 
-    out=pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
     if out.empty:
         raise RuntimeError("[ingest_odds] Nenhuma odd coletada.")
 
-    out_path=base/"odds.csv"
+    out_path = base/"odds.csv"
     out.to_csv(out_path, index=False)
     print(f"[ingest_odds] OK: {len(out)} linhas -> {out_path}")
     if missing:
