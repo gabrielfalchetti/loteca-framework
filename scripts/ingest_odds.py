@@ -1,8 +1,4 @@
-# scripts/ingest_odds.py
-# Odds reais via TheOddsAPI. Gera data/out/<RODADA>/odds.csv
-# Requer secret ODDS_API_KEY no GitHub (Settings → Secrets → Actions).
-# Flags úteis no CI: --allow-partial --dump-api --print-map
-
+# scripts/ingest_odds.py (PROD + pesos externos opcionais)
 from __future__ import annotations
 import argparse, os, json
 from pathlib import Path
@@ -12,18 +8,26 @@ import pandas as pd
 import numpy as np
 import requests
 from rapidfuzz import fuzz
+import yaml
 
-BOOK_WEIGHTS_DEFAULT = {"pinnacle": 2.0, "betfair": 1.8}
+DEFAULT_WEIGHTS = {"pinnacle": 2.0, "betfair": 1.8}
+
+def load_weights() -> Dict[str, float]:
+    cfg = Path("config/bookmaker_weights.yaml")
+    if cfg.exists() and cfg.stat().st_size > 0:
+        try:
+            data = yaml.safe_load(cfg.read_text()) or {}
+            return {str(k).lower(): float(v) for k,v in data.items()}
+        except Exception:
+            pass
+    return DEFAULT_WEIGHTS
 
 def norm_team(s: str) -> str:
-    if not isinstance(s, str):
-        s = "" if s is None else str(s)
+    if not isinstance(s, str): s = "" if s is None else str(s)
     s = s.lower().strip()
-    for a,b in [
-        (" futebol clube",""),(" futebol",""),(" clube",""),(" club",""),
-        (" fc",""),(" afc",""),(" sc",""),(" ac",""),(" de futebol",""),
-        ("  "," ")
-    ]:
+    for a,b in [(" futebol clube",""),(" futebol",""),(" clube",""),(" club",""),
+                (" fc",""),(" afc",""),(" sc",""),(" ac",""),(" de futebol",""),
+                ("  "," ")]:
         s = s.replace(a,b)
     return s
 
@@ -32,8 +36,7 @@ def read_matches(rodada: str, matches_path: Optional[str]=None) -> pd.DataFrame:
     mp = Path(matches_path) if matches_path else base/"matches.csv"
     if not mp.exists() or mp.stat().st_size==0:
         raise RuntimeError(f"[ingest_odds] matches.csv ausente/vazio: {mp}")
-    m = pd.read_csv(mp)
-    m = m.rename(columns={c:c.lower() for c in m.columns})
+    m = pd.read_csv(mp).rename(columns=str.lower)
     maps = {"mandante":"home","visitante":"away","time_casa":"home","time_fora":"away",
             "casa":"home","fora":"away","home_team":"home","away_team":"away",
             "data_jogo":"date","data":"date","matchdate":"date","id":"match_id"}
@@ -89,17 +92,16 @@ def devig_prop(oh: float, od: float, oa: float):
     p_home, p_draw, p_away = 1/oh, 1/od, 1/oa
     s = p_home + p_draw + p_away
     over = s
-    if s <= 0:
-        return p_home, p_draw, p_away, over
+    if s <= 0: return p_home, p_draw, p_away, over
     return p_home/s, p_draw/s, p_away/s, over
 
-def consensus(book_odds: Dict[str,Tuple[float,float,float]]):
+def consensus(book_odds: Dict[str,Tuple[float,float,float]], weights: Dict[str,float]):
     if not book_odds: raise ValueError("sem bookmakers")
     probs=[]; overs=[]; wts=[]
     for bk,(oh,od,oa) in book_odds.items():
         p_home, p_draw, p_away, over = devig_prop(oh,od,oa)
         probs.append((p_home, p_draw, p_away)); overs.append(over)
-        wts.append(BOOK_WEIGHTS_DEFAULT.get(bk.lower(),1.0))
+        wts.append(weights.get(bk.lower(), 1.0))
     probs=np.array(probs); wts=np.array(wts).reshape(-1,1)
     p=np.sum(probs*wts,axis=0)/np.sum(wts)
     return float(p[0]), float(p[1]), float(p[2]), float(np.mean(overs)), len(book_odds)
@@ -123,16 +125,16 @@ def main():
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--matches", default=None)
     ap.add_argument("--sport", default="soccer_brazil_campeonato")
-    ap.add_argument("--regions", default="uk,eu,us,au")
+    ap.add_argument("--regions", default="uk,eu")
     ap.add_argument("--market", default="h2h")
-    ap.add_argument("--min-match", type=int, default=80)
+    ap.add_argument("--min-match", type=int, default=88)
     ap.add_argument("--allow-partial", action="store_true")
-    ap.add_argument("--dump-api", action="store_true")
-    ap.add_argument("--print-map", action="store_true")
     args=ap.parse_args()
 
     api_key=os.getenv("ODDS_API_KEY","").strip()
     if not api_key: raise RuntimeError("[ingest_odds] ODDS_API_KEY não definido.")
+
+    weights = load_weights()
 
     matches=read_matches(args.rodada, args.matches)
     regions=[r.strip() for r in args.regions.split(",") if r.strip()]
@@ -140,16 +142,8 @@ def main():
 
     base=Path(f"data/out/{args.rodada}")
     base.mkdir(parents=True, exist_ok=True)
-    if args.dump_api:
-        (base/"odds_api_raw.json").write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
     evs=parse_events(data)
-    if args.print_map:
-        print(f"[ingest_odds] API retornou {len(evs)} pares (home,away). Exemplos:")
-        for i,(k,v) in enumerate(evs.items()):
-            print("  -", k, "| bookies:", ",".join(sorted(v.keys())))
-            if i>=9: break
-
     mapping=match_with_fuzzy(matches, evs, args.min_match)
 
     rows=[]; missing=[]
@@ -161,7 +155,7 @@ def main():
         book_odds = evs.get((hh,aa),{})
         if not book_odds:
             missing.append(int(mid)); continue
-        p_home, p_draw, p_away, over, n = consensus(book_odds)
+        p_home, p_draw, p_away, over, n = consensus(book_odds, weights)
         odd_home = round(1.0/p_home, 4)
         odd_draw = round(1.0/p_draw, 4)
         odd_away = round(1.0/p_away, 4)
@@ -174,7 +168,7 @@ def main():
         })
 
     if missing and not args.allow_partial:
-        raise RuntimeError(f"[ingest_odds] Sem odds para match_id: {sorted(missing)} (use --allow-partial para prosseguir).")
+        raise RuntimeError(f"[ingest_odds] Sem odds para match_id: {sorted(missing)}")
 
     out = pd.DataFrame(rows)
     if out.empty:
