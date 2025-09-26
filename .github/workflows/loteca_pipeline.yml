@@ -29,21 +29,17 @@ jobs:
           pip install --upgrade pip
           pip install pandas requests rapidfuzz==3.9.7
 
-      # 1) GERA matches.csv a partir do matches_source.csv
-      - name: Ingest matches (gera data/out/<RODADA>/matches.csv)
+      # 1) Gera matches.csv a partir do seu matches_source.csv
+      - name: Ingest matches
         run: |
           python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
           test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
-          echo "Prévia matches.csv:" && head -n 5 "data/out/${LOTECA_RODADA}/matches.csv" || true
+          echo "Prévia matches.csv:" && head -n 10 "data/out/${LOTECA_RODADA}/matches.csv" || true
 
-      # 2) Coleta ODDS reais
-      - name: Ingest odds (TheOddsAPI - real)
-        env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      # 2) Coleta odds REAIS por liga e salva com nomes diferentes
+      - name: Ingest odds Brasil (Serie A)
+        env: { ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }} }
         run: |
-          if [ -z "${ODDS_API_KEY}" ]; then
-            echo "::error::ODDS_API_KEY não definido nos Secrets."; exit 2;
-          fi
           python scripts/ingest_odds.py \
             --rodada "${LOTECA_RODADA}" \
             --sport soccer_brazil_campeonato \
@@ -51,26 +47,68 @@ jobs:
             --market h2h \
             --min-match 80 \
             --allow-partial \
-            --dump-api \
-            --print-map
-          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente/vazio"; exit 2; }
+            --dump-api --print-map
+          mv "data/out/${LOTECA_RODADA}/odds.csv" "data/out/${LOTECA_RODADA}/odds_br.csv" || true
+
+      - name: Ingest odds Inglaterra (EPL)
+        env: { ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }} }
+        run: |
+          python scripts/ingest_odds.py \
+            --rodada "${LOTECA_RODADA}" \
+            --sport soccer_epl \
+            --regions uk,eu,us,au \
+            --market h2h \
+            --min-match 80 \
+            --allow-partial
+          mv "data/out/${LOTECA_RODADA}/odds.csv" "data/out/${LOTECA_RODADA}/odds_epl.csv" || true
+
+      - name: Ingest odds Espanha (La Liga)
+        env: { ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }} }
+        run: |
+          python scripts/ingest_odds.py \
+            --rodada "${LOTECA_RODADA}" \
+            --sport soccer_spain_la_liga \
+            --regions uk,eu,us,au \
+            --market h2h \
+            --min-match 80 \
+            --allow-partial
+          mv "data/out/${LOTECA_RODADA}/odds.csv" "data/out/${LOTECA_RODADA}/odds_esp.csv" || true
+
+      # 3) Mescla todas as odds em um único odds.csv
+      - name: Merge odds
+        run: |
+          python - << 'PY'
+          import pandas as pd, os, pathlib
+          base = pathlib.Path(f"data/out/{os.environ['LOTECA_RODADA']}")
+          dfs = []
+          for name in ["odds_br.csv","odds_epl.csv","odds_esp.csv"]:
+            p = base / name
+            if p.exists() and p.stat().st_size>0:
+              dfs.append(pd.read_csv(p))
+          if not dfs:
+            raise SystemExit("Nenhuma odds coletada.")
+          out = pd.concat(dfs, ignore_index=True)
+          # remove duplicatas por match_id (mantém a primeira)
+          out = out.drop_duplicates(subset=["match_id"], keep="first")
+          out.to_csv(base/"odds.csv", index=False)
+          print(f"Odds mescladas: {len(out)} linhas -> {base/'odds.csv'}")
+          PY
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente/vazio após merge"; exit 2; }
           echo "Prévia odds.csv:" && head -n 10 "data/out/${LOTECA_RODADA}/odds.csv" || true
 
-      # 3) Constrói features
+      # 4) Constrói features e 5) Join
       - name: Build features
         run: |
           python scripts/build_features.py --rodada "${LOTECA_RODADA}"
           test -s "data/out/${LOTECA_RODADA}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
-          echo "Prévia features.csv:" && head -n 5 "data/out/${LOTECA_RODADA}/features.csv" || true
+          head -n 5 "data/out/${LOTECA_RODADA}/features.csv" || true
 
-      # 4) Junta tudo
       - name: Join features
         run: |
           python scripts/join_features.py --rodada "${LOTECA_RODADA}"
           test -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
-          echo "Prévia joined.csv:" && head -n 5 "data/out/${LOTECA_RODADA}/joined.csv" || true
+          head -n 5 "data/out/${LOTECA_RODADA}/joined.csv" || true
 
-      # 5) Publica artefato
       - name: Upload joined
         uses: actions/upload-artifact@v4
         with:
