@@ -1,0 +1,9 @@
+# config/bookmaker_weights.yaml
+# ajuste os pesos como quiser; 1.0 = neutro
+pinnacle: 2.0
+betfair: 1.8
+betano: 1.8
+bet365: 1.2
+williamhill: 1.1
+unibet: 1.0
+betway: 1.0
