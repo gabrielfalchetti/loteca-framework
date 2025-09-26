@@ -7,17 +7,13 @@ on:
         description: "Identificador da rodada (ex.: 2025-09-20_21)"
         required: true
         type: string
-  push:
-    branches: ["main"]
-    paths:
-      - "scripts/**"
-      - ".github/workflows/loteca_pipeline.yml"
 
 jobs:
   build-loteca:
     runs-on: ubuntu-latest
     env:
       LOTECA_RODADA: ${{ inputs.rodada }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
 
     steps:
       - name: Checkout
@@ -30,36 +26,38 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install pandas
+          pip install --upgrade pip
+          pip install -r requirements.txt || pip install pandas requests rapidfuzz==3.9.7
 
       - name: Ingest matches
         run: |
           python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente ou vazio"; exit 2; }
-          wc -l "data/out/${LOTECA_RODADA}/matches.csv" || true
+          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
           head -n 3 "data/out/${LOTECA_RODADA}/matches.csv" || true
 
-      - name: Ingest odds
+      - name: Ingest odds (TheOddsAPI - real)
         run: |
-          python scripts/ingest_odds.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente ou vazio"; exit 2; }
-          wc -l "data/out/${LOTECA_RODADA}/odds.csv" || true
+          if [ -z "${ODDS_API_KEY}" ]; then
+            echo "::error::ODDS_API_KEY não definido nos Secrets."; exit 2;
+          fi
+          python scripts/ingest_odds.py \
+            --rodada "${LOTECA_RODADA}" \
+            --sport soccer_brazil_campeonato \
+            --regions uk,eu \
+            --market h2h
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente/vazio"; exit 2; }
           head -n 3 "data/out/${LOTECA_RODADA}/odds.csv" || true
 
       - name: Build features
         run: |
           python scripts/build_features.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/features.csv" || { echo "::error::features.csv ausente ou vazio"; exit 2; }
-          wc -l "data/out/${LOTECA_RODADA}/features.csv" || true
+          test -s "data/out/${LOTECA_RODADA}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
           head -n 3 "data/out/${LOTECA_RODADA}/features.csv" || true
 
       - name: Join features
         run: |
-          # Ative soft-mode se quiser que NÃO QUEBRE quando matches estiver vazio:
-          # export JOIN_SOFT=1
           python scripts/join_features.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::joined.csv ausente ou vazio"; exit 2; }
-          wc -l "data/out/${LOTECA_RODADA}/joined.csv" || true
+          test -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
           head -n 3 "data/out/${LOTECA_RODADA}/joined.csv" || true
 
       - name: Upload joined
