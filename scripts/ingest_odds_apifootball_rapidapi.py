@@ -151,24 +151,24 @@ def fetch_odds_fixture(fid: int, debug=False) -> Dict[str, Tuple[float,float,flo
                             try: return float(labels[k])
                             except: pass
                     return None
-                oh = price(["Home","1"]); od = price(["Draw","X"]); oa = price(["Away","2"])
-                if oh and od and oa:
-                    out[bname]=(oh,od,oa); cnt+=1
+                oh = price(["Home","1"]); o_draw = price(["Draw","X"]); oa = price(["Away","2"])
+                if oh and o_draw and oa:
+                    out[bname]=(oh,o_draw,oa); cnt+=1
     if debug:
         print(f"[apifootball][odds] fixture={fid} bookies={len(out)} markets_found={cnt}")
     return out
 
-def devig(oh: float, od: float, oa: float) -> Tuple[float,float,float,float]:
-    ph,pd,pa = 1/oh, 1/od, 1/oa
-    s = ph+pd+pa
-    if s<=0: return ph,pd,pa,s
-    return ph/s, pd/s, pa/s, s
+def devig(oh: float, o_draw: float, oa: float) -> Tuple[float,float,float,float]:
+    p_home, p_draw, p_away = 1/oh, 1/o_draw, 1/oa
+    s = p_home + p_draw + p_away
+    if s<=0: return p_home, p_draw, p_away, s
+    return p_home/s, p_draw/s, p_away/s, s
 
 def consensus(book_odds: Dict[str,Tuple[float,float,float]]):
     probs=[]; overs=[]
-    for _,(oh,od,oa) in book_odds.items():
-        ph,pd,pa,over = devig(oh,od,oa)
-        probs.append((ph,pd,pa)); overs.append(over)
+    for _,(oh,o_draw,oa) in book_odds.items():
+        p_home, p_draw, p_away, over = devig(oh,o_draw,oa)
+        probs.append((p_home, p_draw, p_away)); overs.append(over)
     p = np.mean(np.array(probs), axis=0)
     providers = ",".join(sorted(book_odds.keys()))
     return float(p[0]), float(p[1]), float(p[2]), float(np.mean(overs)), len(book_odds), providers
@@ -227,12 +227,12 @@ def main():
             if args.debug: print(f"[apifootball][miss] sem odds fixture={fid} (mid={mid})")
             continue
 
-        ph,pd,pa,over,n,prov = consensus(book)
+        p_home, p_draw, p_away, over, n, prov = consensus(book)
         rows.append({
             "match_id": mid,
-            "odd_home": round(1.0/max(ph,1e-9), 4),
-            "odd_draw": round(1.0/max(pd,1e-9), 4),
-            "odd_away": round(1.0/max(pa,1e-9), 4),
+            "odd_home": round(1.0/max(p_home,1e-9), 4),
+            "odd_draw": round(1.0/max(p_draw,1e-9), 4),
+            "odd_away": round(1.0/max(p_away,1e-9), 4),
             "n_bookmakers": n,
             "overround_mean": round(over, 4),
             "providers": prov
