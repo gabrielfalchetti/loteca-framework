@@ -1,6 +1,7 @@
 # scripts/ingest_odds.py
 # Odds reais via TheOddsAPI. Gera data/out/<RODADA>/odds.csv
-# Precisa do secret ODDS_API_KEY no GitHub (Settings → Secrets → Actions).
+# Requer secret ODDS_API_KEY no GitHub (Settings → Secrets → Actions).
+# Flags úteis no CI: --allow-partial --dump-api --print-map
 
 from __future__ import annotations
 import argparse, os, json
@@ -18,8 +19,11 @@ def norm_team(s: str) -> str:
     if not isinstance(s, str):
         s = "" if s is None else str(s)
     s = s.lower().strip()
-    for a,b in [(" futebol clube",""),(" futebol",""),(" clube",""),(" club",""),
-                (" fc",""),(" afc",""),(" sc",""),(" ac",""),(" de futebol",""),("  "," ")]:
+    for a,b in [
+        (" futebol clube",""),(" futebol",""),(" clube",""),(" club",""),
+        (" fc",""),(" afc",""),(" sc",""),(" ac",""),(" de futebol",""),
+        ("  "," ")
+    ]:
         s = s.replace(a,b)
     return s
 
@@ -42,7 +46,8 @@ def read_matches(rodada: str, matches_path: Optional[str]=None) -> pd.DataFrame:
 
 def fetch_api(sport: str, regions: List[str], market: str, api_key: str) -> List[dict]:
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
-    params = {"apiKey": api_key, "regions": ",".join(regions), "markets": market, "oddsFormat": "decimal", "dateFormat": "iso"}
+    params = {"apiKey": api_key, "regions": ",".join(regions), "markets": market,
+              "oddsFormat": "decimal", "dateFormat": "iso"}
     r = requests.get(url, params=params, timeout=30)
     if r.status_code!=200:
         raise RuntimeError(f"[ingest_odds] TheOddsAPI HTTP {r.status_code}: {r.text[:250]}")
@@ -97,7 +102,9 @@ def consensus(book_odds: Dict[str,Tuple[float,float,float]]):
     p=np.sum(probs*wts,axis=0)/np.sum(wts)
     return float(p[0]),float(p[1]),float(p[2]), float(np.mean(overs)), len(book_odds)
 
-def match_with_fuzzy(matches: pd.DataFrame, evs: Dict[Tuple[str,str],Dict[str,Tuple[float,float,float]]], min_ratio:int):
+def match_with_fuzzy(matches: pd.DataFrame,
+                     evs: Dict[Tuple[str,str],Dict[str,Tuple[float,float,float]]],
+                     min_ratio:int):
     api_keys=list(evs.keys()); out={}
     for _,r in matches.iterrows():
         mid=r["match_id"]; h=norm_team(r["home"]); a=norm_team(r["away"])
@@ -155,8 +162,12 @@ def main():
         ph,pd,pa,over,n = consensus(book_odds)
         oh,od,oa = round(1.0/ph,4), round(1.0/pd,4), round(1.0/pa,4)
         providers = ",".join(sorted(book_odds.keys()))
-        rows.append({"match_id":mid,"odd_home":oh,"odd_draw":od,"odd_away":oa,
-                     "n_bookmakers":n,"overround_mean":round(over,4),"providers":providers})
+        rows.append({
+            "match_id":mid,
+            "odd_home":oh,"odd_draw":od,"odd_away":oa,
+            "n_bookmakers":n,"overround_mean":round(over,4),
+            "providers":providers
+        })
 
     if missing and not args.allow_partial:
         raise RuntimeError(f"[ingest_odds] Sem odds para match_id: {sorted(missing)} (use --allow-partial para prosseguir).")
