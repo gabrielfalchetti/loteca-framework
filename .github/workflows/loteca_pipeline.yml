@@ -24,10 +24,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pandas requests rapidfuzz==3.9.7
+          pip install pandas requests rapidfuzz==3.9.7 PyYAML==6.0.2
+
 
       # 1) Gera matches.csv a partir do seu matches_source.csv
       - name: Ingest matches
