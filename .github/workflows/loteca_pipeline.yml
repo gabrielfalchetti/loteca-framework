@@ -1,67 +1,19 @@
-name: Loteca Pipeline
+- name: Ingest odds (TheOddsAPI - real)
+  run: |
+    if [ -z "${ODDS_API_KEY}" ]; then
+      echo "::error::ODDS_API_KEY não definido nos Secrets."; exit 2;
+    fi
 
-on:
-  workflow_dispatch:
-    inputs:
-      rodada:
-        description: "Identificador da rodada (ex.: 2025-09-20_21)"
-        required: true
-        type: string
+    # 1ª rodada de teste: regiões amplas, matching mais flexível e debug ligado
+    python scripts/ingest_odds.py \
+      --rodada "${LOTECA_RODADA}" \
+      --sport soccer_brazil_campeonato \
+      --regions uk,eu,us,au \
+      --market h2h \
+      --min-match 80 \
+      --allow-partial \
+      --dump-api \
+      --print-map
 
-jobs:
-  build-loteca:
-    runs-on: ubuntu-latest
-    env:
-      LOTECA_RODADA: ${{ inputs.rodada }}
-      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt || pip install pandas requests rapidfuzz==3.9.7
-
-      - name: Ingest matches
-        run: |
-          python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
-          head -n 3 "data/out/${LOTECA_RODADA}/matches.csv" || true
-
-      - name: Ingest odds (TheOddsAPI - real)
-        run: |
-          if [ -z "${ODDS_API_KEY}" ]; then
-            echo "::error::ODDS_API_KEY não definido nos Secrets."; exit 2;
-          fi
-          python scripts/ingest_odds.py \
-            --rodada "${LOTECA_RODADA}" \
-            --sport soccer_brazil_campeonato \
-            --regions uk,eu \
-            --market h2h
-          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente/vazio"; exit 2; }
-          head -n 3 "data/out/${LOTECA_RODADA}/odds.csv" || true
-
-      - name: Build features
-        run: |
-          python scripts/build_features.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
-          head -n 3 "data/out/${LOTECA_RODADA}/features.csv" || true
-
-      - name: Join features
-        run: |
-          python scripts/join_features.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
-          head -n 3 "data/out/${LOTECA_RODADA}/joined.csv" || true
-
-      - name: Upload joined
-        uses: actions/upload-artifact@v4
-        with:
-          name: joined-${{ env.LOTECA_RODADA }}
-          path: data/out/${{ env.LOTECA_RODADA }}/joined.csv
+    test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente/vazio"; exit 2; }
+    head -n 10 "data/out/${LOTECA_RODADA}/odds.csv" || true
