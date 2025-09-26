@@ -1,13 +1,13 @@
 # scripts/ingest_odds_apifootball_rapidapi.py
 from __future__ import annotations
-import argparse, os, sys, json
+import argparse, os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
 import pandas as pd
 import numpy as np
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 
 API_HOST = "api-football-v1.p.rapidapi.com"
 API_BASE = f"https://{API_HOST}/v3"
@@ -45,8 +45,7 @@ def norm_team(s: str) -> str:
 # ---------- Busca de time por nome ----------
 def find_team_id(name: str, country_hint: Optional[str]=None) -> Tuple[int,str]:
     """Procura ID do time por nome (fuzzy). Retorna (team_id, nome_oficial)."""
-    q = name.strip()
-    data = _get("/teams", {"search": q})
+    data = _get("/teams", {"search": name.strip()})
     res = data.get("response", [])
     if not res:
         raise RuntimeError(f"[apifootball] time não encontrado: {name}")
@@ -56,8 +55,7 @@ def find_team_id(name: str, country_hint: Optional[str]=None) -> Tuple[int,str]:
         tname = it["team"]["name"]
         country = it.get("team", {}).get("country") or it.get("country")
         score = fuzz.token_set_ratio(norm_team(name), norm_team(tname))
-        # leve bônus se o país coincide com hint
-        if country_hint and country and country_hint.lower() in country.lower():
+        if country_hint and country and country_hint.lower() in str(country).lower():
             score += 3
         choices.append((score, it["team"]["id"], tname, country))
     choices.sort(key=lambda x: x[0], reverse=True)
@@ -67,7 +65,6 @@ def find_team_id(name: str, country_hint: Optional[str]=None) -> Tuple[int,str]:
 # ---------- Localiza fixture do dia (pelo time) ----------
 def find_fixture_id_for_match(date_iso: str, home_id: int, away_id: int, season_year: int) -> Optional[int]:
     """Procura fixture na data: filtramos fixtures do mandante e conferimos o adversário."""
-    # pega jogos do mandante no dia
     data = _get("/fixtures", {"date": date_iso, "team": home_id, "season": season_year})
     for it in data.get("response", []):
         teams = it.get("teams", {})
@@ -80,17 +77,14 @@ def find_fixture_id_for_match(date_iso: str, home_id: int, away_id: int, season_
 # ---------- Odds por fixture ----------
 def fetch_odds_fixture(fixture_id: int) -> Dict[str, Tuple[float,float,float]]:
     """Retorna dict bookmaker -> (odd_home, odd_draw, odd_away) para 1X2."""
-    out = {}
+    out: Dict[str, Tuple[float,float,float]] = {}
     data = _get("/odds", {"fixture": fixture_id})
     for it in data.get("response", []):
-        bk = it.get("bookmakers", [])
-        for b in bk:
+        for b in it.get("bookmakers", []):
             bname = (b.get("name") or b.get("id") or "").lower()
             for mv in b.get("bets", []):
-                # 1X2 market costuma ter bet 'Match Winner' ou id 1/2 — filtramos por 3 outcomes 1/X/2
                 outcomes = mv.get("values", [])
                 labels = { (v.get("value") or "").strip(): v.get("odd") for v in outcomes }
-                # Aceita "Home"/"Draw"/"Away" ou "1"/"X"/"2"
                 def _get_price(keys):
                     for k in keys:
                         if k in labels:
@@ -98,26 +92,26 @@ def fetch_odds_fixture(fixture_id: int) -> Dict[str, Tuple[float,float,float]]:
                             except: pass
                     return None
                 oh = _get_price(["Home","1"])
-                od = _get_price(["Draw","X"])
+                o_draw = _get_price(["Draw","X"])
                 oa = _get_price(["Away","2"])
-                if oh and od and oa:
-                    out[bname] = (oh, od, oa)
+                if oh and o_draw and oa:
+                    out[bname] = (oh, o_draw, oa)
     return out
 
 # ---------- Probabilidades (desvigoramento simples) ----------
-def devig(oh: float, od: float, oa: float) -> Tuple[float,float,float,float]:
-    ph,pd,pa = 1/oh, 1/od, 1/oa
-    s = ph+pd+pa
-    if s<=0: return ph,pd,pa,s
-    return ph/s, pd/s, pa/s, s
+def devig(oh: float, o_draw: float, oa: float) -> Tuple[float,float,float,float]:
+    p_home, p_draw, p_away = 1/oh, 1/o_draw, 1/oa
+    s = p_home + p_draw + p_away
+    if s<=0: return p_home, p_draw, p_away, s
+    return p_home/s, p_draw/s, p_away/s, s
 
 def consensus(book_odds: Dict[str,Tuple[float,float,float]]) -> Tuple[float,float,float,float,int,str]:
     if not book_odds:
         raise ValueError("sem bookmakers")
     probs=[]; overs=[]
-    for bk,(oh,od,oa) in book_odds.items():
-        ph,pd,pa,over = devig(oh,od,oa)
-        probs.append((ph,pd,pa)); overs.append(over)
+    for _,(oh,o_draw,oa) in book_odds.items():
+        p_home, p_draw, p_away, over = devig(oh, o_draw, oa)
+        probs.append((p_home, p_draw, p_away)); overs.append(over)
     p = np.mean(np.array(probs), axis=0)
     providers = ",".join(sorted(book_odds.keys()))
     return float(p[0]), float(p[1]), float(p[2]), float(np.mean(overs)), len(book_odds), providers
@@ -145,6 +139,7 @@ def main():
     if not matches_path.exists() or matches_path.stat().st_size == 0:
         raise RuntimeError(f"[apifootball] matches.csv ausente/vazio: {matches_path}")
 
+    # >>> AQUI usamos pandas normalmente (sem variável local 'pd')
     matches = pd.read_csv(matches_path)
     matches = matches.rename(columns=str.lower)
     for col in ("match_id","home","away"):
@@ -159,7 +154,7 @@ def main():
         try:
             hid, hname = find_team_id(home_name, country_hint=args.country_hint or None)
             aid, aname = find_team_id(away_name, country_hint=args.country_hint or None)
-        except Exception as e:
+        except Exception:
             missing.append(mid); continue
 
         fix_id = find_fixture_id_for_match(date_iso, hid, aid, season_year)
@@ -170,12 +165,12 @@ def main():
         if not book:
             missing.append(mid); continue
 
-        ph,pd,pa,over,n,prov = consensus(book)
+        p_home, p_draw, p_away, over, n, prov = consensus(book)
         row = {
             "match_id": mid,
-            "odd_home": round(1.0/max(ph,1e-9), 4),
-            "odd_draw": round(1.0/max(pd,1e-9), 4),
-            "odd_away": round(1.0/max(pa,1e-9), 4),
+            "odd_home": round(1.0/max(p_home,1e-9), 4),
+            "odd_draw": round(1.0/max(p_draw,1e-9), 4),
+            "odd_away": round(1.0/max(p_away,1e-9), 4),
             "n_bookmakers": n,
             "overround_mean": round(over, 4),
             "providers": prov
@@ -187,9 +182,9 @@ def main():
     if not rows and missing:
         raise RuntimeError("[apifootball] Nenhuma odd coletada.")
 
-    df = pd.DataFrame(rows)
-    df.to_csv(out_path, index=False)
-    print(f"[apifootball] OK: {len(df)} linhas -> {out_path}")
+    df_out = pd.DataFrame(rows)
+    df_out.to_csv(out_path, index=False)
+    print(f"[apifootball] OK: {len(df_out)} linhas -> {out_path}")
     if missing:
         print(f"[apifootball] Aviso: {len(missing)} jogos sem odds (ids={sorted(missing)})")
 
