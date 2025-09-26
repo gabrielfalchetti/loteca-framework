@@ -70,7 +70,13 @@ jobs:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         run: |
           if [ -n "${RAPIDAPI_KEY}" ]; then
-            python scripts/ingest_odds_apifootball_rapidapi.py --rodada "${{ env.LOTECA_RODADA }}" --allow-partial --country-hint "Brazil"
+            python scripts/ingest_odds_apifootball_rapidapi.py \
+              --rodada "${{ env.LOTECA_RODADA }}" \
+              --allow-partial \
+              --country-hint "Brazil" \
+              --days-window 2 \
+              --min-match 85 \
+              --debug
           else
             echo "RAPIDAPI_KEY não definido; pulando passo API-Football."
           fi
