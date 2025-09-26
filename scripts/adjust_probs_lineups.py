@@ -162,8 +162,9 @@ def main():
         oh, od, oa = r["odd_home"], r["odd_draw"], r["odd_away"]
 
         if pd.isna(oh) or pd.isna(od) or pd.isna(oa):
-            rows.append({**r, "p_home": "", "p_draw": "", "p_away": "",
-                         "inj_home": "", "inj_away": "", "source_adjust": "none"})
+            # >>> CORREÇÃO: usar np.nan (numérico), não string vazia
+            rows.append({**r, "p_home": np.nan, "p_draw": np.nan, "p_away": np.nan,
+                         "inj_home": np.nan, "inj_away": np.nan, "source_adjust": "none"})
             continue
 
         p = _probs_from_odds(float(oh), float(od), float(oa))
@@ -173,12 +174,12 @@ def main():
                                    min_match=args.min_match)
             if not fid:
                 rows.append({**r, "p_home": p[0], "p_draw": p[1], "p_away": p[2],
-                             "inj_home": "", "inj_away": "", "source_adjust": "none"})
+                             "inj_home": np.nan, "inj_away": np.nan, "source_adjust": "none"})
                 continue
             fx = _get("/fixtures", {"id": fid}).get("response", [])
             if not fx:
                 rows.append({**r, "p_home": p[0], "p_draw": p[1], "p_away": p[2],
-                             "inj_home": "", "inj_away": "", "source_adjust": "none"})
+                             "inj_home": np.nan, "inj_away": np.nan, "source_adjust": "none"})
                 continue
             t_home = fx[0].get("teams",{}).get("home",{}).get("id")
             t_away = fx[0].get("teams",{}).get("away",{}).get("id")
@@ -187,17 +188,27 @@ def main():
             p_adj = _apply_injury_adjust(p, inj_h, inj_a, alpha=args.alpha)
             rows.append({**r,
                          "p_home": p_adj[0], "p_draw": p_adj[1], "p_away": p_adj[2],
-                         "inj_home": inj_h, "inj_away": inj_a, "source_adjust": "injuries"})
+                         "inj_home": float(inj_h), "inj_away": float(inj_a), "source_adjust": "injuries"})
         except Exception:
             rows.append({**r, "p_home": p[0], "p_draw": p[1], "p_away": p[2],
-                         "inj_home": "", "inj_away": "", "source_adjust": "none"})
+                         "inj_home": np.nan, "inj_away": np.nan, "source_adjust": "none"})
 
     out = pd.DataFrame(rows)
 
+    # >>> CORREÇÃO: garantir que p_* são numéricos
+    for col in ["p_home","p_draw","p_away","inj_home","inj_away"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
     # recalcula odds coerentes a partir das p ajustadas (se existirem)
-    def inv(p): return np.where(p>1e-9, 1.0/p, np.nan)
-    mask = out[["p_home","p_draw","p_away"]].notna().all(axis=1)
-    out.loc[mask, ["odd_home","odd_draw","odd_away"]] = inv(out.loc[mask, ["p_home","p_draw","p_away"]].values)
+    def inv(arr: np.ndarray) -> np.ndarray:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            res = 1.0 / np.where(arr > 1e-9, arr, np.nan)
+        return res
+
+    # máscara apenas onde TODAS as p_* existem e são numéricas
+    pnum = out[["p_home","p_draw","p_away"]].apply(pd.to_numeric, errors="coerce")
+    mask = pnum.notna().all(axis=1)
+    out.loc[mask, ["odd_home","odd_draw","odd_away"]] = inv(pnum[mask].values)
 
     out.to_csv(out_path, index=False)
     print(f"[adjust] joined_enriched.csv salvo em {out_path}")
