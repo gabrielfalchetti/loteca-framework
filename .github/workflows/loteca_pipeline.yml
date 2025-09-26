@@ -1,12 +1,12 @@
-name: Loteca Pipeline (MULTI-LIGAS)
+name: Loteca Pipeline (MULTI-LIGAS + CARTÃO)
 
 on:
   workflow_dispatch:
     inputs:
       rodada:
-        description: "Identificador da rodada (ex.: 2025-09-20_21)"
+        description: "Identificador da rodada (ex.: 2025-10-05_14)"
         required: true
-        default: "2025-09-20_21"
+        default: "2025-10-05_14"
 
 jobs:
   build-loteca:
@@ -29,14 +29,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas requests rapidfuzz==3.9.7 PyYAML==6.0.2
 
-      # Gera matches.csv a partir do matches_source.csv
+      # 1) Gera matches.csv a partir do seu matches_source.csv
       - name: Ingest matches
         run: |
           python scripts/ingest_matches.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
 
-      # ---- ODDS POR LIGA ----
-      # Brasil Série A
+      # 2) ODDS REAIS por liga (ajuste/duplique blocos se usar outras ligas)
+      # Brasil (Série A). Mantemos --allow-partial se houver jogos fora da cobertura (ex.: copas).
       - name: Ingest odds Brasil (Série A)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
@@ -65,7 +65,7 @@ jobs:
             --min-match 88 --allow-partial
           mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_esp.csv" || true
 
-      # ---- MERGE DAS ODDS ----
+      # 3) Merge das odds em um único arquivo (dedup por match_id)
       - name: Merge odds
         run: |
           set -e
@@ -88,20 +88,33 @@ jobs:
           awk -F, 'NR>1 && !seen[$1]++ { print }' "${OUT}" >> "${TMP}"
           mv "${TMP}" "${OUT}"
 
-      # Features
+      # 4) Features
       - name: Build features
         run: |
           python scripts/build_features.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
 
-      # Join final
+      # 5) Join final
       - name: Join features
         run: |
           python scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
 
+      # 6) Planejar aposta (até 4 duplos e 2 triplos) -> gera cartao.csv
+      - name: Plan bet (cartão Loteca)
+        run: |
+          python scripts/plan_bet.py --rodada "${{ env.LOTECA_RODADA }}" --max-duplos 4 --max-triplos 2
+          test -s "data/out/${{ env.LOTECA_RODADA }}/cartao.csv" || { echo "::error::cartao.csv não gerado"; exit 2; }
+
+      # 7) Publica artefatos finais
       - name: Upload joined
         uses: actions/upload-artifact@v4
         with:
           name: joined-${{ env.LOTECA_RODADA }}
           path: data/out/${{ env.LOTECA_RODADA }}/joined.csv
+
+      - name: Upload cartao
+        uses: actions/upload-artifact@v4
+        with:
+          name: cartao-${{ env.LOTECA_RODADA }}
+          path: data/out/${{ env.LOTECA_RODADA }}/cartao.csv
