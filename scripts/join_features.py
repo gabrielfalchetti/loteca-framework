@@ -1,7 +1,4 @@
 # scripts/join_features.py
-# Junta matches + odds + features, tolerando CSVs vazios para odds/features,
-# mas EXIGE matches com dados (regra mínima saudável).
-
 from __future__ import annotations
 import argparse, os
 from pathlib import Path
@@ -21,11 +18,11 @@ def padroniza(df: pd.DataFrame) -> pd.DataFrame:
         return df
     df = df.rename(columns={c: c.lower() for c in df.columns})
     maps = {
-        "mandante": "home", "visitante": "away",
-        "time_casa": "home", "time_fora": "away",
-        "casa": "home", "fora": "away",
-        "home_team": "home", "away_team": "away",
-        "data_jogo": "date", "data": "date", "matchdate": "date",
+        "mandante":"home","visitante":"away",
+        "time_casa":"home","time_fora":"away",
+        "casa":"home","fora":"away",
+        "home_team":"home","away_team":"away",
+        "data_jogo":"date","data":"date","matchdate":"date",
         "id":"match_id"
     }
     df = df.rename(columns={k:v for k,v in maps.items() if k in df.columns})
@@ -54,12 +51,11 @@ def main():
     ap.add_argument("--odds", default=None)
     ap.add_argument("--features", default=None)
     ap.add_argument("--out", default=None)
-    ap.add_argument("--soft", action="store_true", help="Modo suave (não falha se matches vazio; gera joined vazio).")
+    ap.add_argument("--soft", action="store_true")
     args = ap.parse_args()
 
     base = Path(f"data/out/{args.rodada}")
     base.mkdir(parents=True, exist_ok=True)
-
     matches_path  = Path(args.matches)  if args.matches  else base / "matches.csv"
     odds_path     = Path(args.odds)     if args.odds     else base / "odds.csv"
     features_path = Path(args.features) if args.features else base / "features.csv"
@@ -72,7 +68,7 @@ def main():
     if m.empty:
         msg = f"[join_features] matches vazio/ausente: {matches_path}"
         if args.soft or os.getenv("JOIN_SOFT","0") == "1":
-            print(msg + " (soft-mode ON: gerando joined vazio e finalizando OK)")
+            print(msg + " (soft-mode: criando joined vazio)")
             out_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame().to_csv(out_path, index=False)
             return
@@ -98,16 +94,12 @@ def main():
             if common:
                 df = df.merge(f, on=common, how="left", suffixes=("", "_feat"))
             else:
-                raise RuntimeError(
-                    "[join_features] Sem chaves para juntar features. "
-                    "Garanta 'match_id' ou ('home','away'[, 'date'])."
-                )
+                raise RuntimeError("Sem chaves para juntar features (precisa 'match_id' ou 'home/away[/date]').")
 
     if df.empty:
-        raise RuntimeError("[join_features] Resultado final vazio; verifique entradas.")
+        raise RuntimeError("joined vazio; verifique entradas.")
     df.to_csv(out_path, index=False)
-    print(f"[join_features] OK: {len(df)} linhas -> {out_path}")
-    print(f"[join_features] Origens: matches={len(m)} | odds={len(o)} | features={len(f)}")
+    print(f"[join_features] OK: {len(df)} -> {out_path}")
 
 if __name__ == "__main__":
     main()
