@@ -1,0 +1,12 @@
+# config/team_aliases.yaml
+# esquerda = como você escreve; direita = como a API-Football costuma retornar
+athletico paranaense: Athletico-PR
+operario pr: Operario
+atletico mineiro: Atletico-MG
+gremio: Gremio
+vitoria: Vitoria
+sport recife: Sport Recife
+vasco da gama: Vasco DA Gama
+newcastle united: Newcastle
+bragantino: RB Bragantino
+real sociedad: Real Sociedad
