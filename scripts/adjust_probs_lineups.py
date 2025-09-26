@@ -7,7 +7,7 @@
 from __future__ import annotations
 import argparse, os
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 from datetime import date, timedelta
 
 import requests
