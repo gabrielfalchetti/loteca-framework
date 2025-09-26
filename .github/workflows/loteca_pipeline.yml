@@ -1,92 +1,64 @@
 name: Loteca Pipeline (PROD)
-
 on:
   workflow_dispatch:
     inputs:
       rodada:
         description: "Identificador da rodada (ex.: 2025-09-20_21)"
         required: true
-        type: string
-
+        default: "2025-09-20_21"
 jobs:
   build-loteca:
     runs-on: ubuntu-latest
     env:
-      LOTECA_RODADA: ${{ inputs.rodada }}
+      LOTECA_RODADA: ${{ github.event.inputs.rodada }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-       - name: Install dependencies
+      - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install pandas requests rapidfuzz==3.9.7 PyYAML==6.0.2
-
-
-      # 1) Gera matches.csv a partir do seu matches_source.csv
       - name: Ingest matches
         run: |
-          python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
-
-      # 2) Coleta odds REAIS por liga (Brasil, EPL, La Liga) e salva separado
+          python scripts/ingest_matches.py --rodada "${{ env.LOTECA_RODADA }}"
+          test -s "data/out/${{ env.LOTECA_RODADA }}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
       - name: Ingest odds Brasil (Serie A)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
-          python scripts/ingest_odds.py \
-            --rodada "${LOTECA_RODADA}" \
-            --sport soccer_brazil_campeonato \
-            --regions uk,eu \
-            --market h2h \
-            --min-match 88
-          mv "data/out/${LOTECA_RODADA}/odds.csv" "data/out/${LOTECA_RODADA}/odds_br.csv"
-
+          python scripts/ingest_odds.py --rodada "${{ env.LOTECA_RODADA }}" --sport soccer_brazil_campeonato --regions uk,eu --market h2h --min-match 88
+          mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_br.csv"
       - name: Ingest odds Inglaterra (EPL)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
-          python scripts/ingest_odds.py \
-            --rodada "${LOTECA_RODADA}" \
-            --sport soccer_epl \
-            --regions uk,eu \
-            --market h2h \
-            --min-match 88
-          mv "data/out/${LOTECA_RODADA}/odds.csv" "data/out/${LOTECA_RODADA}/odds_epl.csv"
-
+          python scripts/ingest_odds.py --rodada "${{ env.LOTECA_RODADA }}" --sport soccer_epl --regions uk,eu --market h2h --min-match 88
+          mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_epl.csv"
       - name: Ingest odds Espanha (La Liga)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
-          python scripts/ingest_odds.py \
-            --rodada "${LOTECA_RODADA}" \
-            --sport soccer_spain_la_liga \
-            --regions uk,eu \
-            --market h2h \
-            --min-match 88
-          mv "data/out/${LOTECA_RODADA}/odds.csv" "data/out/${LOTECA_RODADA}/odds_esp.csv"
-
-      # 3) Merge das odds em um único odds.csv (dedup por match_id)
+          python scripts/ingest_odds.py --rodada "${{ env.LOTECA_RODADA }}" --sport soccer_spain_la_liga --regions uk,eu --market h2h --min-match 88
+          mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_esp.csv"
       - name: Merge odds
         run: |
           set -e
-          BASE="data/out/${LOTECA_RODADA}"
+          BASE="data/out/${{ env.LOTECA_RODADA }}"
           OUT="${BASE}/odds.csv"
           TMP="${BASE}/odds_tmp.csv"
           : > "${OUT}"
           for f in "${BASE}/odds_br.csv" "${BASE}/odds_epl.csv" "${BASE}/odds_esp.csv"; do
-            test -s "$f" || continue
-            if [ ! -s "${OUT}" ]; then
-              cp "$f" "${OUT}"
-            else
-              tail -n +2 "$f" >> "${OUT}"
+            if [ -s "$f" ]; then
+              if [ ! -s "${OUT}" ]; then
+                cp "$f" "${OUT}"
+              else
+                tail -n +2 "$f" >> "${OUT}"
+              fi
             fi
           done
           test -s "${OUT}" || { echo "::error::Nenhuma odds coletada"; exit 2; }
@@ -94,19 +66,14 @@ jobs:
           echo "${HEADER}" > "${TMP}"
           awk -F, 'NR>1 && !seen[$1]++ { print }' "${OUT}" >> "${TMP}"
           mv "${TMP}" "${OUT}"
-
-      # 4) Features
       - name: Build features
         run: |
-          python scripts/build_features.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
-
-      # 5) Join
+          python scripts/build_features.py --rodada "${{ env.LOTECA_RODADA }}"
+          test -s "data/out/${{ env.LOTECA_RODADA }}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
       - name: Join features
         run: |
-          python scripts/join_features.py --rodada "${LOTECA_RODADA}"
-          test -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
-
+          python scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
+          test -s "data/out/${{ env.LOTECA_RODADA }}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
       - name: Upload joined
         uses: actions/upload-artifact@v4
         with:
