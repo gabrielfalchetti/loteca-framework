@@ -1,7 +1,7 @@
 # scripts/merge_odds_consensus.py
 # Consenso de odds com devig Shin + pesos, com FALLBACKS robustos:
-# - Se existir odds_*.csv -> usa todos; se não, usa data/out/<rodada>/odds.csv
-# - Se faltar colunas home/away, completa a partir de data/out/<rodada>/matches.csv via match_id
+# - Usa odds_*.csv quando houver; senão usa data/out/<rodada>/odds.csv
+# - Completa home/away via matches.csv quando faltar
 # - Se Shin falhar em alguma linha, usa inverso das odds
 from __future__ import annotations
 import argparse, glob
@@ -11,24 +11,15 @@ import pandas as pd
 
 # ----------------- Shin devig -----------------
 def shin_devig(odds):
-    """
-    odds: array-like (oh, od, oa) > 1.0
-    Retorna probabilidades devigadas via método de Shin (aprox. bisseção em z).
-    """
     o = np.array(odds, dtype=float)
     if np.any(~np.isfinite(o)) or np.any(o <= 1.0):
         return np.full(3, np.nan)
     iv = 1.0 / o
-
     def p_of(z):
         if z <= 0:
-            p = iv / iv.sum()
-            return p
+            return iv / iv.sum()
         root = np.sqrt(iv*iv + 4.0*z*iv)
-        p = (root - iv) / (2.0*z)
-        return p
-
-    # encontra intervalo simples para bisseção
+        return (root - iv) / (2.0*z)
     z_lo, z_hi = 0.0, 1.0
     for _ in range(40):
         p_hi = p_of(z_hi)
@@ -36,22 +27,17 @@ def shin_devig(odds):
             z_hi *= 0.5
         else:
             break
-
     target = 1.0
     for _ in range(80):
         z_mid = 0.5*(z_lo+z_hi)
         p_mid = p_of(z_mid)
         s_mid = p_mid.sum() if np.isfinite(p_mid).all() else np.inf
-        if s_mid > target:
-            z_lo = z_mid
-        else:
-            z_hi = z_mid
-
+        if s_mid > target: z_lo = z_mid
+        else:              z_hi = z_mid
     p = p_of(0.5*(z_lo+z_hi))
     if not np.isfinite(p).all():
         return np.full(3, np.nan)
-    p = np.clip(p, 1e-9, 1.0)
-    p = p / p.sum()
+    p = np.clip(p, 1e-9, 1.0); p /= p.sum()
     return p
 
 def inv_probs(odds):
@@ -60,11 +46,9 @@ def inv_probs(odds):
         inv = 1.0 / o
     inv[~np.isfinite(inv)] = 0.0
     s = inv.sum()
-    if s <= 0:
-        return np.array([np.nan, np.nan, np.nan])
+    if s <= 0: return np.array([np.nan, np.nan, np.nan])
     p = inv / s
-    p = np.clip(p, 1e-9, 1.0)
-    p = p / p.sum()
+    p = np.clip(p, 1e-9, 1.0); p /= p.sum()
     return p
 
 # ----------------- Util -----------------
@@ -82,24 +66,20 @@ def load_weights(path: Path) -> dict:
         df = pd.read_csv(path)
         if {"bookmaker","weight"}.issubset(df.columns):
             return {str(r["bookmaker"]).strip().lower(): float(r["weight"]) for _,r in df.iterrows()}
-    return {}  # peso=1 por padrão
+    return {}
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # normaliza cabeçalhos
     lower = {c: c.lower() for c in df.columns}
     df = df.rename(columns=lower)
     for a,b in RENAME_CANDIDATES.items():
         if a in df.columns and b not in df.columns:
             df = df.rename(columns={a:b})
-    # garantir colunas de odds
     need_odds = {"match_id","odd_home","odd_draw","odd_away"}
-    missing_odds = [c for c in need_odds if c not in df.columns]
-    if missing_odds:
-        raise RuntimeError(f"[consensus] arquivo de odds sem colunas obrigatórias: faltam {missing_odds}")
-    # bookmaker opcional
+    miss = [c for c in need_odds if c not in df.columns]
+    if miss:
+        raise RuntimeError(f"[consensus] arquivo de odds sem colunas obrigatórias: faltam {miss}")
     if "bookmaker" not in df.columns:
         df["bookmaker"] = "unknown"
-    # home/away podem faltar (vamos completar depois via matches)
     cols = ["match_id","bookmaker","odd_home","odd_draw","odd_away"]
     if "home" in df.columns: cols.append("home")
     if "away" in df.columns: cols.append("away")
@@ -118,7 +98,6 @@ def read_sources(base: Path) -> pd.DataFrame:
             except Exception as e:
                 print(f"[consensus] pulando {f}: {e}")
     else:
-        # FALLBACK: tenta usar data/out/<rodada>/odds.csv
         f = base/"odds.csv"
         if f.exists() and f.stat().st_size>0:
             df = pd.read_csv(f)
@@ -130,34 +109,54 @@ def read_sources(base: Path) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 def attach_home_away(df: pd.DataFrame, base: Path) -> pd.DataFrame:
-    """Completa colunas home/away usando matches.csv quando necessário."""
-    has_home = "home" in df.columns
-    has_away = "away" in df.columns
-    if has_home and has_away:
+    """Completa colunas home/away usando matches.csv quando necessário (sem depender de sufixos)."""
+    need_home = "home" not in df.columns
+    need_away = "away" not in df.columns
+    if not (need_home or need_away):
         return df
+
     mpath = base/"matches.csv"
     if not mpath.exists() or mpath.stat().st_size == 0:
         raise RuntimeError(f"[consensus] faltam colunas home/away e matches.csv não existe: {mpath}")
+
     M = pd.read_csv(mpath)
-    # normaliza colunas em matches
-    mcols = {c.lower(): c for c in M.columns}
-    M = M.rename(columns={mcols.get("home","home"):"home", mcols.get("away","away"):"away", mcols.get("match_id","match_id"):"match_id"})
-    need = {"match_id","home","away"}
-    if not need.issubset(M.columns):
-        raise RuntimeError(f"[consensus] matches.csv inválido, precisa de colunas: {need}")
-    merged = pd.merge(df, M[["match_id","home","away"]], on="match_id", how="left", suffixes=("","_m"))
-    # se já tinha alguma coluna, preenche faltantes
-    if "home" not in df.columns:
-        merged["home"] = merged["home_m"]
-    if "away" not in df.columns:
-        merged["away"] = merged["away_m"]
-    merged = merged.drop(columns=[c for c in ["home_m","away_m"] if c in merged.columns])
-    # última checagem
-    if merged["home"].isna().any() or merged["away"].isna().any():
-        # ainda faltou algum nome — preenche com vazio para não quebrar (não é crítico para consenso)
-        merged["home"] = merged["home"].fillna("")
-        merged["away"] = merged["away"].fillna("")
-        print("[consensus] aviso: alguns jogos ficaram sem nome home/away; usando vazio.")
+    # normaliza
+    M_cols_lower = {c: c.lower() for c in M.columns}
+    M = M.rename(columns=M_cols_lower)
+    # padroniza nomes esperados
+    rename_M = {}
+    if "home_team" in M.columns and "home" not in M.columns: rename_M["home_team"] = "home"
+    if "away_team" in M.columns and "away" not in M.columns: rename_M["away_team"] = "away"
+    if rename_M: M = M.rename(columns=rename_M)
+    # checa colunas
+    if not {"match_id","home","away"}.issubset(M.columns):
+        raise RuntimeError("[consensus] matches.csv inválido; precisa de colunas: match_id,home,away")
+
+    # merge simples (sem sufixos): se df já tiver 'home'/'away', usamos fillna
+    merged = pd.merge(df, M[["match_id","home","away"]], on="match_id", how="left")
+
+    if need_home:
+        # não tinha 'home' no df original -> usa a 'home' do matches diretamente
+        merged["home"] = merged["home_y"]
+    else:
+        # já tinha 'home' -> preenche nulos com a versão do matches
+        merged["home_x"] = merged["home_x"].where(merged["home_x"].notna(), merged["home_y"])
+        merged["home"] = merged["home_x"]
+
+    if need_away:
+        merged["away"] = merged["away_y"]
+    else:
+        merged["away_x"] = merged["away_x"].where(merged["away_x"].notna(), merged["away_y"])
+        merged["away"] = merged["away_x"]
+
+    # limpa colunas auxiliares se existirem
+    for c in ["home_x","home_y","away_x","away_y"]:
+        if c in merged.columns:
+            merged = merged.drop(columns=[c])
+
+    # segurança final
+    merged["home"] = merged["home"].fillna("")
+    merged["away"] = merged["away"].fillna("")
     return merged
 
 def main():
@@ -170,14 +169,12 @@ def main():
     base.mkdir(parents=True, exist_ok=True)
 
     all_odds = read_sources(base)
-    # completa home/away caso falte
     all_odds = attach_home_away(all_odds, base)
 
-    # pesos por bookmaker
     weights = load_weights(Path(args.weights_file))
     all_odds["bookmaker_norm"] = all_odds["bookmaker"].astype(str).str.strip().str.lower()
 
-    # calcula p_bm por linha com Shin; se der NaN, usa inverso das odds
+    # p_bm por linha: Shin -> fallback inverso
     P = []
     for _, r in all_odds.iterrows():
         p = shin_devig([r["odd_home"], r["odd_draw"], r["odd_away"]])
@@ -190,18 +187,15 @@ def main():
     # filtra inválidos
     all_odds = all_odds.dropna(subset=["p_home_bm","p_draw_bm","p_away_bm"])
 
-    # aplica pesos
+    # pesos
     all_odds["weight"] = all_odds["bookmaker_norm"].map(lambda x: float(weights.get(x, 1.0)))
 
-    # agrega por match
+    # agrega por match (média ponderada)
     def wmean(g, cols):
         w = g["weight"].values.reshape(-1,1)
         X = g[cols].values
-        num = (w*X).sum(axis=0)
-        den = w.sum()
-        if den <= 0:  # fallback média simples
-            return X.mean(axis=0)
-        return num/den
+        num = (w*X).sum(axis=0); den = w.sum()
+        return (num/den) if den>0 else X.mean(axis=0)
 
     agg = []
     for mid, g in all_odds.groupby("match_id"):
