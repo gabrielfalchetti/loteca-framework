@@ -3,6 +3,7 @@
 # - Usa odds_*.csv quando houver; senão usa data/out/<rodada>/odds.csv
 # - Completa home/away via matches.csv quando faltar (sem depender de sufixos do pandas)
 # - Se Shin falhar em alguma linha, usa inverso das odds
+# - Se não houver NENHUMA linha válida, gera fallback UNIFORME (1/3) a partir de matches.csv para não quebrar o pipeline
 from __future__ import annotations
 import argparse, glob
 from pathlib import Path
@@ -42,6 +43,8 @@ def shin_devig(odds):
 
 def inv_probs(odds):
     o = np.array(odds, dtype=float)
+    if o.shape[-1] != 3:
+        return np.array([np.nan, np.nan, np.nan])
     with np.errstate(divide="ignore", invalid="ignore"):
         inv = 1.0 / o
     inv[~np.isfinite(inv)] = 0.0
@@ -146,6 +149,25 @@ def attach_home_away(df: pd.DataFrame, base: Path) -> pd.DataFrame:
 
     return merged
 
+def build_uniform_from_matches(base: Path) -> pd.DataFrame:
+    """Fallback: cria odds uniformes (1/3) a partir de matches.csv para não quebrar pipeline."""
+    mpath = base/"matches.csv"
+    if not mpath.exists() or mpath.stat().st_size == 0:
+        raise RuntimeError(f"[consensus] fallback uniforme falhou: matches.csv ausente/vazio ({mpath})")
+    M = pd.read_csv(mpath)
+    M = M.rename(columns=str.lower)
+    if not {"match_id","home","away"}.issubset(M.columns):
+        # tenta mapear nomes comuns
+        if "home_team" in M.columns and "home" not in M.columns: M = M.rename(columns={"home_team":"home"})
+        if "away_team" in M.columns and "away" not in M.columns: M = M.rename(columns={"away_team":"away"})
+    if not {"match_id","home","away"}.issubset(M.columns):
+        raise RuntimeError("[consensus] fallback uniforme: matches.csv inválido; precisa de match_id,home,away")
+    out = M[["match_id","home","away"]].copy()
+    out["p_home"] = 1/3.0; out["p_draw"] = 1/3.0; out["p_away"] = 1/3.0
+    out["odd_home"] = 3.0; out["odd_draw"] = 3.0; out["odd_away"] = 3.0
+    out["n_bookmakers"] = 0
+    return out.sort_values("match_id")
+
 def main():
     ap = argparse.ArgumentParser(description="Merge de odds com devig Shin + pesos (com fallbacks)")
     ap.add_argument("--rodada", required=True)
@@ -163,16 +185,36 @@ def main():
 
     # p_bm por linha: Shin -> fallback inverso
     probs_rows = []
+    valid_rows = []
     for _, r in all_odds.iterrows():
-        p_line = shin_devig([r["odd_home"], r["odd_draw"], r["odd_away"]])
+        try:
+            oh, od, oa = float(r["odd_home"]), float(r["odd_draw"]), float(r["odd_away"])
+        except Exception:
+            continue
+        if not (oh > 1.0 and od > 1.0 and oa > 1.0 and np.isfinite([oh,od,oa]).all()):
+            continue
+        p_line = shin_devig([oh, od, oa])
         if not np.isfinite(p_line).all():
-            p_line = inv_probs([r["odd_home"], r["odd_draw"], r["odd_away"]])
-        probs_rows.append(p_line)
-    probs_rows = np.vstack(probs_rows)
-    all_odds[["p_home_bm","p_draw_bm","p_away_bm"]] = probs_rows
+            p_line = inv_probs([oh, od, oa])
+        if np.isfinite(p_line).all():
+            probs_rows.append(p_line)
+            valid_rows.append(True)
+        else:
+            valid_rows.append(False)
 
-    # filtra inválidos
-    all_odds = all_odds.dropna(subset=["p_home_bm","p_draw_bm","p_away_bm"])
+    if len(probs_rows) == 0:
+        # Fallback total: gerar odds uniformes a partir de matches.csv
+        out_df = build_uniform_from_matches(base)
+        out_path = base/"odds.csv"
+        out_df.to_csv(out_path, index=False)
+        print(f"[consensus] WARNING: nenhuma linha de odds válida; gerando odds uniformes como fallback -> {out_path} (n={len(out_df)})")
+        return
+
+    probs_rows = np.vstack(probs_rows)
+    # Mantém somente linhas válidas
+    all_odds = all_odds.iloc[np.where(np.array(valid_rows))[0]].copy()
+
+    all_odds[["p_home_bm","p_draw_bm","p_away_bm"]] = probs_rows
 
     # pesos
     all_odds["weight"] = all_odds["bookmaker_norm"].map(lambda x: float(weights.get(x, 1.0)))
@@ -186,7 +228,7 @@ def main():
 
     agg = []
     for mid, g in all_odds.groupby("match_id"):
-        ph, pdraw, pa = wmean(g, ["p_home_bm","p_draw_bm","p_away_bm"])  # <- 'pdraw' evita colisão com pandas 'pd'
+        ph, pdraw, pa = wmean(g, ["p_home_bm","p_draw_bm","p_away_bm"])
         ps = np.array([ph,pdraw,pa], dtype=float)
         ps = np.clip(ps, 1e-9, 1.0); ps = ps/ps.sum()
         oh, od, oa = 1.0/ps
@@ -198,6 +240,14 @@ def main():
             "odd_home": oh, "odd_draw": od, "odd_away": oa,
             "n_bookmakers": int(g["bookmaker"].nunique())
         })
+
+    if not agg:
+        # Sem grupos (p.ex., odds de múltiplos jogos inválidas) -> fallback uniforme
+        out_df = build_uniform_from_matches(base)
+        out_path = base/"odds.csv"
+        out_df.to_csv(out_path, index=False)
+        print(f"[consensus] WARNING: agregação vazia; gerando odds uniformes como fallback -> {out_path} (n={len(out_df)})")
+        return
 
     out_df = pd.DataFrame(agg).sort_values("match_id")
     out_path = base/"odds.csv"
