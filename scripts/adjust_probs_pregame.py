@@ -1,7 +1,10 @@
 from __future__ import annotations
-import argparse, numpy as np, pandas as pd
+import argparse
+import numpy as np
+import pandas as pd
 from pathlib import Path
 
+# ---------- util ----------
 def _renorm(P: np.ndarray) -> np.ndarray:
     P = np.clip(P, 1e-9, 1.0)
     S = P.sum(axis=1, keepdims=True)
@@ -9,13 +12,13 @@ def _renorm(P: np.ndarray) -> np.ndarray:
     return P / S
 
 def _load_probs(base: Path):
-    # Prioridade: bivariado > stacking > consenso
-    tried = [
+    tries = [
+        ("joined_pregame.csv",       ["p_home_final","p_draw_final","p_away_final"]),
         ("joined_stacked_bivar.csv", ["p_home_final","p_draw_final","p_away_final"]),
         ("joined_stacked.csv",       ["p_home_final","p_draw_final","p_away_final"]),
         ("joined.csv",               ["p_home","p_draw","p_away"]),
     ]
-    for fn, cols in tried:
+    for fn, cols in tries:
         p = base / fn
         if p.exists() and p.stat().st_size > 0:
             df = pd.read_csv(p).rename(columns=str.lower)
@@ -24,20 +27,20 @@ def _load_probs(base: Path):
                 return df.copy(), have, fn
     raise RuntimeError("[pregame] nenhum arquivo de probabilidades encontrado (joined_*).")
 
+# ---------- ajustes ----------
 def _apply_lineups(df: pd.DataFrame, P: np.ndarray, cap: float) -> np.ndarray:
     lp = df.get("lineups_raw.csv_path")
     if lp is None or not lp.exists() or lp.stat().st_size == 0:
         return P
     ln = pd.read_csv(lp)
-    need = {"match_id","home_missing","away_missing"}
+    need = {"match_id", "home_missing", "away_missing"}
     if not need.issubset(ln.columns):
         return P
     df2 = df.merge(ln[list(need)], on="match_id", how="left")
     df2[["home_missing","away_missing"]] = df2[["home_missing","away_missing"]].fillna(0)
     miss_h = df2["home_missing"].to_numpy(int)
     miss_a = df2["away_missing"].to_numpy(int)
-
-    fav = np.argmax(P, axis=1)  # 0=home, 1=draw, 2=away
+    fav = np.argmax(P, axis=1)
     for i in range(len(df2)):
         s = 0.0
         if fav[i] == 0 and miss_h[i] >= 1:
@@ -59,7 +62,7 @@ def _apply_weather(df: pd.DataFrame, P: np.ndarray, cap: float) -> np.ndarray:
     if wp is None or not wp.exists() or wp.stat().st_size == 0:
         return P
     we = pd.read_csv(wp)
-    need = {"match_id","rain_mm","wind_ms"}
+    need = {"match_id", "rain_mm", "wind_ms"}
     if not need.issubset(we.columns):
         return P
     df2 = df.merge(we[list(need)], on="match_id", how="left")
@@ -85,18 +88,18 @@ def _apply_movement(df: pd.DataFrame, P: np.ndarray, cap: float) -> np.ndarray:
     if mp is None or not mp.exists() or mp.stat().st_size == 0:
         return P
     mv = pd.read_csv(mp)
-    need = {"match_id","d_home_pp","d_away_pp"}
+    need = {"match_id", "d_home_pp", "d_away_pp"}
     if not need.issubset(mv.columns):
         return P
     df2 = df.merge(mv[list(need)], on="match_id", how="left")
     dH = df2["d_home_pp"].fillna(0.0).to_numpy(float)
     dA = df2["d_away_pp"].fillna(0.0).to_numpy(float)
     for i in range(len(df2)):
-        s = 0.0; side = None
+        s, side = 0.0, None
         if dH[i] > 1.5 and dH[i] > dA[i]:
-            s, side = min(cap, dH[i]/100.0), 0
+            s, side = min(cap, dH[i] / 100.0), 0
         if dA[i] > 1.5 and dA[i] >= dH[i]:
-            s, side = min(cap, dA[i]/100.0), 2
+            s, side = min(cap, dA[i] / 100.0), 2
         if side is not None and s > 0:
             others = [0,1,2]; others.remove(side)
             tot = P[i, others].sum()
@@ -108,53 +111,52 @@ def _apply_movement(df: pd.DataFrame, P: np.ndarray, cap: float) -> np.ndarray:
                 P[i] = _renorm(P[i][None, :])[0]
     return P
 
+# ---------- main ----------
 def main():
-    ap = argparse.ArgumentParser(description="Ajustes pré-jogo: lineups + clima + movimento")
+    ap = argparse.ArgumentParser(description="Ajustes pré-jogo: lineups, clima e movimento")
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--cap-lineups", type=float, default=0.02)
     ap.add_argument("--cap-weather", type=float, default=0.015)
-    ap.add_argument("--cap-move",    type=float, default=0.015)
+    ap.add_argument("--cap-move", type=float, default=0.015)
     args = ap.parse_args()
 
     base = Path(f"data/out/{args.rodada}")
     base.mkdir(parents=True, exist_ok=True)
 
-    # 1) probs base
     probs_df, prob_cols, used_file = _load_probs(base)
     P = probs_df[prob_cols].to_numpy(float, copy=True)
     P = _renorm(P)
 
-    # 2) matches (para merge e consistência)
     mp = base / "matches.csv"
     if not mp.exists() or mp.stat().st_size == 0:
         raise RuntimeError(f"[pregame] matches.csv ausente: {mp}")
     matches = pd.read_csv(mp).rename(columns=str.lower)
-    df = probs_df.merge(matches[["match_id","home","away","date"]], on="match_id", how="left")
 
-    # caminhos auxiliares (passa via df para funções)
+    df = probs_df.merge(
+        matches[["match_id","home","away","date"]],
+        on="match_id", how="left"
+    )
     df["lineups_raw.csv_path"] = base / "lineups_raw.csv"
     df["weather_raw.csv_path"] = base / "weather_raw.csv"
     df["ex_movement.csv_path"] = base / "ex_movement.csv"
 
-    # 3) aplica camadas
     P = _apply_lineups(df, P, cap=float(args.cap_lineups))
     P = _apply_weather(df, P, cap=float(args.cap_weather))
     P = _apply_movement(df, P, cap=float(args.cap_move))
 
-    # 4) salvar em formato compatível downstream
     out = df.copy()
     if prob_cols[0].endswith("_final"):
         out[prob_cols] = P
         out.rename(columns={
-            prob_cols[0]: "p_home_final",
-            prob_cols[1]: "p_draw_final",
-            prob_cols[2]: "p_away_final",
+            prob_cols[0]:"p_home_final",
+            prob_cols[1]:"p_draw_final",
+            prob_cols[2]:"p_away_final"
         }, inplace=True)
     else:
         out.rename(columns={
-            "p_home": "p_home_final",
-            "p_draw": "p_draw_final",
-            "p_away": "p_away_final",
+            "p_home":"p_home_final",
+            "p_draw":"p_draw_final",
+            "p_away":"p_away_final"
         }, inplace=True)
         out[["p_home_final","p_draw_final","p_away_final"]] = P
 
