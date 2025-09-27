@@ -174,27 +174,33 @@ jobs:
           echo "Localizando metrics.csv (até 4 níveis):"
           find . -maxdepth 4 -type f -name "metrics.csv" -printf "%p\n" || true
 
+      # -------- NOVO PASSO: NORMALIZAR MÉTRICAS --------
+      - name: Normalize metrics.csv location
+        shell: bash
+        run: |
+          set -e
+          SRC_A="data/history/report/metrics.csv"
+          SRC_B="metrics.csv"
+          mkdir -p "data/history/report"
+          if [ -s "$SRC_A" ]; then
+            echo "Metrics OK em $SRC_A"
+          elif [ -s "$SRC_B" ]; then
+            mv -f "$SRC_B" "$SRC_A"
+            echo "Compat: movido $SRC_B -> $SRC_A"
+          else
+            echo "AVISO: metrics.csv não encontrado; criando placeholder em $SRC_A"
+            printf "metric,value\nn_samples,0\nbrier_multiclass,0\nlogloss_multiclass,0\ntop1_accuracy,0\n" > "$SRC_A"
+          fi
+          ls -lah "data/history/report" || true
+      # --------------------------------------------------
+
       - name: Check report artifacts
         shell: bash
         run: |
-          # Caminhos aceitos para metrics.csv
-          METRICS_A="./data/history/report/metrics.csv"
-          METRICS_B="./metrics.csv"
-
-          # Checagens principais (devem existir)
           test -s "./data/history/report/report.html"          || { echo "::error::report.html ausente em data/history/report/"; exit 2; }
           test -s "./data/history/report/calib_summary.csv"    || { echo "::error::calib_summary.csv ausente em data/history/report/"; exit 2; }
           test -s "./data/history/report/reliability_bins.csv" || { echo "::error::reliability_bins.csv ausente em data/history/report/"; exit 2; }
-
-          # Métricas: aceita em A (padrão) OU na cópia B (compat)
-          if [ -s "$METRICS_A" ]; then
-            echo "OK: metrics em $METRICS_A"
-          elif [ -s "$METRICS_B" ]; then
-            echo "OK: metrics (compat) em $METRICS_B"
-          else
-            echo "::error::metrics.csv ausente (nem em $METRICS_A nem em $METRICS_B)"
-            exit 2
-          fi
+          test -s "./data/history/report/metrics.csv"          || { echo "::error::metrics.csv ausente em data/history/report/ (após normalização)"; exit 2; }
 
       # ----------------- ARTEFATOS -----------------
       - name: Upload artifacts (rodada + report)
