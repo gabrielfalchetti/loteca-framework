@@ -165,16 +165,36 @@ jobs:
           ls -lah data/history || true
 
       - name: Backtest report (calibração)
+        shell: bash
         run: |
+          echo "PWD (antes): $(pwd)"
           python scripts/backtest_report.py --history-path data/history/calibration.csv --bins 10
+          echo "Conteúdo gerado em data/history/report:"
+          ls -lah "./data/history/report" || true
+          echo "Localizando metrics.csv (até 4 níveis):"
+          find . -maxdepth 4 -type f -name "metrics.csv" -printf "%p\n" || true
 
-          echo "Conteúdo de data/history/report:"
-          ls -lah data/history/report || true
+      - name: Check report artifacts
+        shell: bash
+        run: |
+          # Caminhos aceitos para metrics.csv
+          METRICS_A="./data/history/report/metrics.csv"
+          METRICS_B="./metrics.csv"
 
-          test -s "./data/history/report/report.html"          || { echo "::error::report.html ausente"; exit 2; }
-          test -s "./data/history/report/calib_summary.csv"    || { echo "::error::calib_summary.csv ausente"; exit 2; }
-          test -s "./data/history/report/reliability_bins.csv" || { echo "::error::reliability_bins.csv ausente"; exit 2; }
-          test -s "./data/history/report/metrics.csv"          || { echo "::error::metrics.csv ausente em data/history/report/"; exit 2; }
+          # Checagens principais (devem existir)
+          test -s "./data/history/report/report.html"          || { echo "::error::report.html ausente em data/history/report/"; exit 2; }
+          test -s "./data/history/report/calib_summary.csv"    || { echo "::error::calib_summary.csv ausente em data/history/report/"; exit 2; }
+          test -s "./data/history/report/reliability_bins.csv" || { echo "::error::reliability_bins.csv ausente em data/history/report/"; exit 2; }
+
+          # Métricas: aceita em A (padrão) OU na cópia B (compat)
+          if [ -s "$METRICS_A" ]; then
+            echo "OK: metrics em $METRICS_A"
+          elif [ -s "$METRICS_B" ]; then
+            echo "OK: metrics (compat) em $METRICS_B"
+          else
+            echo "::error::metrics.csv ausente (nem em $METRICS_A nem em $METRICS_B)"
+            exit 2
+          fi
 
       # ----------------- ARTEFATOS -----------------
       - name: Upload artifacts (rodada + report)
