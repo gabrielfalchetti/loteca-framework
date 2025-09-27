@@ -42,15 +42,15 @@ jobs:
       MIN_MATCH: ${{ inputs.min_match }}
 
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "Setup Python"
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: "Install deps"
+      - name: Install deps
         shell: bash
         run: |
           set -e
@@ -58,7 +58,7 @@ jobs:
           pip install pandas numpy scikit-learn joblib requests PyYAML rapidfuzz==3.9.7 matplotlib
 
       # 1) MATCHES
-      - name: "Ensure matches.csv"
+      - name: Ensure matches.csv
         shell: bash
         run: |
           set -e
@@ -71,7 +71,7 @@ jobs:
           test -s "data/out/${LOTECA_RODADA}/matches.csv"
 
       # 2) ODDS REAIS + CONSENSO
-      - name: "Coletar odds e fazer consenso"
+      - name: Coletar odds e fazer consenso
         shell: bash
         run: |
           set -e
@@ -90,7 +90,7 @@ jobs:
           echo "[audit] Odds usadas: TheOddsAPI=${USED_ODDS_API} RapidAPI=${USED_RAPIDAPI}"
 
       # 3) MODELAGEM
-      - name: "Modelagem (xG, DC bivariado, stacking, calib)"
+      - name: Modelagem (xG, DC bivariado, stacking, calib)
         shell: bash
         run: |
           set -e
@@ -112,14 +112,14 @@ jobs:
           test -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" -o -s "data/out/${LOTECA_RODADA}/joined_stacked.csv"
 
       # 4) INTEL PRÉ-JOGO (lineups + clima + movement)
-      - name: "Lineups (API-Football)"
+      - name: Lineups (API-Football)
         shell: bash
         run: |
           set -e
           python scripts/ingest_lineups_apifootball.py --rodada "${LOTECA_RODADA}" || true
           if [ -s "data/out/${LOTECA_RODADA}/lineups_raw.csv" ]; then echo "[audit] Lineups: USADAS"; else echo "[audit] Lineups: NÃO USADAS"; fi
 
-      - name: "Weather (OpenWeather)"
+      - name: Weather (OpenWeather)
         shell: bash
         run: |
           set -e
@@ -130,7 +130,7 @@ jobs:
           fi
           if [ -s "data/out/${LOTECA_RODADA}/weather_raw.csv" ]; then echo "[audit] Weather: USADO"; else echo "[audit] Weather: NÃO USADO"; fi
 
-      - name: "Odds movement"
+      - name: Odds movement
         shell: bash
         run: |
           set -e
@@ -138,7 +138,7 @@ jobs:
           if [ -s "data/out/${LOTECA_RODADA}/ex_movement.csv" ]; then echo "[audit] Movement: USADO"; else echo "[audit] Movement: NÃO USADO"; fi
 
       # (fix) GARANTE O SCRIPT DE AJUSTE PRÉ-JOGO
-      - name: "Ensure adjust_probs_pregame.py exists"
+      - name: Ensure adjust_probs_pregame.py exists
         shell: bash
         run: |
           set -e
@@ -164,6 +164,7 @@ def _apply_lineups(df, P, cap):
     if not need.issubset(ln.columns): return P
     df2=df.merge(ln[list(need)], on="match_id", how="left")
     df2[["home_missing","away_missing"]]=df2[["home_missing","away_missing"]].fillna(0)
+    import numpy as np
     miss_h=df2["home_missing"].to_numpy(int); miss_a=df2["away_missing"].to_numpy(int)
     fav=np.argmax(P, axis=1)
     for i in range(len(df2)):
@@ -183,6 +184,7 @@ def _apply_weather(df, P, cap):
     we=pd.read_csv(wp); need={"match_id","rain_mm","wind_ms"}
     if not need.issubset(we.columns): return P
     df2=df.merge(we[list(need)], on="match_id", how="left")
+    import numpy as np
     rain=df2["rain_mm"].fillna(0.0).to_numpy(float); wind=df2["wind_ms"].fillna(0.0).to_numpy(float)
     for i in range(len(df2)):
         bonus=0.0
@@ -201,6 +203,7 @@ def _apply_movement(df, P, cap):
     mv=pd.read_csv(mp); need={"match_id","d_home_pp","d_away_pp"}
     if not need.issubset(mv.columns): return P
     df2=df.merge(mv[list(need)], on="match_id", how="left")
+    import numpy as np
     dH=df2["d_home_pp"].fillna(0.0).to_numpy(float); dA=df2["d_away_pp"].fillna(0.0).to_numpy(float)
     for i in range(len(df2)):
         s=0.0; side=None
@@ -245,7 +248,7 @@ PY
           python -m py_compile scripts/adjust_probs_pregame.py
           echo "[fix] adjust_probs_pregame.py criado (ou já existia)."
 
-      - name: "Ajuste Pré-jogo (gera joined_pregame.csv)"
+      - name: Ajuste Pré-jogo (gera joined_pregame.csv)
         shell: bash
         run: |
           set -e
@@ -254,7 +257,7 @@ PY
           echo "[audit] Probabilidades FINAIS para o cartão: joined_pregame.csv"
 
       # 5) CARTÃO
-      - name: "Make Ticket"
+      - name: Make Ticket
         shell: bash
         run: |
           set -e
@@ -286,8 +289,7 @@ PY
           matches = pd.read_csv(base/"matches.csv").rename(columns=str.lower)
           if {"home","away"}.issubset(df.columns):
               M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left", suffixes=("","_m"))
-              M["home"] = M["home"].fillna(M["home_m"])
-              M["away"] = M["away"].fillna(M["away_m"])
+              M["home"] = M["home"].fillna(M["home_m"]); M["away"] = M["away"].fillna(M["away_m"])
           else:
               M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left")
           def H(p): p=p/p.sum(); return float(-(p*np.log(p)).sum())
@@ -325,7 +327,7 @@ PY
           cat "data/out/${LOTECA_RODADA}/loteca_ticket.txt"
 
       # 6) Artefatos
-      - name: "Upload artifacts"
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: loteca-e2e-${{ inputs.rodada }}
