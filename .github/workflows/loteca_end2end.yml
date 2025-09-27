@@ -38,6 +38,10 @@ jobs:
       OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       AZURE_BING_KEY: ${{ secrets.AZURE_BING_KEY }}
+      MAX_DUPLOS: ${{ inputs.max_duplos }}
+      MAX_TRIPLOS: ${{ inputs.max_triplos }}
+      DAYS_WINDOW: ${{ inputs.days_window }}
+      MIN_MATCH: ${{ inputs.min_match }}
 
     steps:
       - name: Checkout
@@ -74,11 +78,11 @@ jobs:
           USED_ODDS_API=0
           USED_RAPIDAPI=0
           if [ -n "${ODDS_API_KEY}" ]; then
-            python scripts/ingest_odds.py --rodada "${LOTECA_RODADA}" --sport soccer_brazil_campeonato --regions uk,eu --market h2h --allow-partial --min-match ${{ inputs.min_match }} || true
+            python scripts/ingest_odds.py --rodada "${LOTECA_RODADA}" --sport soccer_brazil_campeonato --regions uk,eu --market h2h --allow-partial --min-match "${MIN_MATCH}" || true
             USED_ODDS_API=1
           fi
           if [ -n "${RAPIDAPI_KEY}" ]; then
-            python scripts/ingest_odds_apifootball_rapidapi.py --rodada "${LOTECA_RODADA}" --allow-partial --days-window ${{ inputs.days_window }} --min-match ${{ inputs.min_match }} || true
+            python scripts/ingest_odds_apifootball_rapidapi.py --rodada "${LOTECA_RODADA}" --allow-partial --days-window "${DAYS_WINDOW}" --min-match "${MIN_MATCH}" || true
             USED_RAPIDAPI=1
           fi
           python scripts/merge_odds_consensus.py --rodada "${LOTECA_RODADA}" || true
@@ -99,7 +103,6 @@ jobs:
             echo "[audit] Calibração isotônica: NÃO USADA (sem histórico)"
           fi
           python scripts/stack_probs_bivar.py --rodada "${LOTECA_RODADA}" --w-consensus 0.5 --w-xg 0.2 --w-bivar 0.2 --w-ml 0.1 --calib-path "models/calib_isotonic.pkl" || true
-          # fallback (sem DC bivariado)
           if [ ! -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" ]; then
             python scripts/stack_probs.py --rodada "${LOTECA_RODADA}" --w-consensus 0.6 --w-xg 0.4 --calib-path "models/calib_isotonic.pkl"
             echo "[audit] Stacking fallback (sem DC bivariado)."
@@ -108,12 +111,16 @@ jobs:
 
       # === 4) INTEL PRÉ-JOGO (lineups + clima + movimento) ===
       - name: 4a) Lineups (API-Football)
+        shell: bash
         run: |
+          set -e
           python scripts/ingest_lineups_apifootball.py --rodada "${LOTECA_RODADA}" || true
           if [ -s "data/out/${LOTECA_RODADA}/lineups_raw.csv" ]; then echo "[audit] Lineups: USADAS"; else echo "[audit] Lineups: NÃO USADAS"; fi
 
       - name: 4b) Weather (OpenWeather)
+        shell: bash
         run: |
+          set -e
           if [ -n "${OPENWEATHER_KEY}" ]; then
             python scripts/ingest_weather_openweather.py --rodada "${LOTECA_RODADA}" --window-hours 6 || true
           else
@@ -122,7 +129,9 @@ jobs:
           if [ -s "data/out/${LOTECA_RODADA}/weather_raw.csv" ]; then echo "[audit] Weather: USADO"; else echo "[audit] Weather: NÃO USADO"; fi
 
       - name: 4c) Movement (baseline vs atual)
+        shell: bash
         run: |
+          set -e
           python scripts/odds_exchange_movement.py --rodada "${LOTECA_RODADA}" || true
           if [ -s "data/out/${LOTECA_RODADA}/ex_movement.csv" ]; then echo "[audit] Movement: USADO"; else echo "[audit] Movement: NÃO USADO"; fi
 
@@ -139,9 +148,7 @@ from pathlib import Path
 def _renorm(P: np.ndarray) -> np.ndarray:
     P = np.clip(P, 1e-9, 1.0); S = P.sum(axis=1, keepdims=True); S[S <= 0] = 1.0; return P / S
 def _load_probs(base: Path):
-    tried=[("joined_stacked_bivar.csv",["p_home_final","p_draw_final","p_away_final"]),
-           ("joined_stacked.csv",["p_home_final","p_draw_final","p_away_final"]),
-           ("joined.csv",["p_home","p_draw","p_away"])]
+    tried=[("joined_stacked_bivar.csv",["p_home_final","p_draw_final","p_away_final"]),("joined_stacked.csv",["p_home_final","p_draw_final","p_away_final"]),("joined.csv",["p_home","p_draw","p_away"])]
     for fn, cols in tried:
         p=base/fn
         if p.exists() and p.stat().st_size>0:
@@ -238,7 +245,9 @@ PY
 
       # === 4d) Ajuste Pré-jogo (gera joined_pregame.csv)
       - name: 4d) Ajuste Pré-jogo (gera joined_pregame.csv)
+        shell: bash
         run: |
+          set -e
           python scripts/adjust_probs_pregame.py --rodada "${LOTECA_RODADA}" --cap-lineups 0.02 --cap-weather 0.015 --cap-move 0.015
           test -s "data/out/${LOTECA_RODADA}/joined_pregame.csv"
           echo "[audit] Probabilidades FINAIS para o cartão: joined_pregame.csv"
@@ -252,6 +261,8 @@ PY
           import os, pandas as pd, numpy as np
           from pathlib import Path
           rodada = os.environ["LOTECA_RODADA"]
+          max_duplos = int(os.environ["MAX_DUPLOS"])
+          max_triplos = int(os.environ["MAX_TRIPLOS"])
           base = Path(f"data/out/{rodada}")
           base.mkdir(parents=True, exist_ok=True)
 
@@ -286,9 +297,6 @@ PY
           def H(p): p=p/p.sum(); return float(-(p*np.log(p)).sum())
           ent = np.array([H(P[i]) for i in range(P.shape[0])])
           order = np.argsort(ent)[::-1]
-
-          max_duplos  = int(os.getenv("INPUT_MAX_DUPLOS","${{ inputs.max_duplos }}"))
-          max_triplos = int(os.getenv("INPUT_MAX_TRIPLOS","${{ inputs.max_triplos }}"))
 
           picks = [ {int(np.argmax(P[i]))} for i in range(P.shape[0]) ]
           used_d = used_t = 0
