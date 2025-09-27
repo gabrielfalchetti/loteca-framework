@@ -1,30 +1,54 @@
-name: Loteca Pipeline (ELITE+Portfolio)
+name: Loteca Pipeline
 
 on:
   workflow_dispatch:
     inputs:
       rodada:
-        description: "Identificador da rodada (ex.: 2025-10-05_14)"
+        description: 'Identificador da rodada (ex.: 2025-10-05_14)'
         required: true
         type: string
-        default: "2025-10-05_14"
       n_tickets:
-        description: "Qtd de cartões do portfólio (ex.: 5)"
-        required: true
+        description: 'Quantidade de cartões no portfólio'
+        required: false
+        default: '5'
         type: string
-        default: "5"
+      max_duplos:
+        description: 'Máximo de duplos por cartão'
+        required: false
+        default: '4'
+        type: string
+      max_triplos:
+        description: 'Máximo de triplos por cartão'
+        required: false
+        default: '2'
+        type: string
+      sims_eval:
+        description: 'Simulações por avaliação (Monte Carlo)'
+        required: false
+        default: '25000'
+        type: string
+      days_window:
+        description: 'Janela ±dias para buscar fixtures na API-Football'
+        required: false
+        default: '2'
+        type: string
+      min_match:
+        description: 'Similaridade mínima fuzzy (0-100) para casar times'
+        required: false
+        default: '85'
+        type: string
 
 jobs:
-  build-loteca:
+  pipeline:
     runs-on: ubuntu-latest
     env:
-      LOTECA_RODADA: ${{ github.event.inputs.rodada }}
-      N_TICKETS: ${{ github.event.inputs.n_tickets }}
+      LOTECA_RODADA: ${{ inputs.rodada }}
+      # Segredos opcionais: defina no repositório (Settings > Secrets and variables > Actions > New repository secret)
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       WANDB_PROJECT: loteca-framework
-      WANDB_ENTITY: ""
+      WANDB_ENTITY: gabrielfalchetti-loteca
 
     steps:
       - name: Checkout
@@ -33,149 +57,150 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests rapidfuzz==3.9.7 PyYAML==6.0.2 wandb
+          pip install \
+            pandas numpy requests PyYAML rapidfuzz==3.9.7 \
+            matplotlib \
+            wandb
 
-      - name: Weights & Biases - start
-        env:
-          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-          WANDB_PROJECT: ${{ env.WANDB_PROJECT }}
-          WANDB_ENTITY: ${{ env.WANDB_ENTITY }}
+      - name: (Optional) Login to Weights & Biases
+        if: env.WANDB_API_KEY != ''
         run: |
           python - << 'PY'
           import os, wandb
-          key=os.environ.get("WANDB_API_KEY","")
+          key = os.environ.get("WANDB_API_KEY","").strip()
           if key:
-              wandb.login(key=key)
+            wandb.login(key=key)
+            print("[wandb] login ok")
+          else:
+            print("[wandb] sem chave; passo ignorado")
           PY
-          python scripts/wandb_hook.py start --rodada "${{ env.LOTECA_RODADA }}" --project "${{ env.WANDB_PROJECT }}" --entity "${{ env.WANDB_ENTITY }}"
 
-      # 1) Matches
-      - name: Ingest matches
+      # ----------------- MATCHES -----------------
+      - name: Ingest matches (from data/in/<rodada>/matches_source.csv)
         run: |
-          python scripts/ingest_matches.py --rodada "${{ env.LOTECA_RODADA }}"
-          test -s "data/out/${{ env.LOTECA_RODADA }}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
-
-      # 2) Odds – TheOddsAPI (várias ligas)
-      - name: Ingest odds Brasil (Série A)
-        env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: |
-          python scripts/ingest_odds.py --rodada "${{ env.LOTECA_RODADA }}" \
-            --sport soccer_brazil_campeonato --regions uk,eu --market h2h --min-match 88 --allow-partial
-          mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_br.csv" || true
-
-      - name: Ingest odds Inglaterra (EPL)
-        env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: |
-          python scripts/ingest_odds.py --rodada "${{ env.LOTECA_RODADA }}" \
-            --sport soccer_epl --regions uk,eu --market h2h --min-match 88 --allow-partial
-          mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_epl.csv" || true
-
-      - name: Ingest odds Espanha (La Liga)
-        env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: |
-          python scripts/ingest_odds.py --rodada "${{ env.LOTECA_RODADA }}" \
-            --sport soccer_spain_la_liga --regions uk,eu --market h2h --min-match 88 --allow-partial
-          mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_esp.csv" || true
-
-      # 3) Odds – RapidAPI (API-Football) complementar
-      - name: Ingest odds (RapidAPI - API-Football)
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
-        run: |
-          if [ -n "${RAPIDAPI_KEY}" ]; then
-            python scripts/ingest_odds_apifootball_rapidapi.py \
-              --rodada "${{ env.LOTECA_RODADA }}" --allow-partial --country-hint "Brazil" --days-window 2 --min-match 85
-            mv "data/out/${{ env.LOTECA_RODADA }}/odds_apifootball.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_apifootball.csv" || true
+          # Se já existir o matches.csv pronto, pulamos ingestão
+          if [ -s "data/out/${LOTECA_RODADA}/matches.csv" ]; then
+            echo "[matches] data/out/${LOTECA_RODADA}/matches.csv já existe — pulando ingest."
           else
-            echo "RAPIDAPI_KEY não definido; pulando passo API-Football."
+            if [ ! -s "data/in/${LOTECA_RODADA}/matches_source.csv" ]; then
+              echo "::error::Arquivo-fonte ausente: data/in/${LOTECA_RODADA}/matches_source.csv (crie com colunas: match_id,home,away[,date])"
+              exit 2
+            fi
+            python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
           fi
+          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
+          head -n 5 "data/out/${LOTECA_RODADA}/matches.csv" || true
 
-      # 4) CONSENSO Shin + pesos
-      - name: Merge odds (consensus Shin + weights)
+      # ----------------- ODDS (TheOddsAPI) -----------------
+      - name: Ingest odds (TheOddsAPI) — opcional
+        if: env.ODDS_API_KEY != ''
         run: |
-          python scripts/merge_odds_consensus.py --rodada "${{ env.LOTECA_RODADA }}"
-          test -s "data/out/${{ env.LOTECA_RODADA }}/odds.csv" || { echo "::error::odds.csv ausente após consenso"; exit 2; }
+          python scripts/ingest_odds.py \
+            --rodada "${LOTECA_RODADA}" \
+            --sport soccer_brazil_campeonato \
+            --regions uk,eu \
+            --market h2h \
+            --allow-partial \
+            --min-match ${{ inputs.min_match }}
+          # odds.csv pode ser gerado por outro passo; aqui garantimos apenas se existir
+          ls -lah "data/out/${LOTECA_RODADA}/" || true
+        shell: bash
 
-      # 5) Features + Join
-      - name: Build features
+      # ----------------- ODDS (RapidAPI / API-Football) -----------------
+      - name: Ingest odds (API-Football via RapidAPI) — opcional
+        if: env.RAPIDAPI_KEY != ''
         run: |
-          python scripts/build_features.py --rodada "${{ env.LOTECA_RODADA }}"
-          test -s "data/out/${{ env.LOTECA_RODADA }}/features.csv" || { echo "::error::features.csv ausente/vazio"; exit 2; }
+          python scripts/ingest_odds_apifootball_rapidapi.py \
+            --rodada "${LOTECA_RODADA}" \
+            --allow-partial \
+            --days-window ${{ inputs.days_window }} \
+            --min-match ${{ inputs.min_match }}
+          ls -lah "data/out/${LOTECA_RODADA}/" || true
 
-      - name: Join features
+      # ----------------- CONSENSO -----------------
+      - name: Merge odds consensus (Shin + weights)
         run: |
-          python scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
-          test -s "data/out/${{ env.LOTECA_RODADA }}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
+          python scripts/merge_odds_consensus.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente/vazio após consenso"; exit 2; }
+          head -n 5 "data/out/${LOTECA_RODADA}/odds.csv" || true
 
-      # 6) Injuries -> Weather -> Referee (sobrepondo joined.csv)
-      - name: Adjust by injuries
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      # ----------------- AJUSTES CONTEXTUAIS -----------------
+      - name: Adjust probabilities with lineups/weather/referee
         run: |
-          python scripts/adjust_probs_lineups.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --alpha 0.05
-          cp "data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
+          python scripts/adjust_probs_lineups.py \
+            --rodada "${LOTECA_RODADA}" \
+            --country-hint "Brazil" \
+            --days-window 2 \
+            --min-match ${{ inputs.min_match }} \
+            --alpha 0.05
+          # joined_enriched ou joined.csv devem existir após esse passo
+          ls -lah "data/out/${LOTECA_RODADA}/" || true
 
-      - name: Adjust by weather
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      # ----------------- PORTFÓLIO -----------------
+      - name: Build portfolio of tickets
         run: |
-          python scripts/adjust_probs_weather.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --altitude-threshold 1500
-          cp "data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
+          python scripts/plan_bet_portfolio.py \
+            --rodada "${LOTECA_RODADA}" \
+            --n-tickets "${{ inputs.n_tickets }}" \
+            --max-duplos ${{ inputs.max_duplos }} \
+            --max-triplos ${{ inputs.max_triplos }} \
+            --sims-eval ${{ inputs.sims_eval }}
+          test -s "data/out/${LOTECA_RODADA}/portfolio/portfolio_summary.csv" || { echo "::error::portfolio_summary.csv ausente"; exit 2; }
+          ls -lah "data/out/${LOTECA_RODADA}/portfolio" || true
 
-      - name: Adjust by referee
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
-        run: |
-          python scripts/adjust_probs_referee.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --bias-cap 0.04
-          cp "data/out/${{ env.LOTECA_RODADA }}/joined_referee.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
-
-      # 7) Odds movement alerts
-      - name: Odds movement watch
-        run: |
-          python scripts/odds_movement_watch.py --rodada "${{ env.LOTECA_RODADA }}"
-          test -s "data/out/${{ env.LOTECA_RODADA }}/alerts_odds_movement.csv" || { echo "::error::alerts_odds_movement.csv ausente/vazio"; exit 2; }
-
-      # 8) Portfólio de cartões
-      - name: Build portfolio
-        run: |
-          python scripts/plan_bet_portfolio.py --rodada "${{ env.LOTECA_RODADA }}" --n-tickets "${{ env.N_TICKETS }}" --max-duplos 4 --max-triplos 2 --sims-eval 25000
-          test -d "data/out/${{ env.LOTECA_RODADA }}/portfolio" || { echo "::error::portfolio ausente"; exit 2; }
-
-      # 9) EV + Kelly
       - name: Evaluate EV & Kelly
         run: |
-          python scripts/evaluate_ticket_ev.py --rodada "${{ env.LOTECA_RODADA }}"
-          test -s "data/out/${{ env.LOTECA_RODADA }}/portfolio/portfolio_ev.csv" || { echo "::error::portfolio_ev.csv ausente"; exit 2; }
+          python scripts/evaluate_ticket_ev.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/portfolio/portfolio_ev.csv" || { echo "::error::portfolio_ev.csv ausente"; exit 2; }
+          tail -n +1 "data/out/${LOTECA_RODADA}/portfolio/portfolio_ev.csv" | sed -n '1,20p' || true
 
-      - name: W&B log artifacts
-        env:
-          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-          WANDB_PROJECT: ${{ env.WANDB_PROJECT }}
-          WANDB_ENTITY: ${{ env.WANDB_ENTITY }}
+      # ----------------- BACKTEST (HISTÓRICO + RELATÓRIO) -----------------
+      - name: Build calibration history (single rodada)
         run: |
-          python - << 'PY'
-          import os, wandb
-          if os.environ.get("WANDB_API_KEY",""):
-              wandb.login(key=os.environ["WANDB_API_KEY"])
-          PY
-          python scripts/wandb_hook.py log --rodada "${{ env.LOTECA_RODADA }}" --project "${{ env.WANDB_PROJECT }}" --entity "${{ env.WANDB_ENTITY }}"
+          # results.csv deve existir para computar calibração; se não houver, gera histórico vazio sem quebrar
+          if [ ! -s "data/out/${LOTECA_RODADA}/results.csv" ] && [ ! -s "data/in/${LOTECA_RODADA}/results.csv" ]; then
+            echo "[history] aviso: nenhum results.csv encontrado; o relatório sairá com placeholders."
+          fi
+          python scripts/backtest_build_history.py --rodadas "${LOTECA_RODADA}"
+          ls -lah data/history || true
 
-      - name: Upload outputs
+      - name: Backtest report (calibração)
+        run: |
+          python scripts/backtest_report.py --history-path data/history/calibration.csv --bins 10
+
+          echo "Conteúdo de data/history/report:"
+          ls -lah data/history/report || true
+
+          # Checagens robustas (exigem os 4 principais artefatos)
+          test -s "./data/history/report/report.html"          || { echo "::error::report.html ausente"; exit 2; }
+          test -s "./data/history/report/calib_summary.csv"    || { echo "::error::calib_summary.csv ausente"; exit 2; }
+          test -s "./data/history/report/reliability_bins.csv" || { echo "::error::reliability_bins.csv ausente"; exit 2; }
+          test -s "./data/history/report/metrics.csv"          || { echo "::error::metrics.csv ausente em data/history/report/"; exit 2; }
+
+      # ----------------- ARTEFATOS -----------------
+      - name: Upload artifacts (rodada + report)
         uses: actions/upload-artifact@v4
         with:
-          name: loteca-${{ env.LOTECA_RODADA }}
+          name: loteca-${{ inputs.rodada }}
           path: |
-            data/out/${{ env.LOTECA_RODADA }}/joined.csv
-            data/out/${{ env.LOTECA_RODADA }}/odds.csv
-            data/out/${{ env.LOTECA_RODADA }}/alerts_odds_movement.csv
-            data/out/${{ env.LOTECA_RODADA }}/portfolio/cartao_*.csv
-            data/out/${{ env.LOTECA_RODADA }}/portfolio/portfolio_summary.csv
-            data/out/${{ env.LOTECA_RODADA }}/portfolio/portfolio_ev.csv
+            data/out/${{ inputs.rodada }}/matches.csv
+            data/out/${{ inputs.rodada }}/odds.csv
+            data/out/${{ inputs.rodada }}/joined*.csv
+            data/out/${{ inputs.rodada }}/portfolio/*
+            data/history/calibration.csv
+            data/history/report/report.html
+            data/history/report/calib_summary.csv
+            data/history/report/reliability_bins.csv
+            data/history/report/metrics.csv
+            data/history/report/calibration_1.png
+            data/history/report/calibration_X.png
+            data/history/report/calibration_2.png
+            data/history/report/hist_1.png
+            data/history/report/hist_X.png
+            data/history/report/hist_2.png
+        if-no-files-found: warn
