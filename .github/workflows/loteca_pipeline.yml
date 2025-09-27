@@ -1,3 +1,169 @@
+name: Loteca Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      rodada:
+        description: 'Identificador da rodada (ex.: 2025-10-05_14)'
+        required: true
+        type: string
+      n_tickets:
+        description: 'Quantidade de cartões no portfólio'
+        required: false
+        default: '5'
+        type: string
+      max_duplos:
+        description: 'Máximo de duplos por cartão'
+        required: false
+        default: '4'
+        type: string
+      max_triplos:
+        description: 'Máximo de triplos por cartão'
+        required: false
+        default: '2'
+        type: string
+      sims_eval:
+        description: 'Simulações por avaliação (Monte Carlo)'
+        required: false
+        default: '25000'
+        type: string
+      days_window:
+        description: 'Janela ±dias para buscar fixtures na API-Football'
+        required: false
+        default: '2'
+        type: string
+      min_match:
+        description: 'Similaridade mínima fuzzy (0-100) para casar times'
+        required: false
+        default: '85'
+        type: string
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    env:
+      LOTECA_RODADA: ${{ inputs.rodada }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      WANDB_PROJECT: loteca-framework
+      WANDB_ENTITY: gabrielfalchetti-loteca
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            pandas numpy requests PyYAML rapidfuzz==3.9.7 \
+            matplotlib \
+            wandb
+
+      - name: (Optional) Login to Weights & Biases
+        if: env.WANDB_API_KEY != ''
+        run: |
+          python - << 'PY'
+          import os, wandb
+          key = os.environ.get("WANDB_API_KEY","").strip()
+          if key:
+            wandb.login(key=key)
+            print("[wandb] login ok")
+          else:
+            print("[wandb] sem chave; passo ignorado")
+          PY
+
+      # ----------------- MATCHES -----------------
+      - name: Ingest matches (from data/in/<rodada>/matches_source.csv)
+        run: |
+          if [ -s "data/out/${LOTECA_RODADA}/matches.csv" ]; then
+            echo "[matches] data/out/${LOTECA_RODADA}/matches.csv já existe — pulando ingest."
+          else
+            if [ ! -s "data/in/${LOTECA_RODADA}/matches_source.csv" ]; then
+              echo "::error::Arquivo-fonte ausente: data/in/${LOTECA_RODADA}/matches_source.csv (crie com colunas: match_id,home,away[,date])"
+              exit 2
+            fi
+            python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
+          fi
+          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
+          head -n 5 "data/out/${LOTECA_RODADA}/matches.csv" || true
+
+      # ----------------- ODDS (TheOddsAPI) -----------------
+      - name: Ingest odds (TheOddsAPI) — opcional
+        if: env.ODDS_API_KEY != ''
+        shell: bash
+        run: |
+          python scripts/ingest_odds.py \
+            --rodada "${LOTECA_RODADA}" \
+            --sport soccer_brazil_campeonato \
+            --regions uk,eu \
+            --market h2h \
+            --allow-partial \
+            --min-match ${{ inputs.min_match }}
+          ls -lah "data/out/${LOTECA_RODADA}/" || true
+
+      # ----------------- ODDS (RapidAPI / API-Football) -----------------
+      - name: Ingest odds (API-Football via RapidAPI) — opcional
+        if: env.RAPIDAPI_KEY != ''
+        run: |
+          python scripts/ingest_odds_apifootball_rapidapi.py \
+            --rodada "${LOTECA_RODADA}" \
+            --allow-partial \
+            --days-window ${{ inputs.days_window }} \
+            --min-match ${{ inputs.min_match }}
+          ls -lah "data/out/${LOTECA_RODADA}/" || true
+
+      # ----------------- CONSENSO -----------------
+      - name: Merge odds consensus (Shin + weights)
+        run: |
+          python scripts/merge_odds_consensus.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente/vazio após consenso"; exit 2; }
+          head -n 5 "data/out/${LOTECA_RODADA}/odds.csv" || true
+
+      # ----------------- AJUSTES CONTEXTUAIS -----------------
+      - name: Adjust probabilities with lineups/weather/referee
+        run: |
+          python scripts/adjust_probs_lineups.py \
+            --rodada "${LOTECA_RODADA}" \
+            --country-hint "Brazil" \
+            --days-window 2 \
+            --min-match ${{ inputs.min_match }} \
+            --alpha 0.05
+          ls -lah "data/out/${LOTECA_RODADA}/" || true
+
+      # ----------------- PORTFÓLIO -----------------
+      - name: Build portfolio of tickets
+        run: |
+          python scripts/plan_bet_portfolio.py \
+            --rodada "${LOTECA_RODADA}" \
+            --n-tickets "${{ inputs.n_tickets }}" \
+            --max-duplos ${{ inputs.max_duplos }} \
+            --max-triplos ${{ inputs.max_triplos }} \
+            --sims-eval ${{ inputs.sims_eval }}
+          test -s "data/out/${LOTECA_RODADA}/portfolio/portfolio_summary.csv" || { echo "::error::portfolio_summary.csv ausente"; exit 2; }
+          ls -lah "data/out/${LOTECA_RODADA}/portfolio" || true
+
+      - name: Evaluate EV & Kelly
+        run: |
+          python scripts/evaluate_ticket_ev.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/portfolio/portfolio_ev.csv" || { echo "::error::portfolio_ev.csv ausente"; exit 2; }
+          tail -n +1 "data/out/${LOTECA_RODADA}/portfolio/portfolio_ev.csv" | sed -n '1,20p' || true
+
+      # ----------------- BACKTEST (HISTÓRICO + RELATÓRIO) -----------------
+      - name: Build calibration history (single rodada)
+        run: |
+          if [ ! -s "data/out/${LOTECA_RODADA}/results.csv" ] && [ ! -s "data/in/${LOTECA_RODADA}/results.csv" ]; then
+            echo "[history] aviso: nenhum results.csv encontrado; o relatório sairá com placeholders."
+          fi
+          python scripts/backtest_build_history.py --rodadas "${LOTECA_RODADA}"
+          ls -lah data/history || true
+
       - name: Backtest report (compat todos os caminhos)
         shell: bash
         run: |
@@ -20,7 +186,7 @@
             echo "[compat] criado placeholder data/history/report/metrics.csv"
           fi
 
-          # 3) Gera COPIAs nos caminhos LEGADOS esperados por etapas antigas
+          # 3) Gera CÓPIAS nos caminhos LEGADOS esperados por etapas antigas
           mkdir -p data/history
           cp -f "data/history/report/metrics.csv" "data/history/metrics.csv"
           echo "[compat] copiado metrics -> data/history/metrics.csv"
@@ -44,6 +210,32 @@
           test -s "data/history/report/reliability_bins.csv" || { echo "::error::reliability_bins.csv ausente em data/history/report/"; exit 2; }
           test -s "data/history/report/metrics.csv"          || { echo "::error::metrics.csv ausente em data/history/report/"; exit 2; }
 
-          # 5) Checagens: LEGADO (para compatibilidade com passos antigos)
+          # 5) Checagens: LEGADO (compat com passos antigos)
           test -s "data/history/metrics.csv"     || { echo "::error::metrics.csv ausente (legado) em data/history/"; exit 2; }
           test -s "data/history/reliability.csv" || { echo "::error::reliability.csv ausente (legado) em data/history/"; exit 2; }
+
+      # ----------------- ARTEFATOS -----------------
+      - name: Upload artifacts (rodada + report)
+        uses: actions/upload-artifact@v4
+        with:
+          name: loteca-${{ inputs.rodada }}
+          path: |
+            data/out/${{ inputs.rodada }}/matches.csv
+            data/out/${{ inputs.rodada }}/odds.csv
+            data/out/${{ inputs.rodada }}/joined_enriched.csv
+            data/out/${{ inputs.rodada }}/joined_referee.csv
+            data/out/${{ inputs.rodada }}/joined_weather.csv
+            data/out/${{ inputs.rodada }}/joined.csv
+            data/out/${{ inputs.rodada }}/portfolio/*
+            data/history/calibration.csv
+            data/history/report/report.html
+            data/history/report/calib_summary.csv
+            data/history/report/reliability_bins.csv
+            data/history/report/metrics.csv
+            data/history/report/calibration_1.png
+            data/history/report/calibration_X.png
+            data/history/report/calibration_2.png
+            data/history/report/hist_1.png
+            data/history/report/hist_X.png
+            data/history/report/hist_2.png
+          if-no-files-found: warn
