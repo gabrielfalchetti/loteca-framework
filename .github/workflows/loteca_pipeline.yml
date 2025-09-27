@@ -1,4 +1,4 @@
-name: Loteca Pipeline (ELITE) – Odds + RapidAPI + Injuries + Weather + Referee + OddsWatch + Optimizer + W&B
+name: Loteca Pipeline (ELITE+Portfolio) – Consensus(Shin) + Injuries + Weather + Referee + OddsWatch + Portfolio + EV/Kelly + W&B
 
 on:
   workflow_dispatch:
@@ -8,12 +8,18 @@ on:
         required: true
         type: string
         default: "2025-10-05_14"
+      n_tickets:
+        description: "Qtd de cartões do portfólio"
+        required: true
+        type: number
+        default: 5
 
 jobs:
   build-loteca:
     runs-on: ubuntu-latest
     env:
       LOTECA_RODADA: ${{ github.event.inputs.rodada }}
+      N_TICKETS: ${{ github.event.inputs.n_tickets }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
@@ -34,15 +40,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy requests rapidfuzz==3.9.7 PyYAML==6.0.2 wandb
 
-      - name: Weights & Biases - start run
+      - name: W&B start
         env:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
           python - << 'PY'
           import os, wandb
           key=os.environ.get("WANDB_API_KEY","")
-          if key:
-            wandb.login(key=key)
+          if key: wandb.login(key=key)
           PY
           python scripts/wandb_hook.py start --rodada "${{ env.LOTECA_RODADA }}" --project "${{ env.WANDB_PROJECT }}" --entity "${{ env.WANDB_ENTITY }}"
 
@@ -52,14 +57,13 @@ jobs:
           python scripts/ingest_matches.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
 
-      # 2) Odds – TheOddsAPI (múltiplas ligas) + RapidAPI complementar
+      # 2) Odds – múltiplas fontes (TheOddsAPI + RapidAPI)
       - name: Ingest odds Brasil (Série A)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
           python scripts/ingest_odds.py --rodada "${{ env.LOTECA_RODADA }}" \
-            --sport soccer_brazil_campeonato --regions uk,eu --market h2h \
-            --min-match 88 --allow-partial
+            --sport soccer_brazil_campeonato --regions uk,eu --market h2h --min-match 88 --allow-partial
           mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_br.csv" || true
 
       - name: Ingest odds Inglaterra (EPL)
@@ -75,8 +79,7 @@ jobs:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
           python scripts/ingest_odds.py --rodada "${{ env.LOTECA_RODADA }}" \
-            --sport soccer_spain_la_liga --regions uk,eu --market h2h \
-            --min-match 88 --allow-partial
+            --sport soccer_spain_la_liga --regions uk,eu --market h2h --min-match 88 --allow-partial
           mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_esp.csv" || true
 
       - name: Ingest odds (RapidAPI - API-Football)
@@ -85,38 +88,19 @@ jobs:
         run: |
           if [ -n "${RAPIDAPI_KEY}" ]; then
             python scripts/ingest_odds_apifootball_rapidapi.py \
-              --rodada "${{ env.LOTECA_RODADA }}" \
-              --allow-partial \
-              --country-hint "Brazil" \
-              --days-window 2 \
-              --min-match 85
+              --rodada "${{ env.LOTECA_RODADA }}" --allow-partial --country-hint "Brazil" --days-window 2 --min-match 85
+            mv "data/out/${{ env.LOTECA_RODADA }}/odds_apifootball.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_apifootball.csv" || true
           else
             echo "RAPIDAPI_KEY não definido; pulando passo API-Football."
           fi
 
-      - name: Merge odds
+      # 3) CONSENSO Shin + pesos
+      - name: Merge odds (consensus Shin + weights)
         run: |
-          set -e
-          BASE="data/out/${{ env.LOTECA_RODADA }}"
-          OUT="${BASE}/odds.csv"
-          TMP="${BASE}/odds_tmp.csv"
-          : > "${OUT}"
-          for f in "${BASE}/odds_br.csv" "${BASE}/odds_epl.csv" "${BASE}/odds_esp.csv" "${BASE}/odds_apifootball.csv"; do
-            if [ -s "$f" ]; then
-              if [ ! -s "${OUT}" ]; then
-                cp "$f" "${OUT}"
-              else
-                tail -n +2 "$f" >> "${OUT}"
-              fi
-            fi
-          done
-          test -s "${OUT}" || { echo "::error::Nenhuma odds coletada"; exit 2; }
-          IFS=, read -r HEADER < "${OUT}"
-          echo "${HEADER}" > "${TMP}"
-          awk -F, 'NR>1 && !seen[$1]++ { print }' "${OUT}" >> "${TMP}"
-          mv "${TMP}" "${OUT}"
+          python scripts/merge_odds_consensus.py --rodada "${{ env.LOTECA_RODADA }}"
+          test -s "data/out/${{ env.LOTECA_RODADA }}/odds.csv" || { echo "::error::odds.csv ausente após consenso"; exit 2; }
 
-      # 3) Features + Join
+      # 4) Features + Join
       - name: Build features
         run: |
           python scripts/build_features.py --rodada "${{ env.LOTECA_RODADA }}"
@@ -127,54 +111,51 @@ jobs:
           python scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
 
-      # 4) Injuries
-      - name: Adjust by injuries (RapidAPI/API-Football)
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      # 5) Injuries -> Weather -> Referee (sobrepondo joined.csv)
+      - name: Adjust by injuries
+        env: { RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }} }
         run: |
           python scripts/adjust_probs_lineups.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --alpha 0.05
-          test -s "data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv" || { echo "::error::joined_enriched.csv ausente/vazio"; exit 2; }
           cp "data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
 
-      # 5) Weather
-      - name: Adjust by weather (Open-Meteo + API-Football)
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      - name: Adjust by weather
+        env: { RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }} }
         run: |
           python scripts/adjust_probs_weather.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --altitude-threshold 1500
-          test -s "data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv" || { echo "::error::joined_weather.csv ausente/vazio"; exit 2; }
           cp "data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
 
-      # 6) Referee (opcional com tabela)
       - name: Adjust by referee
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        env: { RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }} }
         run: |
           python scripts/adjust_probs_referee.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --bias-cap 0.04
-          test -s "data/out/${{ env.LOTECA_RODADA }}/joined_referee.csv" || { echo "::error::joined_referee.csv ausente/vazio"; exit 2; }
           cp "data/out/${{ env.LOTECA_RODADA }}/joined_referee.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
 
-      # 7) Odds movement watch (alertas)
+      # 6) Odds movement alerts
       - name: Odds movement watch
         run: |
           python scripts/odds_movement_watch.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/alerts_odds_movement.csv" || { echo "::error::alerts_odds_movement.csv ausente/vazio"; exit 2; }
 
-      # 8) Cartão (Optimizer)
-      - name: Plan bet (optimizer)
+      # 7) Portfolio de cartões
+      - name: Build portfolio
         run: |
-          python scripts/plan_bet_opt.py --rodada "${{ env.LOTECA_RODADA }}" --max-duplos 4 --max-triplos 2
-          test -s "data/out/${{ env.LOTECA_RODADA }}/cartao.csv" || { echo "::error::cartao.csv não gerado"; exit 2; }
+          python scripts/plan_bet_portfolio.py --rodada "${{ env.LOTECA_RODADA }}" --n-tickets "${{ env.N_TICKETS }}" --max-duplos 4 --max-triplos 2 --sims-eval 25000
+          test -d "data/out/${{ env.LOTECA_RODADA }}/portfolio" || { echo "::error::portfolio ausente"; exit 2; }
 
-      - name: Weights & Biases - log artifacts
+      # 8) EV + Kelly
+      - name: Evaluate EV & Kelly
+        run: |
+          python scripts/evaluate_ticket_ev.py --rodada "${{ env.LOTECA_RODADA }}"
+          test -s "data/out/${{ env.LOTECA_RODADA }}/portfolio/portfolio_ev.csv" || { echo "::error::portfolio_ev.csv ausente"; exit 2; }
+
+      - name: W&B log artifacts
         env:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
           python - << 'PY'
           import os, wandb
-          key=os.environ.get("WANDB_API_KEY","")
-          if key:
-            wandb.login(key=key)
+          if os.environ.get("WANDB_API_KEY",""):
+            wandb.login(key=os.environ["WANDB_API_KEY"])
           PY
           python scripts/wandb_hook.py log --rodada "${{ env.LOTECA_RODADA }}" --project "${{ env.WANDB_PROJECT }}" --entity "${{ env.WANDB_ENTITY }}"
 
@@ -184,10 +165,8 @@ jobs:
           name: loteca-${{ env.LOTECA_RODADA }}
           path: |
             data/out/${{ env.LOTECA_RODADA }}/joined.csv
-            data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv
-            data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv
-            data/out/${{ env.LOTECA_RODADA }}/joined_referee.csv
-            data/out/${{ env.LOTECA_RODADA }}/alerts_odds_movement.csv
-            data/out/${{ env.LOTECA_RODADA }}/cartao.csv
             data/out/${{ env.LOTECA_RODADA }}/odds.csv
-            data/out/${{ env.LOTECA_RODADA }}/odds_baseline.csv
+            data/out/${{ env.LOTECA_RODADA }}/alerts_odds_movement.csv
+            data/out/${{ env.LOTECA_RODADA }}/portfolio/cartao_*.csv
+            data/out/${{ env.LOTECA_RODADA }}/portfolio/portfolio_summary.csv
+            data/out/${{ env.LOTECA_RODADA }}/portfolio/portfolio_ev.csv
