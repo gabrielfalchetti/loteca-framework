@@ -1,193 +1,118 @@
-# scripts/ingest_odds.py (PROD + robusto ao PyYAML ausente)
 from __future__ import annotations
-import argparse, os, json
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-
+import argparse, os, requests, time
 import pandas as pd
-import numpy as np
-import requests
-from rapidfuzz import fuzz
+from pathlib import Path
+from utils_team_aliases import load_aliases, normalize_team
 
-# yaml é opcional: se não existir a lib, seguimos com pesos padrão
-try:
-    import yaml  # type: ignore
-except Exception:
-    yaml = None  # fallback
+BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-DEFAULT_WEIGHTS = {"pinnacle": 2.0, "betfair": 1.8}
-
-def load_weights() -> Dict[str, float]:
-    """Carrega pesos do arquivo config/bookmaker_weights.yaml se possível.
-    Caso PyYAML não esteja instalado ou arquivo inválido, usa DEFAULT_WEIGHTS."""
-    cfg = Path("config/bookmaker_weights.yaml")
-    if yaml is None:
-        return DEFAULT_WEIGHTS
-    if cfg.exists() and cfg.stat().st_size > 0:
-        try:
-            data = yaml.safe_load(cfg.read_text()) or {}
-            return {str(k).lower(): float(v) for k, v in data.items()}
-        except Exception:
-            return DEFAULT_WEIGHTS
-    return DEFAULT_WEIGHTS
-
-def norm_team(s: str) -> str:
-    if not isinstance(s, str): s = "" if s is None else str(s)
-    s = s.lower().strip()
-    for a,b in [(" futebol clube",""),(" futebol",""),(" clube",""),(" club",""),
-                (" fc",""),(" afc",""),(" sc",""),(" ac",""),(" de futebol",""),
-                ("  "," ")]:
-        s = s.replace(a,b)
-    return s
-
-def read_matches(rodada: str, matches_path: Optional[str]=None) -> pd.DataFrame:
-    base = Path(f"data/out/{rodada}")
-    mp = Path(matches_path) if matches_path else base/"matches.csv"
-    if not mp.exists() or mp.stat().st_size==0:
-        raise RuntimeError(f"[ingest_odds] matches.csv ausente/vazio: {mp}")
-    m = pd.read_csv(mp).rename(columns=str.lower)
-    maps = {"mandante":"home","visitante":"away","time_casa":"home","time_fora":"away",
-            "casa":"home","fora":"away","home_team":"home","away_team":"away",
-            "data_jogo":"date","data":"date","matchdate":"date","id":"match_id"}
-    m = m.rename(columns={k:v for k,v in maps.items() if k in m.columns})
-    if "match_id" not in m.columns:
-        m = m.reset_index(drop=True); m["match_id"]=m.index+1
-    for c in ("home","away"):
-        if c in m.columns: m[c]=m[c].astype(str).str.strip()
-    return m[["match_id","home","away"]].copy()
-
-def fetch_api(sport: str, regions: List[str], market: str, api_key: str) -> List[dict]:
-    url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
-    params = {"apiKey": api_key, "regions": ",".join(regions), "markets": market,
-              "oddsFormat": "decimal", "dateFormat": "iso"}
-    r = requests.get(url, params=params, timeout=30)
-    if r.status_code!=200:
-        raise RuntimeError(f"[ingest_odds] TheOddsAPI HTTP {r.status_code}: {r.text[:250]}")
-    return r.json()
-
-def parse_events(data: List[dict]) -> Dict[Tuple[str,str], Dict[str,Tuple[float,float,float]]]:
-    evs: Dict[Tuple[str,str], Dict[str,Tuple[float,float,float]]] = {}
-    for ev in data:
-        home = norm_team(ev.get("home_team",""))
-        away_counts: Dict[str,int]={}
-        for bk in ev.get("bookmakers",[]):
-            for mk in bk.get("markets",[]):
-                if mk.get("key")!="h2h": continue
-                for outc in mk.get("outcomes",[]):
-                    nm = norm_team(outc.get("name",""))
-                    if nm and nm!=home: away_counts[nm]=away_counts.get(nm,0)+1
-        if not home or not away_counts: continue
-        away = max(away_counts, key=away_counts.get)
-        if home==away: continue
-        key=(home,away)
-        if key not in evs: evs[key]={}
-        for bk in ev.get("bookmakers",[]):
-            bk_key = (bk.get("key") or bk.get("title") or "").lower()
-            oh=od=oa=None
-            for mk in bk.get("markets",[]):
-                if mk.get("key")!="h2h": continue
-                for outc in mk.get("outcomes",[]):
-                    nm=norm_team(outc.get("name","")); pr=outc.get("price",None)
-                    try: pr=float(pr)
-                    except: pr=None
-                    if pr is None: continue
-                    if nm==home: oh=pr
-                    elif nm in ("draw","empate","x"): od=pr
-                    elif nm==away: oa=pr
-            if oh and od and oa: evs[key][bk_key]=(oh,od,oa)
-    return evs
-
-def devig_prop(oh: float, od: float, oa: float):
-    p_home, p_draw, p_away = 1/oh, 1/od, 1/oa
-    s = p_home + p_draw + p_away
-    over = s
-    if s <= 0: return p_home, p_draw, p_away, over
-    return p_home/s, p_draw/s, p_away/s, over
-
-def consensus(book_odds: Dict[str,Tuple[float,float,float]], weights: Dict[str,float]):
-    if not book_odds: raise ValueError("sem bookmakers")
-    probs=[]; overs=[]; wts=[]
-    for bk,(oh,od,oa) in book_odds.items():
-        p_home, p_draw, p_away, over = devig_prop(oh,od,oa)
-        probs.append((p_home, p_draw, p_away)); overs.append(over)
-        wts.append(weights.get(bk.lower(), 1.0))
-    probs=np.array(probs); wts=np.array(wts).reshape(-1,1)
-    p=np.sum(probs*wts,axis=0)/np.sum(wts)
-    return float(p[0]), float(p[1]), float(p[2]), float(np.mean(overs)), len(book_odds)
-
-def match_with_fuzzy(matches: pd.DataFrame,
-                     evs: Dict[Tuple[str,str],Dict[str,Tuple[float,float,float]]],
-                     min_ratio:int):
-    api_keys=list(evs.keys()); out={}
-    for _,r in matches.iterrows():
-        mid=r["match_id"]; h=norm_team(r["home"]); a=norm_team(r["away"])
-        if (h,a) in evs: out[mid]=(h,a,100,100,100); continue
-        best=None; best_avg=-1; best_s1=best_s2=0
-        for (hh,aa) in api_keys:
-            s1=fuzz.token_set_ratio(h,hh); s2=fuzz.token_set_ratio(a,aa); avg=(s1+s2)//2
-            if avg>best_avg: best_avg=avg; best=(hh,aa); best_s1, best_s2=s1,s2
-        if best and best_avg>=min_ratio: out[mid]=(best[0],best[1],best_s1,best_s2,best_avg)
-    return out
+def api_get(path: str, params: dict) -> list[dict] | dict:
+    r = requests.get(f"{BASE_URL}/{path}", params=params, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"[theoddsapi] GET /{path} HTTP {r.status_code}: {r.text[:300]}")
+    try:
+        return r.json()
+    except Exception:
+        return {}
 
 def main():
-    ap=argparse.ArgumentParser(description="Ingest odds reais (TheOddsAPI) -> data/out/<rodada>/odds.csv")
+    ap = argparse.ArgumentParser(description="Ingest odds TheOddsAPI")
     ap.add_argument("--rodada", required=True)
-    ap.add_argument("--matches", default=None)
-    ap.add_argument("--sport", default="soccer_brazil_campeonato")
-    ap.add_argument("--regions", default="uk,eu")
+    ap.add_argument("--sport", required=True, help="ex.: soccer_brazil_campeonato, soccer_epl, soccer_spain_la_liga, ...")
+    ap.add_argument("--regions", default="uk,eu", help="ex.: uk,eu,us")
     ap.add_argument("--market", default="h2h")
-    ap.add_argument("--min-match", type=int, default=88)
     ap.add_argument("--allow-partial", action="store_true")
-    args=ap.parse_args()
+    ap.add_argument("--min-match", type=int, default=85)  # mantido pra compat
+    args = ap.parse_args()
 
-    api_key=os.getenv("ODDS_API_KEY","").strip()
-    if not api_key: raise RuntimeError("[ingest_odds] ODDS_API_KEY não definido.")
+    api_key = os.environ.get("ODDS_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("[theoddsapi] ODDS_API_KEY ausente nos Secrets.")
 
-    weights = load_weights()
-
-    matches=read_matches(args.rodada, args.matches)
-    regions=[r.strip() for r in args.regions.split(",") if r.strip()]
-    data=fetch_api(args.sport, regions, args.market, api_key)
-
-    base=Path(f"data/out/{args.rodada}")
+    base = Path(f"data/out/{args.rodada}")
     base.mkdir(parents=True, exist_ok=True)
 
-    evs=parse_events(data)
-    mapping=match_with_fuzzy(matches, evs, args.min_match)
+    # matches (para mapear match_id/home/away normalizados)
+    mpath = base / "matches.csv"
+    if not mpath.exists() or mpath.stat().st_size == 0:
+        raise RuntimeError(f"[theoddsapi] matches.csv ausente: {mpath}")
+    matches = pd.read_csv(mpath).rename(columns=str.lower)
 
-    rows=[]; missing=[]
-    for _,r in matches.iterrows():
-        mid=r["match_id"]
-        if mid not in mapping:
-            missing.append(int(mid)); continue
-        hh,aa, *_ = mapping[mid]
-        book_odds = evs.get((hh,aa),{})
-        if not book_odds:
-            missing.append(int(mid)); continue
-        p_home, p_draw, p_away, over, n = consensus(book_odds, weights)
-        odd_home = round(1.0/p_home, 4)
-        odd_draw = round(1.0/p_draw, 4)
-        odd_away = round(1.0/p_away, 4)
-        providers = ",".join(sorted(book_odds.keys()))
-        rows.append({
-            "match_id": mid,
-            "odd_home": odd_home, "odd_draw": odd_draw, "odd_away": odd_away,
-            "n_bookmakers": n, "overround_mean": round(over,4),
-            "providers": providers
-        })
+    alias_map = load_aliases()
+    matches["home_n"] = matches["home"].astype(str).apply(lambda x: normalize_team(x, alias_map))
+    matches["away_n"] = matches["away"].astype(str).apply(lambda x: normalize_team(x, alias_map))
 
-    if missing and not args.allow_partial:
-        raise RuntimeError(f"[ingest_odds] Sem odds para match_id: {sorted(missing)}")
+    # consulta de odds do sport
+    params = {
+        "apiKey": api_key,
+        "regions": args.regions,
+        "markets": args.market,
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
+    }
+    resp = api_get(f"{args.sport}/odds", params=params)
+    if not isinstance(resp, list):
+        raise RuntimeError("[theoddsapi] Resposta inesperada (não-list).")
+
+    rows = []
+    for game in resp:
+        try:
+            co = game.get("commence_time")  # iso
+            teams = game.get("teams", []) or []
+            home_team = game.get("home_team", "")
+            if home_team and teams and home_team in teams:
+                away_team = [t for t in teams if t != home_team][0] if len(teams) == 2 else ""
+            else:
+                if len(teams) == 2:
+                    home_team, away_team = teams[0], teams[1]
+                else:
+                    continue
+            hn = normalize_team(home_team, alias_map)
+            an = normalize_team(away_team, alias_map)
+
+            markets = game.get("bookmakers", []) or []
+            oh = od = oa = None
+            for bk in markets:
+                for mkt in bk.get("markets", []):
+                    if mkt.get("key") == args.market:
+                        for outc in mkt.get("outcomes", []):
+                            name = str(outc.get("name","")).strip().upper()
+                            price = outc.get("price")
+                            try:
+                                price = float(price)
+                            except Exception:
+                                continue
+                            if name == "HOME":
+                                oh = price if oh is None else min(oh, price)
+                            elif name == "DRAW":
+                                od = price if od is None else min(od, price)
+                            elif name == "AWAY":
+                                oa = price if oa is None else min(oa, price)
+
+            if oh and od and oa:
+                rows.append({"commence_time": co, "home": hn, "away": an, "odd_home": oh, "odd_draw": od, "odd_away": oa})
+        except Exception:
+            continue
+
+        time.sleep(0.05)  # leve respiro
+
+    if not rows:
+        print("[theoddsapi] Aviso: nenhuma odd coletada para este sport.")
+        if not args.allow_partial:
+            raise SystemExit(0)
 
     out = pd.DataFrame(rows)
-    if out.empty:
-        raise RuntimeError("[ingest_odds] Nenhuma odd coletada.")
+    # tenta casar com matches por nomes normalizados
+    merged = matches.merge(out, left_on=["home_n","away_n"], right_on=["home","away"], how="left")
+    have = merged[merged[["odd_home","odd_draw","odd_away"]].notna().all(axis=1)]
+    have = have[["match_id","home","away","odd_home","odd_draw","odd_away"]].sort_values("match_id")
+    if have.empty:
+        print("[theoddsapi] Nenhuma odd casada com matches (talvez sport não cobre esses jogos).")
+    else:
+        # salva em arquivo específico por sport, permitindo múltiplos merges depois
+        sport_key = args.sport.lower().replace("/", "_")
+        (base / f"odds_{sport_key}.csv").write_text(have.to_csv(index=False), encoding="utf-8")
+        print(f"[theoddsapi] OK -> {base/f'odds_{sport_key}.csv'} ({len(have)} jogos)")
 
-    out_path = base/"odds.csv"
-    out.to_csv(out_path, index=False)
-    print(f"[ingest_odds] OK: {len(out)} linhas -> {out_path}")
-    if missing:
-        print(f"[ingest_odds] Aviso: {len(missing)} jogos sem odds (ids={sorted(missing)})")
-
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
