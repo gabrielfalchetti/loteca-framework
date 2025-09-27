@@ -22,12 +22,24 @@ on:
         required: false
         default: '50000'
         type: string
+      days_window:
+        description: 'Janela ±dias (RapidAPI fixtures/odds)'
+        required: false
+        default: '2'
+        type: string
+      min_match:
+        description: 'Similaridade fuzzy mínima (0-100)'
+        required: false
+        default: '85'
+        type: string
 
 jobs:
   risk:
     runs-on: ubuntu-latest
     env:
       LOTECA_RODADA: ${{ inputs.rodada }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
 
     steps:
       - name: Checkout
@@ -38,16 +50,85 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: Install deps (risk + modeling)
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy
+          pip install pandas numpy scikit-learn joblib requests PyYAML rapidfuzz==3.9.7 matplotlib
 
-      - name: Ensure probs
+      # 1) matches.csv
+      - name: Ensure matches.csv
+        shell: bash
         run: |
-          test -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" -o -s "data/out/${LOTECA_RODADA}/joined_stacked.csv" -o -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::Nenhum arquivo de probabilidades final encontrado."; exit 2; }
+          set -e
+          if [ -s "data/out/${LOTECA_RODADA}/matches.csv" ]; then
+            echo "[ensure] matches.csv já existe."
+          else
+            if [ -s "data/in/${LOTECA_RODADA}/matches_source.csv" ]; then
+              python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
+            else
+              echo "::error::Crie data/in/${LOTECA_RODADA}/matches_source.csv com colunas: match_id,home,away[,date]."
+              exit 2
+            fi
+          fi
+          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente"; exit 2; }
 
-      - name: Plan (Kelly + Diversificação + VaR/ES)
+      # 2) odds.csv (coleta se faltar) + consenso
+      - name: Ensure odds.csv (ingest/consensus if missing)
+        shell: bash
+        run: |
+          set -e
+          if [ -s "data/out/${LOTECA_RODADA}/odds.csv" ]; then
+            echo "[ensure] odds.csv já existe."
+          else
+            if [ -n "${ODDS_API_KEY}" ]; then
+              python scripts/ingest_odds.py \
+                --rodada "${LOTECA_RODADA}" \
+                --sport soccer_brazil_campeonato \
+                --regions uk,eu \
+                --market h2h \
+                --allow-partial \
+                --min-match ${{ inputs.min_match }} || true
+            else
+              echo "[ensure] ODDS_API_KEY não definido — pulando TheOddsAPI."
+            fi
+
+            if [ -n "${RAPIDAPI_KEY}" ]; then
+              python scripts/ingest_odds_apifootball_rapidapi.py \
+                --rodada "${LOTECA_RODADA}" \
+                --allow-partial \
+                --days-window ${{ inputs.days_window }} \
+                --min-match ${{ inputs.min_match }} || true
+            else
+              echo "[ensure] RAPIDAPI_KEY não definido — pulando API-Football."
+            fi
+
+            python scripts/merge_odds_consensus.py --rodada "${LOTECA_RODADA}" || true
+          fi
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente após tentativa de coleta/merge"; exit 2; }
+
+      # 3) modeling univariado + bivariado + stacking
+      - name: Build probabilities (xG + Dixon-Coles + stacking)
+        run: |
+          python scripts/features_xg.py --rodada "${LOTECA_RODADA}"
+          python scripts/features_xg_bivar.py --rodada "${LOTECA_RODADA}" --kmax 10
+          if [ -s "data/history/calibration.csv" ]; then
+            python scripts/calib_isotonic.py --history-path "data/history/calibration.csv" --out-path "models/calib_isotonic.pkl"
+          else
+            echo "[calib] histórico ausente; seguindo sem isotônica."
+          fi
+          python scripts/stack_probs_bivar.py --rodada "${LOTECA_RODADA}" --w-consensus 0.5 --w-xg 0.25 --w-bivar 0.25 --calib-path "models/calib_isotonic.pkl" || true
+          # fallback: se bivar falhar por qualquer motivo, tenta o stacking univariado
+          if [ ! -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" ]; then
+            python scripts/stack_probs.py --rodada "${LOTECA_RODADA}" --w-consensus 0.6 --w-xg 0.4 --calib-path "models/calib_isotonic.pkl" || true
+          fi
+
+      # 4) garante que temos AO MENOS uma matriz de probabilidades final
+      - name: Ensure final probabilities exist
+        run: |
+          test -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" -o -s "data/out/${LOTECA_RODADA}/joined_stacked.csv" -o -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::Nenhum arquivo de probabilidades final encontrado (mesmo após geração)."; exit 2; }
+
+      # 5) Planejamento (Kelly + Diversificação + VaR/ES)
+      - name: Plan portfolio (Fase 3)
         run: |
           python scripts/plan_bet_portfolio_adv.py \
             --rodada "${LOTECA_RODADA}" \
@@ -55,7 +136,8 @@ jobs:
             --kelly-frac "${{ inputs.kelly_frac }}" \
             --sims "${{ inputs.sims }}"
 
-      - name: Evaluate Risk
+      # 6) Avaliação de risco (resimulação)
+      - name: Evaluate Risk (resim)
         run: |
           python scripts/evaluate_portfolio_risk.py \
             --rodada "${LOTECA_RODADA}" \
@@ -71,4 +153,10 @@ jobs:
             data/out/${{ inputs.rodada }}/portfolio_returns.csv
             data/out/${{ inputs.rodada }}/portfolio_risk_eval.csv
             data/out/${{ inputs.rodada }}/portfolio_returns_eval.csv
+            data/out/${{ inputs.rodada }}/joined_stacked_bivar.csv
+            data/out/${{ inputs.rodada }}/joined_stacked.csv
+            data/out/${{ inputs.rodada }}/joined.csv
+            data/out/${{ inputs.rodada }}/xg_features.csv
+            data/out/${{ inputs.rodada }}/xg_bivar.csv
+            data/out/${{ inputs.rodada }}/odds.csv
           if-no-files-found: warn
