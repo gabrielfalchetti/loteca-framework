@@ -1,8 +1,8 @@
 # scripts/merge_odds_consensus.py
-# Consenso de odds com devig Shin + pesos, com FALLBACKS:
-# - Se existir qualquer odds_*.csv -> usa todos e agrega
-# - Se NÃO existir odds_*.csv -> usa data/out/<rodada>/odds.csv como fonte única
-# - Se Shin falhar em alguma linha -> fallback para probs por inverso das odds (devig simples)
+# Consenso de odds com devig Shin + pesos, com FALLBACKS robustos:
+# - Se existir odds_*.csv -> usa todos; se não, usa data/out/<rodada>/odds.csv
+# - Se faltar colunas home/away, completa a partir de data/out/<rodada>/matches.csv via match_id
+# - Se Shin falhar em alguma linha, usa inverso das odds
 from __future__ import annotations
 import argparse, glob
 from pathlib import Path
@@ -68,6 +68,15 @@ def inv_probs(odds):
     return p
 
 # ----------------- Util -----------------
+RENAME_CANDIDATES = {
+    "home_team":"home","away_team":"away",
+    "home_name":"home","away_name":"away",
+    "time_casa":"home","time_fora":"away",
+    "h":"odd_home","d":"odd_draw","a":"odd_away",
+    "odd_h":"odd_home","odd_d":"odd_draw","odd_a":"odd_away",
+    "bk":"bookmaker","book":"bookmaker","sportsbook":"bookmaker"
+}
+
 def load_weights(path: Path) -> dict:
     if path.exists() and path.stat().st_size>0:
         df = pd.read_csv(path)
@@ -76,22 +85,25 @@ def load_weights(path: Path) -> dict:
     return {}  # peso=1 por padrão
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # Garante colunas mínimas; cria bookmaker "unknown" se não existir
-    rename_map = {
-        "home_team":"home","away_team":"away",
-        "odd_h":"odd_home","odd_d":"odd_draw","odd_a":"odd_away",
-        "bk":"bookmaker"
-    }
-    for a,b in rename_map.items():
+    # normaliza cabeçalhos
+    lower = {c: c.lower() for c in df.columns}
+    df = df.rename(columns=lower)
+    for a,b in RENAME_CANDIDATES.items():
         if a in df.columns and b not in df.columns:
             df = df.rename(columns={a:b})
-    need = {"match_id","home","away","odd_home","odd_draw","odd_away"}
-    missing = [c for c in need if c not in df.columns]
-    if missing:
-        raise RuntimeError(f"[consensus] arquivo de odds sem colunas necessárias: faltam {missing}")
+    # garantir colunas de odds
+    need_odds = {"match_id","odd_home","odd_draw","odd_away"}
+    missing_odds = [c for c in need_odds if c not in df.columns]
+    if missing_odds:
+        raise RuntimeError(f"[consensus] arquivo de odds sem colunas obrigatórias: faltam {missing_odds}")
+    # bookmaker opcional
     if "bookmaker" not in df.columns:
         df["bookmaker"] = "unknown"
-    return df[["match_id","home","away","bookmaker","odd_home","odd_draw","odd_away"]].copy()
+    # home/away podem faltar (vamos completar depois via matches)
+    cols = ["match_id","bookmaker","odd_home","odd_draw","odd_away"]
+    if "home" in df.columns: cols.append("home")
+    if "away" in df.columns: cols.append("away")
+    return df[cols].copy()
 
 def read_sources(base: Path) -> pd.DataFrame:
     files = sorted([f for f in glob.glob(str(base/"odds_*.csv"))])
@@ -117,6 +129,37 @@ def read_sources(base: Path) -> pd.DataFrame:
         raise RuntimeError("[consensus] Nenhum arquivo de odds encontrado (odds_*.csv ou odds.csv).")
     return pd.concat(rows, ignore_index=True)
 
+def attach_home_away(df: pd.DataFrame, base: Path) -> pd.DataFrame:
+    """Completa colunas home/away usando matches.csv quando necessário."""
+    has_home = "home" in df.columns
+    has_away = "away" in df.columns
+    if has_home and has_away:
+        return df
+    mpath = base/"matches.csv"
+    if not mpath.exists() or mpath.stat().st_size == 0:
+        raise RuntimeError(f"[consensus] faltam colunas home/away e matches.csv não existe: {mpath}")
+    M = pd.read_csv(mpath)
+    # normaliza colunas em matches
+    mcols = {c.lower(): c for c in M.columns}
+    M = M.rename(columns={mcols.get("home","home"):"home", mcols.get("away","away"):"away", mcols.get("match_id","match_id"):"match_id"})
+    need = {"match_id","home","away"}
+    if not need.issubset(M.columns):
+        raise RuntimeError(f"[consensus] matches.csv inválido, precisa de colunas: {need}")
+    merged = pd.merge(df, M[["match_id","home","away"]], on="match_id", how="left", suffixes=("","_m"))
+    # se já tinha alguma coluna, preenche faltantes
+    if "home" not in df.columns:
+        merged["home"] = merged["home_m"]
+    if "away" not in df.columns:
+        merged["away"] = merged["away_m"]
+    merged = merged.drop(columns=[c for c in ["home_m","away_m"] if c in merged.columns])
+    # última checagem
+    if merged["home"].isna().any() or merged["away"].isna().any():
+        # ainda faltou algum nome — preenche com vazio para não quebrar (não é crítico para consenso)
+        merged["home"] = merged["home"].fillna("")
+        merged["away"] = merged["away"].fillna("")
+        print("[consensus] aviso: alguns jogos ficaram sem nome home/away; usando vazio.")
+    return merged
+
 def main():
     ap = argparse.ArgumentParser(description="Merge de odds com devig Shin + pesos (com fallbacks)")
     ap.add_argument("--rodada", required=True)
@@ -127,6 +170,10 @@ def main():
     base.mkdir(parents=True, exist_ok=True)
 
     all_odds = read_sources(base)
+    # completa home/away caso falte
+    all_odds = attach_home_away(all_odds, base)
+
+    # pesos por bookmaker
     weights = load_weights(Path(args.weights_file))
     all_odds["bookmaker_norm"] = all_odds["bookmaker"].astype(str).str.strip().str.lower()
 
@@ -164,8 +211,8 @@ def main():
         oh, od, oa = 1.0/ps
         agg.append({
             "match_id": int(mid),
-            "home": str(g["home"].iloc[0]),
-            "away": str(g["away"].iloc[0]),
+            "home": str(g["home"].iloc[0]) if "home" in g.columns else "",
+            "away": str(g["away"].iloc[0]) if "away" in g.columns else "",
             "p_home": ps[0], "p_draw": ps[1], "p_away": ps[2],
             "odd_home": oh, "odd_draw": od, "odd_away": oa,
             "n_bookmakers": int(g["bookmaker"].nunique())
