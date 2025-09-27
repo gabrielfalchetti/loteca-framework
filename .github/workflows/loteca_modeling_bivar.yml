@@ -1,0 +1,126 @@
+name: Loteca Modeling (Bivariado DC)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rodada:
+        description: 'Identificador da rodada (ex.: 2025-10-05_14)'
+        required: true
+        type: string
+      days_window:
+        description: 'Janela ±dias (RapidAPI fixtures/odds)'
+        required: false
+        default: '2'
+        type: string
+      min_match:
+        description: 'Similaridade mínima fuzzy (0-100)'
+        required: false
+        default: '85'
+        type: string
+
+jobs:
+  modeling_bivar:
+    runs-on: ubuntu-latest
+    env:
+      LOTECA_RODADA: ${{ inputs.rodada }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy scikit-learn joblib requests PyYAML rapidfuzz==3.9.7 matplotlib
+
+      # Garantir matches.csv
+      - name: Ensure matches.csv
+        shell: bash
+        run: |
+          set -e
+          if [ -s "data/out/${LOTECA_RODADA}/matches.csv" ]; then
+            echo "[ensure] matches.csv já existe."
+          else
+            if [ -s "data/in/${LOTECA_RODADA}/matches_source.csv" ]; then
+              python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
+            else
+              echo "::error::Crie data/in/${LOTECA_RODADA}/matches_source.csv (match_id,home,away[,date])"
+              exit 2
+            fi
+          fi
+          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente"; exit 2; }
+
+      # Garantir odds.csv
+      - name: Ensure odds.csv (ingest/consensus if missing)
+        shell: bash
+        run: |
+          set -e
+          if [ -s "data/out/${LOTECA_RODADA}/odds.csv" ]; then
+            echo "[ensure] odds.csv já existe."
+          else
+            if [ -n "${ODDS_API_KEY}" ]; then
+              python scripts/ingest_odds.py \
+                --rodada "${LOTECA_RODADA}" \
+                --sport soccer_brazil_campeonato \
+                --regions uk,eu \
+                --market h2h \
+                --allow-partial \
+                --min-match ${{ inputs.min_match }} || true
+            fi
+            if [ -n "${RAPIDAPI_KEY}" ]; then
+              python scripts/ingest_odds_apifootball_rapidapi.py \
+                --rodada "${LOTECA_RODADA}" \
+                --allow-partial \
+                --days-window ${{ inputs.days_window }} \
+                --min-match ${{ inputs.min_match }} || true
+            fi
+            python scripts/merge_odds_consensus.py --rodada "${LOTECA_RODADA}" || true
+          fi
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente"; exit 2; }
+
+      # xG univariado
+      - name: xG (univariado)
+        run: |
+          python scripts/features_xg.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/xg_features.csv" || { echo "::error::xg_features.csv ausente"; exit 2; }
+
+      # xG bivariado (Dixon-Coles)
+      - name: xG bivariado (Dixon-Coles)
+        run: |
+          python scripts/features_xg_bivar.py --rodada "${LOTECA_RODADA}" --kmax 10
+          test -s "data/out/${LOTECA_RODADA}/xg_bivar.csv" || { echo "::error::xg_bivar.csv ausente"; exit 2; }
+
+      # calibração isotônica (opcional, se houver histórico)
+      - name: Calibração isotônica
+        run: |
+          if [ -s "data/history/calibration.csv" ]; then
+            python scripts/calib_isotonic.py --history-path "data/history/calibration.csv" --out-path "models/calib_isotonic.pkl"
+          else
+            echo "[calib] histórico ausente; stack seguirá sem isotônica."
+          fi
+
+      # stacking 3-fontes
+      - name: Stacking bivariado (3 fontes)
+        run: |
+          python scripts/stack_probs_bivar.py --rodada "${LOTECA_RODADA}" --w-consensus 0.5 --w-xg 0.25 --w-bivar 0.25 --calib-path "models/calib_isotonic.pkl"
+          test -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" || { echo "::error::joined_stacked_bivar.csv ausente"; exit 2; }
+          head -n 5 "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" || true
+
+      - name: Upload artifacts (bivariado)
+        uses: actions/upload-artifact@v4
+        with:
+          name: modeling-bivar-${{ inputs.rodada }}
+          path: |
+            data/out/${{ inputs.rodada }}/xg_features.csv
+            data/out/${{ inputs.rodada }}/xg_bivar.csv
+            data/out/${{ inputs.rodada }}/joined_stacked_bivar.csv
+            data/out/${{ inputs.rodada }}/odds.csv
+            models/calib_isotonic.pkl
+          if-no-files-found: warn
