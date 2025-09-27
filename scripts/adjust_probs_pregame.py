@@ -1,4 +1,3 @@
-# scripts/adjust_probs_pregame.py
 from __future__ import annotations
 import argparse, numpy as np, pandas as pd
 from pathlib import Path
@@ -27,19 +26,19 @@ def _load_probs(base: Path):
 
 def _apply_lineups(df: pd.DataFrame, P: np.ndarray, cap: float) -> np.ndarray:
     lp = df.get("lineups_raw.csv_path")
-    if lp is None:
+    if lp is None or not lp.exists() or lp.stat().st_size == 0:
         return P
     ln = pd.read_csv(lp)
     need = {"match_id","home_missing","away_missing"}
     if not need.issubset(ln.columns):
         return P
-    df = df.merge(ln[list(need)], on="match_id", how="left")
-    df[["home_missing","away_missing"]] = df[["home_missing","away_missing"]].fillna(0)
-    miss_h = df["home_missing"].to_numpy(int)
-    miss_a = df["away_missing"].to_numpy(int)
+    df2 = df.merge(ln[list(need)], on="match_id", how="left")
+    df2[["home_missing","away_missing"]] = df2[["home_missing","away_missing"]].fillna(0)
+    miss_h = df2["home_missing"].to_numpy(int)
+    miss_a = df2["away_missing"].to_numpy(int)
 
     fav = np.argmax(P, axis=1)  # 0=home, 1=draw, 2=away
-    for i in range(len(df)):
+    for i in range(len(df2)):
         s = 0.0
         if fav[i] == 0 and miss_h[i] >= 1:
             s -= 0.005 if miss_h[i] < 3 else 0.015
@@ -63,10 +62,10 @@ def _apply_weather(df: pd.DataFrame, P: np.ndarray, cap: float) -> np.ndarray:
     need = {"match_id","rain_mm","wind_ms"}
     if not need.issubset(we.columns):
         return P
-    df = df.merge(we[list(need)], on="match_id", how="left")
-    rain = df["rain_mm"].fillna(0.0).to_numpy(float)
-    wind = df["wind_ms"].fillna(0.0).to_numpy(float)
-    for i in range(len(df)):
+    df2 = df.merge(we[list(need)], on="match_id", how="left")
+    rain = df2["rain_mm"].fillna(0.0).to_numpy(float)
+    wind = df2["wind_ms"].fillna(0.0).to_numpy(float)
+    for i in range(len(df2)):
         bonus = 0.0
         if rain[i] > 3.0: bonus += 0.008
         if wind[i] > 7.0: bonus += 0.007
@@ -89,10 +88,10 @@ def _apply_movement(df: pd.DataFrame, P: np.ndarray, cap: float) -> np.ndarray:
     need = {"match_id","d_home_pp","d_away_pp"}
     if not need.issubset(mv.columns):
         return P
-    df = df.merge(mv[list(need)], on="match_id", how="left")
-    dH = df["d_home_pp"].fillna(0.0).to_numpy(float)
-    dA = df["d_away_pp"].fillna(0.0).to_numpy(float)
-    for i in range(len(df)):
+    df2 = df.merge(mv[list(need)], on="match_id", how="left")
+    dH = df2["d_home_pp"].fillna(0.0).to_numpy(float)
+    dA = df2["d_away_pp"].fillna(0.0).to_numpy(float)
+    for i in range(len(df2)):
         s = 0.0; side = None
         if dH[i] > 1.5 and dH[i] > dA[i]:
             s, side = min(cap, dH[i]/100.0), 0
