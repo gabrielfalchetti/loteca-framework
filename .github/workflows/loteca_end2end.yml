@@ -1,0 +1,228 @@
+name: Loteca End-to-End (Tudo Integrado)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rodada:
+        description: 'Identificador da rodada (ex.: 2025-09-27_1213)'
+        required: true
+        type: string
+      days_window:
+        description: 'Janela ±dias para fixtures/odds (RapidAPI)'
+        required: false
+        default: '2'
+        type: string
+      min_match:
+        description: 'Similaridade mínima fuzzy (0-100)'
+        required: false
+        default: '85'
+        type: string
+      max_duplos:
+        description: 'Máximo de duplos'
+        required: false
+        default: '4'
+        type: string
+      max_triplos:
+        description: 'Máximo de triplos'
+        required: false
+        default: '2'
+        type: string
+
+jobs:
+  loteca_e2e:
+    runs-on: ubuntu-latest
+    env:
+      LOTECA_RODADA: ${{ inputs.rodada }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+      AZURE_BING_KEY: ${{ secrets.AZURE_BING_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps (framework + integrações)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy scikit-learn joblib requests PyYAML rapidfuzz==3.9.7 matplotlib
+
+      # === 1) MATCHES ===
+      - name: 1) Ensure matches.csv
+        shell: bash
+        run: |
+          set -e
+          if [ -s "data/out/${LOTECA_RODADA}/matches.csv" ]; then
+            echo "[matches] OK (já existia)."
+          else
+            test -s "data/in/${LOTECA_RODADA}/matches_source.csv" || { echo "::error::Crie data/in/${LOTECA_RODADA}/matches_source.csv (match_id,home,away[,date])"; exit 2; }
+            python scripts/ingest_matches.py --rodada "${LOTECA_RODADA}"
+          fi
+          test -s "data/out/${LOTECA_RODADA}/matches.csv"
+
+      # === 2) ODDS REAIS + CONSENSO ===
+      - name: 2) Ingest odds (TheOddsAPI) + (API-Football/RapidAPI) + merge
+        shell: bash
+        run: |
+          set -e
+          USED_ODDS_API=0
+          USED_RAPIDAPI=0
+          if [ -n "${ODDS_API_KEY}" ]; then
+            python scripts/ingest_odds.py --rodada "${LOTECA_RODADA}" --sport soccer_brazil_campeonato --regions uk,eu --market h2h --allow-partial --min-match ${{ inputs.min_match }} || true
+            USED_ODDS_API=1
+          fi
+          if [ -n "${RAPIDAPI_KEY}" ]; then
+            python scripts/ingest_odds_apifootball_rapidapi.py --rodada "${LOTECA_RODADA}" --allow-partial --days-window ${{ inputs.days_window }} --min-match ${{ inputs.min_match }} || true
+            USED_RAPIDAPI=1
+          fi
+          python scripts/merge_odds_consensus.py --rodada "${LOTECA_RODADA}" || true
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente após coleta/merge"; exit 2; }
+          echo "[audit] Odds usadas: TheOddsAPI=${USED_ODDS_API} RapidAPI=${USED_RAPIDAPI}"
+
+      # === 3) MODELAGEM (xG uni + DC bi + stacking + calib se houver) ===
+      - name: 3) Modeling (xG, Dixon-Coles, Stacking, Calib)
+        shell: bash
+        run: |
+          set -e
+          python scripts/features_xg.py --rodada "${LOTECA_RODADA}"
+          python scripts/features_xg_bivar.py --rodada "${LOTECA_RODADA}" --kmax 10
+          if [ -s "data/history/calibration.csv" ]; then
+            python scripts/calib_isotonic.py --history-path "data/history/calibration.csv" --out-path "models/calib_isotonic.pkl"
+            echo "[audit] Calibração isotônica: USADA"
+          else
+            echo "[audit] Calibração isotônica: NÃO USADA (sem histórico)"
+          fi
+          python scripts/stack_probs_bivar.py --rodada "${LOTECA_RODADA}" --w-consensus 0.5 --w-xg 0.2 --w-bivar 0.2 --w-ml 0.1 --calib-path "models/calib_isotonic.pkl" || true
+          # fallback
+          if [ ! -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" ]; then
+            python scripts/stack_probs.py --rodada "${LOTECA_RODADA}" --w-consensus 0.6 --w-xg 0.4 --calib-path "models/calib_isotonic.pkl"
+            echo "[audit] Stacking fallback (sem DC bivariado)."
+          fi
+          test -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" -o -s "data/out/${LOTECA_RODADA}/joined_stacked.csv"
+
+      # === 4) INTEL PRÉ-JOGO (lineups + clima + movimento) ===
+      - name: 4a) Lineups (API-Football)
+        run: |
+          python scripts/ingest_lineups_apifootball.py --rodada "${LOTECA_RODADA}" || true
+          if [ -s "data/out/${LOTECA_RODADA}/lineups_raw.csv" ]; then echo "[audit] Lineups: USADAS"; else echo "[audit] Lineups: NÃO USADAS"; fi
+
+      - name: 4b) Weather (OpenWeather)
+        run: |
+          if [ -n "${OPENWEATHER_KEY}" ]; then
+            python scripts/ingest_weather_openweather.py --rodada "${LOTECA_RODADA}" --window-hours 6 || true
+          else
+            echo "[audit] OPENWEATHER_KEY ausente; pulando weather."
+          fi
+          if [ -s "data/out/${LOTECA_RODADA}/weather_raw.csv" ]; then echo "[audit] Weather: USADO"; else echo "[audit] Weather: NÃO USADO"; fi
+
+      - name: 4c) Movement (baseline vs atual)
+        run: |
+          python scripts/odds_exchange_movement.py --rodada "${LOTECA_RODADA}" || true
+          if [ -s "data/out/${LOTECA_RODADA}/ex_movement.csv" ]; then echo "[audit] Movement: USADO"; else echo "[audit] Movement: NÃO USADO"; fi
+
+      - name: 4d) Ajuste Pré-jogo (gera joined_pregame.csv)
+        run: |
+          python scripts/adjust_probs_pregame.py --rodada "${LOTECA_RODADA}" --cap-lineups 0.02 --cap-weather 0.015 --cap-move 0.015
+          test -s "data/out/${LOTECA_RODADA}/joined_pregame.csv"
+          echo "[audit] Probabilidades FINAIS para o cartão: joined_pregame.csv"
+
+      # === 5) GERAÇÃO DO CARTÃO (sempre usando joined_pregame.csv) ===
+      - name: 5) Make Ticket (usa joined_pregame.csv)
+        shell: bash
+        run: |
+          set -e
+          # Força o make ticket a usar o pré-jogo copiando sobre o nome padrão
+          cp "data/out/${LOTECA_RODADA}/joined_pregame.csv" "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv"
+
+          # Gera o cartão (4 duplos, 2 triplos) — mesmo algoritmo de antes
+          python - <<'PY'
+          import os, pandas as pd, numpy as np
+          from pathlib import Path
+          rodada = os.environ["LOTECA_RODADA"]
+          base = Path(f"data/out/{rodada}")
+          df = pd.read_csv(base/"joined_stacked_bivar.csv").rename(columns=str.lower)
+          matches = pd.read_csv(base/"matches.csv").rename(columns=str.lower)
+
+          # escolhe colunas finais
+          cols = ["p_home_final","p_draw_final","p_away_final"]
+          if not set(cols).issubset(df.columns):
+              cols = ["p_home","p_draw","p_away"]
+          P = df[cols].to_numpy(float)
+          P = np.clip(P,1e-12,1.0); P = P / P.sum(axis=1, keepdims=True)
+
+          # junta nomes
+          if {"home","away"}.issubset(df.columns):
+              M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left", suffixes=("","_m"))
+              M["home"] = M["home"].fillna(M["home_m"])
+              M["away"] = M["away"].fillna(M["away_m"])
+          else:
+              M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left")
+
+          # entropia para escolher jogos mais incertos
+          def H(p): p=p/p.sum(); return float(-(p*np.log(p)).sum())
+          ent = np.array([H(P[i]) for i in range(P.shape[0])])
+          order = np.argsort(ent)[::-1]
+
+          max_duplos  = int(os.getenv("INPUT_MAX_DUPLOS","${{ inputs.max_duplos }}"))
+          max_triplos = int(os.getenv("INPUT_MAX_TRIPLOS","${{ inputs.max_triplos }}"))
+          picks = [ {int(np.argmax(P[i]))} for i in range(P.shape[0]) ]
+          used_d = used_t = 0
+          for idx in order:
+              if used_t < max_triplos:
+                  picks[idx] = {0,1,2}; used_t += 1
+              elif used_d < max_duplos:
+                  top2 = np.argsort(P[idx])[::-1][:2]
+                  picks[idx] = {int(top2[0]), int(top2[1])}; used_d += 1
+
+          sym = {0:"1",1:"X",2:"2"}
+          rows=[]
+          for _, r in M.sort_values("match_id").iterrows():
+              mid = int(r["match_id"])
+              choice = "".join(sorted(sym[x] for x in sorted(list(picks[mid-1]))))
+              rows.append({"match_id": mid, "home": r["home"], "away": r["away"], "pick": choice})
+
+          out_csv = base/"loteca_ticket.csv"
+          pd.DataFrame(rows).to_csv(out_csv, index=False)
+
+          combos=1; cnt_d=cnt_t=0
+          for r in rows:
+              m=len(r["pick"]); combos*=m
+              if m==2: cnt_d+=1
+              if m==3: cnt_t+=1
+
+          out_txt = base/"loteca_ticket.txt"
+          with open(out_txt,"w",encoding="utf-8") as f:
+              f.write(f"Cartão Loteca — {rodada}\n")
+              f.write(f"(Duplos={cnt_d}, Triplos={cnt_t}, Combinações={combos})\n\n")
+              for r in rows:
+                  f.write(f"{r['match_id']:>2}  {r['home']} x {r['away']:<24} → {r['pick']}\n")
+
+          print("[ticket] Duplos:", cnt_d, "Triplos:", cnt_t, "Combinações:", combos)
+          PY
+
+          echo "==== loteca_ticket.txt ===="
+          cat "data/out/${LOTECA_RODADA}/loteca_ticket.txt"
+
+      # === 6) Artefatos (auditoria de ponta a ponta) ===
+      - name: 6) Upload artifacts (cartão + insumos)
+        uses: actions/upload-artifact@v4
+        with:
+          name: loteca-e2e-${{ inputs.rodada }}
+          path: |
+            data/out/${{ inputs.rodada }}/matches.csv
+            data/out/${{ inputs.rodada }}/odds.csv
+            data/out/${{ inputs.rodada }}/xg_features.csv
+            data/out/${{ inputs.rodada }}/xg_bivar.csv
+            data/out/${{ inputs.rodada }}/joined_stacked_bivar.csv
+            data/out/${{ inputs.rodada }}/lineups_raw.csv
+            data/out/${{ inputs.rodada }}/weather_raw.csv
+            data/out/${{ inputs.rodada }}/ex_movement.csv
+            data/out/${{ inputs.rodada }}/joined_pregame.csv
+            data/out/${{ inputs.rodada }}/loteca_ticket.csv
+            data/out/${{ inputs.rodada }}/loteca_ticket.txt
