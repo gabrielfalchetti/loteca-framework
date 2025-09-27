@@ -1,7 +1,7 @@
 # scripts/merge_odds_consensus.py
 # Consenso de odds com devig Shin + pesos, com FALLBACKS robustos:
 # - Usa odds_*.csv quando houver; senão usa data/out/<rodada>/odds.csv
-# - Completa home/away via matches.csv quando faltar
+# - Completa home/away via matches.csv quando faltar (sem depender de sufixos do pandas)
 # - Se Shin falhar em alguma linha, usa inverso das odds
 from __future__ import annotations
 import argparse, glob
@@ -108,6 +108,16 @@ def read_sources(base: Path) -> pd.DataFrame:
         raise RuntimeError("[consensus] Nenhum arquivo de odds encontrado (odds_*.csv ou odds.csv).")
     return pd.concat(rows, ignore_index=True)
 
+def _pick_series(merged: pd.DataFrame, base: str) -> pd.Series:
+    """
+    Retorna a melhor coluna disponível para 'home'/'away', na ordem:
+    base, base+'_match', base+'_y', base+'_x'. Se não existir, retorna vazio.
+    """
+    for cand in [base, f"{base}_match", f"{base}_y", f"{base}_x"]:
+        if cand in merged.columns:
+            return merged[cand]
+    return pd.Series([""]*len(merged), index=merged.index)
+
 def attach_home_away(df: pd.DataFrame, base: Path) -> pd.DataFrame:
     """Completa colunas home/away usando matches.csv quando necessário (sem depender de sufixos)."""
     need_home = "home" not in df.columns
@@ -124,39 +134,27 @@ def attach_home_away(df: pd.DataFrame, base: Path) -> pd.DataFrame:
     M_cols_lower = {c: c.lower() for c in M.columns}
     M = M.rename(columns=M_cols_lower)
     # padroniza nomes esperados
-    rename_M = {}
-    if "home_team" in M.columns and "home" not in M.columns: rename_M["home_team"] = "home"
-    if "away_team" in M.columns and "away" not in M.columns: rename_M["away_team"] = "away"
-    if rename_M: M = M.rename(columns=rename_M)
-    # checa colunas
+    if "home_team" in M.columns and "home" not in M.columns: M = M.rename(columns={"home_team":"home"})
+    if "away_team" in M.columns and "away" not in M.columns: M = M.rename(columns={"away_team":"away"})
     if not {"match_id","home","away"}.issubset(M.columns):
         raise RuntimeError("[consensus] matches.csv inválido; precisa de colunas: match_id,home,away")
 
-    # merge simples (sem sufixos): se df já tiver 'home'/'away', usamos fillna
-    merged = pd.merge(df, M[["match_id","home","away"]], on="match_id", how="left")
+    merged = pd.merge(df, M[["match_id","home","away"]], on="match_id", how="left", suffixes=("", "_match"))
 
-    if need_home:
-        # não tinha 'home' no df original -> usa a 'home' do matches diretamente
-        merged["home"] = merged["home_y"]
-    else:
-        # já tinha 'home' -> preenche nulos com a versão do matches
-        merged["home_x"] = merged["home_x"].where(merged["home_x"].notna(), merged["home_y"])
-        merged["home"] = merged["home_x"]
+    # reconstrói colunas finais
+    final_home = _pick_series(merged, "home")
+    final_away = _pick_series(merged, "away")
+    merged["home"] = final_home.fillna("").astype(str)
+    merged["away"] = final_away.fillna("").astype(str)
 
-    if need_away:
-        merged["away"] = merged["away_y"]
-    else:
-        merged["away_x"] = merged["away_x"].where(merged["away_x"].notna(), merged["away_y"])
-        merged["away"] = merged["away_x"]
+    # limpa auxiliares conhecidos (se existirem)
+    for c in ["home_match","away_match","home_x","home_y","away_x","away_y"]:
+        if c in merged.columns and c not in ["home","away"]:
+            try:
+                merged = merged.drop(columns=[c])
+            except Exception:
+                pass
 
-    # limpa colunas auxiliares se existirem
-    for c in ["home_x","home_y","away_x","away_y"]:
-        if c in merged.columns:
-            merged = merged.drop(columns=[c])
-
-    # segurança final
-    merged["home"] = merged["home"].fillna("")
-    merged["away"] = merged["away"].fillna("")
     return merged
 
 def main():
