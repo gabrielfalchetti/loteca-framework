@@ -7,12 +7,24 @@ on:
         description: 'Identificador da rodada (ex.: 2025-10-05_14)'
         required: true
         type: string
+      days_window:
+        description: 'Janela ±dias para casar fixtures na API-Football (quando usar RapidAPI)'
+        required: false
+        default: '2'
+        type: string
+      min_match:
+        description: 'Similaridade mínima fuzzy (0-100) para casar times'
+        required: false
+        default: '85'
+        type: string
 
 jobs:
   modeling:
     runs-on: ubuntu-latest
     env:
       LOTECA_RODADA: ${{ inputs.rodada }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
 
     steps:
       - name: Checkout
@@ -23,11 +35,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install deps (modeling)
+      - name: Install deps (modeling + odds ingest)
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy scikit-learn joblib
+          pip install pandas numpy scikit-learn joblib requests PyYAML rapidfuzz==3.9.7 matplotlib
 
+      # Garante matches.csv
       - name: Ensure matches.csv (auto-generate if missing)
         shell: bash
         run: |
@@ -44,6 +57,56 @@ jobs:
             fi
           fi
           test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ainda ausente."; exit 2; }
+
+      # NOVO: Garante odds.csv (tenta coletar se estiver faltando)
+      - name: Ensure odds.csv (ingest if missing)
+        shell: bash
+        run: |
+          set -e
+          if [ -s "data/out/${LOTECA_RODADA}/odds.csv" ]; then
+            echo "[ensure] odds.csv já existe."
+            exit 0
+          fi
+
+          echo "[ensure] odds.csv ausente — tentando coletar fontes disponíveis."
+
+          # 1) TheOddsAPI (opcional)
+          if [ -n "${ODDS_API_KEY}" ]; then
+            echo "[ensure] Coletando TheOddsAPI…"
+            python scripts/ingest_odds.py \
+              --rodada "${LOTECA_RODADA}" \
+              --sport soccer_brazil_campeonato \
+              --regions uk,eu \
+              --market h2h \
+              --allow-partial \
+              --min-match ${{ inputs.min_match }} || true
+          else
+            echo "[ensure] ODDS_API_KEY não definido — pulando TheOddsAPI."
+          fi
+
+          # 2) RapidAPI / API-Football (opcional)
+          if [ -n "${RAPIDAPI_KEY}" ]; then
+            echo "[ensure] Coletando API-Football (RapidAPI)…"
+            python scripts/ingest_odds_apifootball_rapidapi.py \
+              --rodada "${LOTECA_RODADA}" \
+              --allow-partial \
+              --days-window ${{ inputs.days_window }} \
+              --min-match ${{ inputs.min_match }} || true
+          else
+            echo "[ensure] RAPIDAPI_KEY não definido — pulando API-Football."
+          fi
+
+          ls -lah "data/out/${LOTECA_RODADA}/" || true
+
+          # 3) Gera consenso (odds.csv) a partir das fontes coletadas
+          echo "[ensure] Gerando consenso odds.csv…"
+          python scripts/merge_odds_consensus.py --rodada "${LOTECA_RODADA}" || true
+
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || {
+            echo "::error::Falha ao gerar data/out/${LOTECA_RODADA}/odds.csv. Verifique suas chaves ODDS_API_KEY/RAPIDAPI_KEY e se os jogos têm cobertura nas APIs."
+            exit 2
+          }
+          head -n 5 "data/out/${LOTECA_RODADA}/odds.csv" || true
 
       - name: Gera xG e probs 1X2 (Poisson)
         run: |
@@ -62,7 +125,6 @@ jobs:
 
       - name: Stacking (consenso + xG) + calibração
         run: |
-          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente (rode pipeline principal antes)"; exit 2; }
           python scripts/stack_probs.py --rodada "${LOTECA_RODADA}" --w-consensus 0.6 --w-xg 0.4 --calib-path "models/calib_isotonic.pkl"
           test -s "data/out/${LOTECA_RODADA}/joined_stacked.csv" || { echo "::error::joined_stacked.csv ausente"; exit 2; }
           head -n 5 "data/out/${LOTECA_RODADA}/joined_stacked.csv" || true
@@ -74,5 +136,6 @@ jobs:
           path: |
             data/out/${{ inputs.rodada }}/xg_features.csv
             data/out/${{ inputs.rodada }}/joined_stacked.csv
+            data/out/${{ inputs.rodada }}/odds.csv
             models/calib_isotonic.pkl
           if-no-files-found: warn
