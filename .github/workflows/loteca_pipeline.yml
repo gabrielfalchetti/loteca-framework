@@ -167,14 +167,12 @@ jobs:
       - name: Backtest report (calibração)
         shell: bash
         run: |
-          echo "PWD (antes): $(pwd)"
           python scripts/backtest_report.py --history-path data/history/calibration.csv --bins 10
-          echo "Conteúdo gerado em data/history/report:"
+          echo "Gerado:"
           ls -lah "./data/history/report" || true
-          echo "Localizando metrics.csv (até 4 níveis):"
-          find . -maxdepth 4 -type f -name "metrics.csv" -printf "%p\n" || true
+          ls -lah "./" || true
 
-      # -------- NOVO PASSO: NORMALIZAR MÉTRICAS --------
+      # -------- NORMALIZAR MÉTRICAS (sempre padronizar o caminho) --------
       - name: Normalize metrics.csv location
         shell: bash
         run: |
@@ -192,7 +190,7 @@ jobs:
             printf "metric,value\nn_samples,0\nbrier_multiclass,0\nlogloss_multiclass,0\ntop1_accuracy,0\n" > "$SRC_A"
           fi
           ls -lah "data/history/report" || true
-      # --------------------------------------------------
+      # -------------------------------------------------------------------
 
       - name: Check report artifacts
         shell: bash
