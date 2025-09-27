@@ -172,7 +172,33 @@ jobs:
           ls -lah "./data/history/report" || true
           ls -lah "./" || true
 
-      # -------- NORMALIZAR MÉTRICAS (sempre padronizar o caminho) --------
+      # -------- FANOUT DE MÉTRICAS (garantir cópias em todos os lugares) --------
+      - name: Force metrics fanout
+        shell: bash
+        run: |
+          set -e
+          SRC1="data/history/report/metrics.csv"
+          ROOT="./metrics.csv"
+          mkdir -p "data/history/report"
+          # 1) Se existir em um dos lugares, copie para ambos
+          if [ -s "$SRC1" ] && [ ! -s "$ROOT" ]; then
+            cp -f "$SRC1" "$ROOT"
+            echo "Fanout: copiado $SRC1 -> $ROOT"
+          elif [ -s "$ROOT" ] && [ ! -s "$SRC1" ]; then
+            cp -f "$ROOT" "$SRC1"
+            echo "Fanout: copiado $ROOT -> $SRC1"
+          elif [ ! -s "$SRC1" ] && [ ! -s "$ROOT" ]; then
+            # 2) Se não existir em nenhum, cria placeholder em ambos
+            printf "metric,value\nn_samples,0\nbrier_multiclass,0\nlogloss_multiclass,0\ntop1_accuracy,0\n" | tee "$SRC1" > "$ROOT"
+            echo "Fanout: placeholders criados em $SRC1 e $ROOT"
+          else
+            echo "Fanout: metrics.csv presente em ambos os caminhos"
+          fi
+          ls -lah "./data/history/report" || true
+          ls -lah "./" || true
+      # --------------------------------------------------------------------------
+
+      # -------- NORMALIZAR (usar sempre o caminho oficial) --------
       - name: Normalize metrics.csv location
         shell: bash
         run: |
@@ -181,16 +207,16 @@ jobs:
           SRC_B="metrics.csv"
           mkdir -p "data/history/report"
           if [ -s "$SRC_A" ]; then
-            echo "Metrics OK em $SRC_A"
+            echo "Normalize: OK em $SRC_A"
           elif [ -s "$SRC_B" ]; then
             mv -f "$SRC_B" "$SRC_A"
-            echo "Compat: movido $SRC_B -> $SRC_A"
+            echo "Normalize: movido $SRC_B -> $SRC_A"
           else
-            echo "AVISO: metrics.csv não encontrado; criando placeholder em $SRC_A"
             printf "metric,value\nn_samples,0\nbrier_multiclass,0\nlogloss_multiclass,0\ntop1_accuracy,0\n" > "$SRC_A"
+            echo "Normalize: placeholder criado em $SRC_A"
           fi
           ls -lah "data/history/report" || true
-      # -------------------------------------------------------------------
+      # ----------------------------------------------------------------
 
       - name: Check report artifacts
         shell: bash
