@@ -1,8 +1,9 @@
 # scripts/backtest_report.py
 # Gera relatório de calibração (1X2) a partir de data/history/calibration.csv
 # Saídas: CSVs de métricas/bins e PNGs/HTML com gráficos + METRICS.CSV
+# (Compat) Também grava uma CÓPIA de metrics.csv na raiz ./metrics.csv para workflows antigos.
 from __future__ import annotations
-import argparse, base64, io, warnings
+import argparse, base64, io, warnings, shutil
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -105,7 +106,7 @@ def plot_hist(Pk: np.ndarray, title: str) -> bytes:
         ax.hist(Pk, bins=20)
     ax.set_xlabel("Probabilidade prevista")
     ax.set_ylabel("Contagem")
-    ax.set_title(title)
+    ax.setTitle = title
     buf = io.BytesIO()
     fig.tight_layout()
     fig.savefig(buf, format="png", dpi=140)
@@ -127,51 +128,59 @@ def main():
     args = ap.parse_args()
 
     hist_path = Path(args.history_path)
+    outdir = Path("data/history/report")
+    outdir.mkdir(parents=True, exist_ok=True)
+
     if not hist_path.exists() or hist_path.stat().st_size == 0:
-        # Gera estrutura mínima para não quebrar pipeline
-        outdir = Path("data/history/report"); outdir.mkdir(parents=True, exist_ok=True)
+        # Placeholders para não quebrar pipeline
         pd.DataFrame([], columns=["metric","value"]).to_csv(outdir/"metrics.csv", index=False)
-        pd.DataFrame([], columns=["n_samples","brier_multiclass","logloss_multiclass"]).to_csv(outdir/"calib_summary.csv", index=False)
+        pd.DataFrame([], columns=["n_samples","brier_multiclass","logloss_multiclass","top1_accuracy"]).to_csv(outdir/"calib_summary.csv", index=False)
         pd.DataFrame([], columns=["class","bin","p_mean","y_rate","count"]).to_csv(outdir/"reliability_bins.csv", index=False)
         with open(outdir/"report.html","w",encoding="utf-8") as f:
             f.write("<html><body><h1>Relatório de Calibração</h1><p>Histórico vazio.</p></body></html>")
+        # Compat: copiar metrics.csv para raiz
+        try:
+            shutil.copyfile(outdir/"metrics.csv", Path("metrics.csv"))
+            print("[report] Compat: cópia criada em ./metrics.csv")
+        except Exception as e:
+            print(f"[report] Compat: falha ao copiar ./metrics.csv: {e}")
         print(f"[report] histórico ausente/vazio. Placeholders gerados em {outdir}")
         return
 
     df = pd.read_csv(hist_path)
     need = {"p_home","p_draw","p_away","resultado"}
     if not need.issubset(df.columns):
-        # Estrutura mínima para não quebrar
-        outdir = Path("data/history/report"); outdir.mkdir(parents=True, exist_ok=True)
+        # Placeholders para não quebrar
         pd.DataFrame([], columns=["metric","value"]).to_csv(outdir/"metrics.csv", index=False)
-        pd.DataFrame([], columns=["n_samples","brier_multiclass","logloss_multiclass"]).to_csv(outdir/"calib_summary.csv", index=False)
+        pd.DataFrame([], columns=["n_samples","brier_multiclass","logloss_multiclass","top1_accuracy"]).to_csv(outdir/"calib_summary.csv", index=False)
         pd.DataFrame([], columns=["class","bin","p_mean","y_rate","count"]).to_csv(outdir/"reliability_bins.csv", index=False)
         with open(outdir/"report.html","w",encoding="utf-8") as f:
             f.write("<html><body><h1>Relatório de Calibração</h1><p>Colunas necessárias ausentes.</p></body></html>")
-        print(f"[report] colunas necessárias ausentes em {hist_path}. Placeholders gerados.")
+        # Compat
+        try:
+            shutil.copyfile(outdir/"metrics.csv", Path("metrics.csv"))
+            print("[report] Compat: cópia criada em ./metrics.csv")
+        except Exception as e:
+            print(f"[report] Compat: falha ao copiar ./metrics.csv: {e}")
+        print(f"[report] colunas necessárias ausentes em", hist_path, ". Placeholders gerados.")
         return
 
-    # limpa NAs na coluna resultado
     df = df.dropna(subset=["resultado"]).copy()
 
-    # Probabilidades e rótulos
     Pdf = _safe_probs(df)
     P = Pdf[["p_home","p_draw","p_away"]].to_numpy()
     Y = _onehot(df["resultado"])
 
-    # Métricas globais (seguras para n=0)
     n     = int(len(df))
     brier = brier_multiclass(P, Y)
     ll    = logloss_multiclass(P, Y)
     acc   = top1_accuracy(P, Y)
 
-    # Métricas por classe
     per_class = []
     bins_dfs = {}
     for k, cls in enumerate(CLASSES):
         Pk = P[:,k] if n>0 else np.array([])
         Yk = Y[:,k] if n>0 else np.array([])
-        # Brier binário por classe
         if n>0:
             brier_k = float(np.mean((Pk - Yk)**2))
             Pk_clamped = np.clip(Pk, 1e-12, 1.0)
@@ -181,19 +190,14 @@ def main():
         per_class.append({"class": cls, "brier": round(brier_k,6), "logloss": round(ll_k,6)})
         bins_dfs[cls] = reliability_bins(Pk, Yk, n_bins=args.bins)
 
-    # Saídas
-    outdir = Path("data/history/report")
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    # CSVs básicos
+    # CSVs
     summary = {
         "n_samples": n,
         "brier_multiclass": round(brier, 6),
         "logloss_multiclass": round(ll, 6),
         "top1_accuracy": round(acc, 6),
     }
-    sum_df = pd.DataFrame([summary])
-    sum_df.to_csv(outdir/"calib_summary.csv", index=False)
+    pd.DataFrame([summary]).to_csv(outdir/"calib_summary.csv", index=False)
 
     bins_out = []
     for cls, bdf in bins_dfs.items():
@@ -202,14 +206,21 @@ def main():
         bins_out.append(tmp)
     pd.concat(bins_out, ignore_index=True).to_csv(outdir/"reliability_bins.csv", index=False)
 
-    # METRICS.CSV (para o seu workflow)
     metrics_rows = [
         {"metric": "n_samples",         "value": n},
         {"metric": "brier_multiclass",  "value": round(brier,6)},
         {"metric": "logloss_multiclass","value": round(ll,6)},
         {"metric": "top1_accuracy",     "value": round(acc,6)},
     ]
-    pd.DataFrame(metrics_rows).to_csv(outdir/"metrics.csv", index=False)
+    (pd.DataFrame(metrics_rows)).to_csv(outdir/"metrics.csv", index=False)
+
+    # --------- Compat: também salvar cópia em ./metrics.csv ----------
+    try:
+        shutil.copyfile(outdir/"metrics.csv", Path("metrics.csv"))
+        print("[report] Compat: cópia criada em ./metrics.csv")
+    except Exception as e:
+        print(f"[report] Compat: falha ao copiar ./metrics.csv: {e}")
+    # ---------------------------------------------------------------
 
     # Gráficos
     imgs = {}
@@ -221,7 +232,7 @@ def main():
         with open(outdir/f"hist_{cls}.png", "wb") as f:
             f.write(imgs[f"hist_{cls}.png"])
 
-    # HTML simples com gráficos embutidos
+    # HTML simples
     html = io.StringIO()
     html.write("<!doctype html><html><head><meta charset='utf-8'><title>Relatório de Calibração Loteca</title>")
     html.write("<style>body{font-family:Arial,Helvetica,sans-serif;margin:24px;max-width:980px} figure{margin:0 0 18px 0} figcaption{font-size:12px;color:#555}</style>")
@@ -250,6 +261,7 @@ def main():
     print(f"[report] Resumo -> {outdir/'calib_summary.csv'}")
     print(f"[report] Bins   -> {outdir/'reliability_bins.csv'}")
     print(f"[report] Metrics-> {outdir/'metrics.csv'}")
+    print("[report] Compat: cópia também em ./metrics.csv")
 
 if __name__ == "__main__":
     main()
