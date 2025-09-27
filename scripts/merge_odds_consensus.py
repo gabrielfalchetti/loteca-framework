@@ -91,35 +91,30 @@ def read_sources(base: Path) -> pd.DataFrame:
     if files:
         for f in files:
             try:
-                df = pd.read_csv(f)
-                df = standardize_columns(df)
-                df["source_file"] = Path(f).name
-                rows.append(df)
+                tmp = pd.read_csv(f)
+                tmp = standardize_columns(tmp)
+                tmp["source_file"] = Path(f).name
+                rows.append(tmp)
             except Exception as e:
                 print(f"[consensus] pulando {f}: {e}")
     else:
         f = base/"odds.csv"
         if f.exists() and f.stat().st_size>0:
-            df = pd.read_csv(f)
-            df = standardize_columns(df)
-            df["source_file"] = f.name
-            rows.append(df)
+            tmp = pd.read_csv(f)
+            tmp = standardize_columns(tmp)
+            tmp["source_file"] = f.name
+            rows.append(tmp)
     if not rows:
         raise RuntimeError("[consensus] Nenhum arquivo de odds encontrado (odds_*.csv ou odds.csv).")
     return pd.concat(rows, ignore_index=True)
 
 def _pick_series(merged: pd.DataFrame, base: str) -> pd.Series:
-    """
-    Retorna a melhor coluna disponível para 'home'/'away', na ordem:
-    base, base+'_match', base+'_y', base+'_x'. Se não existir, retorna vazio.
-    """
     for cand in [base, f"{base}_match", f"{base}_y", f"{base}_x"]:
         if cand in merged.columns:
             return merged[cand]
     return pd.Series([""]*len(merged), index=merged.index)
 
 def attach_home_away(df: pd.DataFrame, base: Path) -> pd.DataFrame:
-    """Completa colunas home/away usando matches.csv quando necessário (sem depender de sufixos)."""
     need_home = "home" not in df.columns
     need_away = "away" not in df.columns
     if not (need_home or need_away):
@@ -130,10 +125,8 @@ def attach_home_away(df: pd.DataFrame, base: Path) -> pd.DataFrame:
         raise RuntimeError(f"[consensus] faltam colunas home/away e matches.csv não existe: {mpath}")
 
     M = pd.read_csv(mpath)
-    # normaliza
     M_cols_lower = {c: c.lower() for c in M.columns}
     M = M.rename(columns=M_cols_lower)
-    # padroniza nomes esperados
     if "home_team" in M.columns and "home" not in M.columns: M = M.rename(columns={"home_team":"home"})
     if "away_team" in M.columns and "away" not in M.columns: M = M.rename(columns={"away_team":"away"})
     if not {"match_id","home","away"}.issubset(M.columns):
@@ -141,19 +134,15 @@ def attach_home_away(df: pd.DataFrame, base: Path) -> pd.DataFrame:
 
     merged = pd.merge(df, M[["match_id","home","away"]], on="match_id", how="left", suffixes=("", "_match"))
 
-    # reconstrói colunas finais
     final_home = _pick_series(merged, "home")
     final_away = _pick_series(merged, "away")
     merged["home"] = final_home.fillna("").astype(str)
     merged["away"] = final_away.fillna("").astype(str)
 
-    # limpa auxiliares conhecidos (se existirem)
     for c in ["home_match","away_match","home_x","home_y","away_x","away_y"]:
         if c in merged.columns and c not in ["home","away"]:
-            try:
-                merged = merged.drop(columns=[c])
-            except Exception:
-                pass
+            try: merged = merged.drop(columns=[c])
+            except Exception: pass
 
     return merged
 
@@ -173,14 +162,14 @@ def main():
     all_odds["bookmaker_norm"] = all_odds["bookmaker"].astype(str).str.strip().str.lower()
 
     # p_bm por linha: Shin -> fallback inverso
-    P = []
+    probs_rows = []
     for _, r in all_odds.iterrows():
-        p = shin_devig([r["odd_home"], r["odd_draw"], r["odd_away"]])
-        if not np.isfinite(p).all():
-            p = inv_probs([r["odd_home"], r["odd_draw"], r["odd_away"]])
-        P.append(p)
-    P = np.vstack(P)
-    all_odds[["p_home_bm","p_draw_bm","p_away_bm"]] = P
+        p_line = shin_devig([r["odd_home"], r["odd_draw"], r["odd_away"]])
+        if not np.isfinite(p_line).all():
+            p_line = inv_probs([r["odd_home"], r["odd_draw"], r["odd_away"]])
+        probs_rows.append(p_line)
+    probs_rows = np.vstack(probs_rows)
+    all_odds[["p_home_bm","p_draw_bm","p_away_bm"]] = probs_rows
 
     # filtra inválidos
     all_odds = all_odds.dropna(subset=["p_home_bm","p_draw_bm","p_away_bm"])
@@ -197,8 +186,8 @@ def main():
 
     agg = []
     for mid, g in all_odds.groupby("match_id"):
-        ph, pd, pa = wmean(g, ["p_home_bm","p_draw_bm","p_away_bm"])
-        ps = np.array([ph,pd,pa], dtype=float)
+        ph, pdraw, pa = wmean(g, ["p_home_bm","p_draw_bm","p_away_bm"])  # <- 'pdraw' evita colisão com pandas 'pd'
+        ps = np.array([ph,pdraw,pa], dtype=float)
         ps = np.clip(ps, 1e-9, 1.0); ps = ps/ps.sum()
         oh, od, oa = 1.0/ps
         agg.append({
@@ -210,10 +199,10 @@ def main():
             "n_bookmakers": int(g["bookmaker"].nunique())
         })
 
-    out = pd.DataFrame(agg).sort_values("match_id")
+    out_df = pd.DataFrame(agg).sort_values("match_id")
     out_path = base/"odds.csv"
-    out.to_csv(out_path, index=False)
-    print(f"[consensus] odds de consenso -> {out_path} (n={len(out)})")
+    out_df.to_csv(out_path, index=False)
+    print(f"[consensus] odds de consenso -> {out_path} (n={len(out_df)})")
 
 if __name__ == "__main__":
     main()
