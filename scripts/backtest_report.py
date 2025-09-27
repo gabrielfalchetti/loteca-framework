@@ -1,79 +1,214 @@
 # scripts/backtest_report.py
+# Gera relatório de calibração (1X2) a partir de data/history/calibration.csv
+# Saídas: CSVs de métricas/bins e PNGs/HTML com gráficos.
 from __future__ import annotations
-import argparse
+import argparse, base64, io
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
-def nll(probs, y_idx):
-    p = np.clip(probs[np.arange(len(y_idx)), y_idx], 1e-12, 1.0)
-    return float(-np.mean(np.log(p)))
+# Matplotlib é opcional, mas recomendado para gráficos
+try:
+    import matplotlib.pyplot as plt
+    HAS_MPL = True
+except Exception:
+    HAS_MPL = False
 
-def brier(probs, y_idx, n_classes=3):
-    Y = np.zeros((len(y_idx), n_classes), dtype=float)
-    Y[np.arange(len(y_idx)), y_idx] = 1.0
-    return float(np.mean(np.sum((probs - Y)**2, axis=1)))
+CLASSES = ["1", "X", "2"]
 
-def top1_accuracy(probs, y_idx):
-    pred = np.argmax(probs, axis=1)
-    return float(np.mean((pred == y_idx).astype(float)))
+def _safe_probs(df: pd.DataFrame) -> pd.DataFrame:
+    P = df[["p_home","p_draw","p_away"]].to_numpy(dtype=float, copy=True)
+    P = np.clip(P, 1e-9, 1.0)
+    P /= P.sum(axis=1, keepdims=True)
+    out = pd.DataFrame(P, columns=["p_home","p_draw","p_away"])
+    return out
 
-def ece_multiclass(probs, y_idx, bins=10):
-    # ECE por max prob (confidence)
-    conf = probs.max(axis=1)
-    pred = probs.argmax(axis=1)
-    correct = (pred == y_idx).astype(float)
-    bin_edges = np.linspace(0, 1, bins+1)
-    ece = 0.0
-    rows=[]
-    for i in range(bins):
-        lo, hi = bin_edges[i], bin_edges[i+1]
-        mask = (conf >= lo) & (conf < hi) if i<bins-1 else (conf >= lo) & (conf <= hi)
-        if mask.sum()==0:
-            rows.append({"bin": i+1, "count": 0, "conf_mean": (lo+hi)/2, "acc": np.nan, "gap": np.nan})
-            continue
-        acc = float(correct[mask].mean())
-        cmean = float(conf[mask].mean())
-        gap = abs(acc - cmean)
-        ece += (mask.mean()) * gap
-        rows.append({"bin": i+1, "count": int(mask.sum()), "conf_mean": cmean, "acc": acc, "gap": gap})
-    return float(ece), pd.DataFrame(rows)
+def _onehot(y: pd.Series) -> np.ndarray:
+    y = y.astype(str).str.upper().str.strip()
+    Y = np.zeros((len(y), 3), dtype=float)
+    mapping = {"1":0, "X":1, "2":2}
+    for i, v in enumerate(y):
+        if v in mapping:
+            Y[i, mapping[v]] = 1.0
+    return Y
+
+def brier_multiclass(P: np.ndarray, Y: np.ndarray) -> float:
+    # média do somatório (p_k - y_k)^2
+    return float(np.mean(np.sum((P - Y)**2, axis=1)))
+
+def logloss_multiclass(P: np.ndarray, Y: np.ndarray) -> float:
+    # - média do log p(y_true)
+    idx = np.argmax(Y, axis=1)  # 0/1/2
+    chosen = P[np.arange(len(P)), idx]
+    chosen = np.clip(chosen, 1e-12, 1.0)
+    return float(-np.mean(np.log(chosen)))
+
+def reliability_bins(Pk: np.ndarray, Yk: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
+    """
+    Pk: probs para uma classe (n,)
+    Yk: outcomes binários (n,)
+    Retorna: DataFrame com colunas [bin, p_mean, y_rate, count]
+    """
+    Pk = np.asarray(Pk, dtype=float)
+    Yk = np.asarray(Yk, dtype=float)
+
+    # bins de probabilidade
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    bins = np.digitize(Pk, edges[1:-1], right=True)  # 0..n_bins-1
+
+    rows = []
+    for b in range(n_bins):
+        mask = (bins == b)
+        if mask.any():
+            p_mean = float(Pk[mask].mean())
+            y_rate = float(Yk[mask].mean())
+            cnt = int(mask.sum())
+        else:
+            p_mean = np.nan; y_rate = np.nan; cnt = 0
+        rows.append({"bin": b+1, "p_mean": p_mean, "y_rate": y_rate, "count": cnt})
+    return pd.DataFrame(rows)
+
+def plot_calibration(bin_df: pd.DataFrame, title: str) -> bytes:
+    """
+    Gera gráfico simples de calibração (p_mean vs y_rate).
+    Retorna bytes PNG.
+    """
+    if not HAS_MPL:
+        return b""
+    fig, ax = plt.subplots(figsize=(6, 5))
+    d = bin_df.dropna()
+    ax.plot([0,1],[0,1], linestyle="--")
+    if not d.empty:
+        ax.plot(d["p_mean"], d["y_rate"], marker="o")
+    ax.set_xlabel("Probabilidade prevista (média do bin)")
+    ax.set_ylabel("Frequência observada")
+    ax.set_title(title)
+    buf = io.BytesIO()
+    fig.tight_layout()
+    fig.savefig(buf, format="png", dpi=140)
+    plt.close(fig)
+    return buf.getvalue()
+
+def plot_hist(Pk: np.ndarray, title: str) -> bytes:
+    if not HAS_MPL:
+        return b""
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(Pk, bins=20)
+    ax.set_xlabel("Probabilidade prevista")
+    ax.set_ylabel("Contagem")
+    ax.set_title(title)
+    buf = io.BytesIO()
+    fig.tight_layout()
+    fig.savefig(buf, format="png", dpi=140)
+    plt.close(fig)
+    return buf.getvalue()
+
+def embed_img_html(png_bytes: bytes, caption: str) -> str:
+    if not png_bytes:
+        return f"<p><em>(Gráfico indisponível: matplotlib não instalado)</em> — {caption}</p>"
+    b64 = base64.b64encode(png_bytes).decode("ascii")
+    return f'<figure><img src="data:image/png;base64,{b64}" alt="{caption}" /><figcaption>{caption}</figcaption></figure>'
 
 def main():
-    ap = argparse.ArgumentParser(description="Relatório de backtest e calibração")
+    ap = argparse.ArgumentParser(description="Relatório de calibração 1X2 (backtest)")
     ap.add_argument("--history-path", default="data/history/calibration.csv")
     ap.add_argument("--bins", type=int, default=10)
     args = ap.parse_args()
 
-    hist = Path(args.history_path)
-    if not hist.exists() or hist.stat().st_size==0:
-        raise RuntimeError(f"[backtest] histórico ausente/vazio: {hist}")
+    hist_path = Path(args.history_path)
+    if not hist_path.exists() or hist_path.stat().st_size == 0:
+        raise RuntimeError(f"[report] arquivo de histórico ausente/vazio: {hist_path}")
 
-    H = pd.read_csv(hist)
+    df = pd.read_csv(hist_path)
     need = {"p_home","p_draw","p_away","resultado"}
-    if not need.issubset(H.columns):
-        raise RuntimeError(f"[backtest] histórico inválido; precisa de colunas: {need}")
+    if not need.issubset(df.columns):
+        raise RuntimeError(f"[report] {hist_path} precisa conter colunas {sorted(list(need))}")
 
-    map_idx = {"1":0,"X":1,"2":2}
-    y = np.array([map_idx[str(v).upper()] for v in H["resultado"].values], dtype=int)
-    P = H[["p_home","p_draw","p_away"]].values.astype(float)
+    # Probabilidades e rótulos
+    Pdf = _safe_probs(df)
+    P = Pdf[["p_home","p_draw","p_away"]].to_numpy()
+    Y = _onehot(df["resultado"])
 
-    metrics = {
-        "n": len(H),
-        "top1_acc": top1_accuracy(P, y),
-        "brier": brier(P, y),
-        "nll": nll(P, y),
+    # Métricas globais
+    brier = brier_multiclass(P, Y)
+    ll    = logloss_multiclass(P, Y)
+    n     = len(df)
+
+    # Métricas por classe
+    per_class = []
+    for k, cls in enumerate(CLASSES):
+        Pk = P[:,k]
+        Yk = Y[:,k]
+        # Brier binário por classe
+        brier_k = float(np.mean((Pk - Yk)**2))
+        # LogLoss binário
+        Pk_clamped = np.clip(Pk, 1e-12, 1.0)
+        ll_k = float(-np.mean(Yk*np.log(Pk_clamped) + (1-Yk)*np.log(1-Pk_clamped)))
+        per_class.append({"class": cls, "brier": round(brier_k,6), "logloss": round(ll_k,6)})
+
+    # Reliability bins por classe
+    bins_dfs = {}
+    for k, cls in enumerate(CLASSES):
+        bins_dfs[cls] = reliability_bins(P[:,k], Y[:,k], n_bins=args.bins)
+
+    # Saídas
+    outdir = Path("data/history/report")
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # CSVs
+    summary = {
+        "n_samples": n,
+        "brier_multiclass": round(brier, 6),
+        "logloss_multiclass": round(ll, 6),
     }
-    ece, rel = ece_multiclass(P, y, bins=args.bins)
-    metrics["ece"] = ece
+    sum_df = pd.DataFrame([summary])
+    sum_df.to_csv(outdir/"calib_summary.csv", index=False)
 
-    out_dir = Path("data/history"); out_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([metrics]).to_csv(out_dir/"metrics.csv", index=False)
-    rel.to_csv(out_dir/"reliability.csv", index=False)
+    bins_out = []
+    for cls, bdf in bins_dfs.items():
+        tmp = bdf.copy()
+        tmp.insert(0, "class", cls)
+        bins_out.append(tmp)
+    pd.concat(bins_out, ignore_index=True).to_csv(outdir/"reliability_bins.csv", index=False)
 
-    print("[backtest] métricas salvas em data/history/metrics.csv")
-    print("[backtest] reliability salva em data/history/reliability.csv")
-    print(metrics)
+    # Gráficos
+    imgs = {}
+    for k, cls in enumerate(CLASSES):
+        imgs[f"calibration_{cls}.png"] = plot_calibration(bins_dfs[cls], f"Curva de Calibração — classe {cls}")
+        with open(outdir/f"calibration_{cls}.png", "wb") as f:
+            f.write(imgs[f"calibration_{cls}.png"])
+        imgs[f"hist_{cls}.png"] = plot_hist(P[:,k], f"Distribuição de p(classe {cls})")
+        with open(outdir/f"hist_{cls}.png", "wb") as f:
+            f.write(imgs[f"hist_{cls}.png"])
+
+    # HTML simples com gráficos embutidos
+    html = io.StringIO()
+    html.write("<!doctype html><html><head><meta charset='utf-8'><title>Relatório de Calibração Loteca</title>")
+    html.write("<style>body{font-family:Arial,Helvetica,sans-serif;margin:24px;max-width:980px} figure{margin:0 0 18px 0} figcaption{font-size:12px;color:#555}</style>")
+    html.write("</head><body>")
+    html.write("<h1>Relatório de Calibração — Loteca</h1>")
+    html.write(f"<p><b>Amostras:</b> {n} &nbsp;|&nbsp; <b>Brier (multiclasse):</b> {summary['brier_multiclass']} &nbsp;|&nbsp; <b>LogLoss:</b> {summary['logloss_multiclass']}</p>")
+
+    html.write("<h2>Métricas por Classe</h2><ul>")
+    for row in per_class:
+        html.write(f"<li>Classe {row['class']}: Brier={row['brier']}, LogLoss={row['logloss']}</li>")
+    html.write("</ul>")
+
+    html.write("<h2>Curvas de Calibração</h2>")
+    for cls in CLASSES:
+        html.write(embed_img_html(imgs[f"calibration_{cls}.png"], f"Curva de calibração — {cls}"))
+    html.write("<h2>Distribuição das Probabilidades Previstas</h2>")
+    for cls in CLASSES:
+        html.write(embed_img_html(imgs[f"hist_{cls}.png"], f"Histograma de p({cls})"))
+    html.write("<hr><p><small>Gerado por backtest_report.py</small></p></body></html>")
+
+    report_path = outdir/"report.html"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(html.getvalue())
+
+    print(f"[report] OK -> {report_path}")
+    print(f"[report] Resumo -> {outdir/'calib_summary.csv'}")
+    print(f"[report] Bins   -> {outdir/'reliability_bins.csv'}")
 
 if __name__ == "__main__":
     main()
