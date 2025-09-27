@@ -1,0 +1,84 @@
+name: Loteca Data Extras
+
+on:
+  workflow_dispatch:
+    inputs:
+      rodada:
+        description: 'Identificador da rodada (ex.: 2025-10-05_14)'
+        required: true
+        type: string
+      days_window:
+        description: 'Janela ±dias para casar fixtures/resultados'
+        required: false
+        default: '2'
+        type: string
+      min_match:
+        description: 'Similaridade mínima fuzzy (0-100) para casar times'
+        required: false
+        default: '85'
+        type: string
+
+jobs:
+  data_extras:
+    runs-on: ubuntu-latest
+    env:
+      LOTECA_RODADA: ${{ inputs.rodada }}
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests rapidfuzz PyYAML
+
+      - name: Merge Fixtures
+        run: |
+          # Usa odds_apifootball.csv como pista (se existir)
+          ALT="data/out/${LOTECA_RODADA}/odds_apifootball.csv"
+          if [ -s "data/in/${LOTECA_RODADA}/matches_source.csv" ]; then
+            if [ -s "$ALT" ]; then
+              python scripts/merge_fixtures.py --rodada "${LOTECA_RODADA}" --alt-path "$ALT"
+            else
+              python scripts/merge_fixtures.py --rodada "${LOTECA_RODADA}"
+            fi
+          else
+            echo "::error::data/in/${LOTECA_RODADA}/matches_source.csv ausente — crie este arquivo primeiro."
+            exit 2
+          fi
+          ls -lah "data/out/${LOTECA_RODADA}" || true
+
+      - name: Injuries & Lineups (API-Football)
+        if: env.RAPIDAPI_KEY != ''
+        run: |
+          python scripts/ingest_lineups_injuries_apifootball.py \
+            --rodada "${LOTECA_RODADA}" \
+            --days-window ${{ inputs.days_window }} \
+            --min-match ${{ inputs.min_match }}
+          test -s "data/out/${LOTECA_RODADA}/context_injuries_lineups.csv" || { echo "::error::context_injuries_lineups.csv ausente/vazio"; exit 2; }
+
+      - name: Results (API-Football)
+        if: env.RAPIDAPI_KEY != ''
+        run: |
+          python scripts/ingest_results.py \
+            --rodada "${LOTECA_RODADA}" \
+            --days-window ${{ inputs.days_window }} \
+            --min-match ${{ inputs.min_match }}
+          test -s "data/out/${LOTECA_RODADA}/results.csv" || { echo "::error::results.csv ausente/vazio"; exit 2; }
+
+      - name: Upload extras
+        uses: actions/upload-artifact@v4
+        with:
+          name: loteca-extras-${{ inputs.rodada }}
+          path: |
+            data/out/${{ inputs.rodada }}/fixtures_merged.csv
+            data/out/${{ inputs.rodada }}/context_injuries_lineups.csv
+            data/out/${{ inputs.rodada }}/results.csv
+          if-no-files-found: warn
