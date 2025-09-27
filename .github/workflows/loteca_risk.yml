@@ -1,0 +1,74 @@
+name: Loteca Risk (Fase 3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rodada:
+        description: 'Identificador da rodada (ex.: 2025-10-05_14)'
+        required: true
+        type: string
+      n_tickets:
+        description: 'Quantidade de tickets'
+        required: false
+        default: '5'
+        type: string
+      kelly_frac:
+        description: 'Fração de Kelly (0..1)'
+        required: false
+        default: '0.25'
+        type: string
+      sims:
+        description: 'Simulações (planejamento)'
+        required: false
+        default: '50000'
+        type: string
+
+jobs:
+  risk:
+    runs-on: ubuntu-latest
+    env:
+      LOTECA_RODADA: ${{ inputs.rodada }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Ensure probs
+        run: |
+          test -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" -o -s "data/out/${LOTECA_RODADA}/joined_stacked.csv" -o -s "data/out/${LOTECA_RODADA}/joined.csv" || { echo "::error::Nenhum arquivo de probabilidades final encontrado."; exit 2; }
+
+      - name: Plan (Kelly + Diversificação + VaR/ES)
+        run: |
+          python scripts/plan_bet_portfolio_adv.py \
+            --rodada "${LOTECA_RODADA}" \
+            --n-tickets "${{ inputs.n_tickets }}" \
+            --kelly-frac "${{ inputs.kelly_frac }}" \
+            --sims "${{ inputs.sims }}"
+
+      - name: Evaluate Risk
+        run: |
+          python scripts/evaluate_portfolio_risk.py \
+            --rodada "${LOTECA_RODADA}" \
+            --sims 100000
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: risk-${{ inputs.rodada }}
+          path: |
+            data/out/${{ inputs.rodada }}/portfolio_plan.csv
+            data/out/${{ inputs.rodada }}/portfolio_metrics.csv
+            data/out/${{ inputs.rodada }}/portfolio_returns.csv
+            data/out/${{ inputs.rodada }}/portfolio_risk_eval.csv
+            data/out/${{ inputs.rodada }}/portfolio_returns_eval.csv
+          if-no-files-found: warn
