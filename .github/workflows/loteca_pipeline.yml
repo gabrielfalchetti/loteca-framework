@@ -1,4 +1,4 @@
-name: Loteca Pipeline (ELITE+Portfolio) – Consensus(Shin) + Injuries + Weather + Referee + OddsWatch + Portfolio + EV/Kelly + W&B
+name: Loteca Pipeline (ELITE+Portfolio)
 
 on:
   workflow_dispatch:
@@ -9,10 +9,10 @@ on:
         type: string
         default: "2025-10-05_14"
       n_tickets:
-        description: "Qtd de cartões do portfólio"
+        description: "Qtd de cartões do portfólio (ex.: 5)"
         required: true
-        type: number
-        default: 5
+        type: string
+        default: "5"
 
 jobs:
   build-loteca:
@@ -40,14 +40,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy requests rapidfuzz==3.9.7 PyYAML==6.0.2 wandb
 
-      - name: W&B start
+      - name: Weights & Biases - start
         env:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          WANDB_PROJECT: ${{ env.WANDB_PROJECT }}
+          WANDB_ENTITY: ${{ env.WANDB_ENTITY }}
         run: |
           python - << 'PY'
           import os, wandb
           key=os.environ.get("WANDB_API_KEY","")
-          if key: wandb.login(key=key)
+          if key:
+              wandb.login(key=key)
           PY
           python scripts/wandb_hook.py start --rodada "${{ env.LOTECA_RODADA }}" --project "${{ env.WANDB_PROJECT }}" --entity "${{ env.WANDB_ENTITY }}"
 
@@ -57,7 +60,7 @@ jobs:
           python scripts/ingest_matches.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/matches.csv" || { echo "::error::matches.csv ausente/vazio"; exit 2; }
 
-      # 2) Odds – múltiplas fontes (TheOddsAPI + RapidAPI)
+      # 2) Odds – TheOddsAPI (várias ligas)
       - name: Ingest odds Brasil (Série A)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
@@ -82,6 +85,7 @@ jobs:
             --sport soccer_spain_la_liga --regions uk,eu --market h2h --min-match 88 --allow-partial
           mv "data/out/${{ env.LOTECA_RODADA }}/odds.csv" "data/out/${{ env.LOTECA_RODADA }}/odds_esp.csv" || true
 
+      # 3) Odds – RapidAPI (API-Football) complementar
       - name: Ingest odds (RapidAPI - API-Football)
         env:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
@@ -94,13 +98,13 @@ jobs:
             echo "RAPIDAPI_KEY não definido; pulando passo API-Football."
           fi
 
-      # 3) CONSENSO Shin + pesos
+      # 4) CONSENSO Shin + pesos
       - name: Merge odds (consensus Shin + weights)
         run: |
           python scripts/merge_odds_consensus.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/odds.csv" || { echo "::error::odds.csv ausente após consenso"; exit 2; }
 
-      # 4) Features + Join
+      # 5) Features + Join
       - name: Build features
         run: |
           python scripts/build_features.py --rodada "${{ env.LOTECA_RODADA }}"
@@ -111,38 +115,41 @@ jobs:
           python scripts/join_features.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/joined.csv" || { echo "::error::joined.csv ausente/vazio"; exit 2; }
 
-      # 5) Injuries -> Weather -> Referee (sobrepondo joined.csv)
+      # 6) Injuries -> Weather -> Referee (sobrepondo joined.csv)
       - name: Adjust by injuries
-        env: { RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }} }
+        env:
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         run: |
           python scripts/adjust_probs_lineups.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --alpha 0.05
           cp "data/out/${{ env.LOTECA_RODADA }}/joined_enriched.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
 
       - name: Adjust by weather
-        env: { RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }} }
+        env:
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         run: |
           python scripts/adjust_probs_weather.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --altitude-threshold 1500
           cp "data/out/${{ env.LOTECA_RODADA }}/joined_weather.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
 
       - name: Adjust by referee
-        env: { RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }} }
+        env:
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         run: |
           python scripts/adjust_probs_referee.py --rodada "${{ env.LOTECA_RODADA }}" --country-hint "Brazil" --days-window 2 --min-match 85 --bias-cap 0.04
           cp "data/out/${{ env.LOTECA_RODADA }}/joined_referee.csv" "data/out/${{ env.LOTECA_RODADA }}/joined.csv"
 
-      # 6) Odds movement alerts
+      # 7) Odds movement alerts
       - name: Odds movement watch
         run: |
           python scripts/odds_movement_watch.py --rodada "${{ env.LOTECA_RODADA }}"
           test -s "data/out/${{ env.LOTECA_RODADA }}/alerts_odds_movement.csv" || { echo "::error::alerts_odds_movement.csv ausente/vazio"; exit 2; }
 
-      # 7) Portfolio de cartões
+      # 8) Portfólio de cartões
       - name: Build portfolio
         run: |
           python scripts/plan_bet_portfolio.py --rodada "${{ env.LOTECA_RODADA }}" --n-tickets "${{ env.N_TICKETS }}" --max-duplos 4 --max-triplos 2 --sims-eval 25000
           test -d "data/out/${{ env.LOTECA_RODADA }}/portfolio" || { echo "::error::portfolio ausente"; exit 2; }
 
-      # 8) EV + Kelly
+      # 9) EV + Kelly
       - name: Evaluate EV & Kelly
         run: |
           python scripts/evaluate_ticket_ev.py --rodada "${{ env.LOTECA_RODADA }}"
@@ -151,11 +158,13 @@ jobs:
       - name: W&B log artifacts
         env:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          WANDB_PROJECT: ${{ env.WANDB_PROJECT }}
+          WANDB_ENTITY: ${{ env.WANDB_ENTITY }}
         run: |
           python - << 'PY'
           import os, wandb
           if os.environ.get("WANDB_API_KEY",""):
-            wandb.login(key=os.environ["WANDB_API_KEY"])
+              wandb.login(key=os.environ["WANDB_API_KEY"])
           PY
           python scripts/wandb_hook.py log --rodada "${{ env.LOTECA_RODADA }}" --project "${{ env.WANDB_PROJECT }}" --entity "${{ env.WANDB_ENTITY }}"
 
