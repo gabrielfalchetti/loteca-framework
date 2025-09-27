@@ -1,0 +1,62 @@
+name: Loteca Modeling (Fase 2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rodada:
+        description: 'Identificador da rodada (ex.: 2025-10-05_14)'
+        required: true
+        type: string
+
+jobs:
+  modeling:
+    runs-on: ubuntu-latest
+    env:
+      LOTECA_RODADA: ${{ inputs.rodada }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps (modeling)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy scikit-learn joblib
+
+      - name: Gera xG e probs 1X2 (Poisson)
+        run: |
+          test -s "data/out/${LOTECA_RODADA}/matches.csv" || { echo "::error::matches.csv ausente, gere primeiro."; exit 2; }
+          python scripts/features_xg.py --rodada "${LOTECA_RODADA}"
+          test -s "data/out/${LOTECA_RODADA}/xg_features.csv" || { echo "::error::xg_features.csv ausente"; exit 2; }
+          head -n 5 "data/out/${LOTECA_RODADA}/xg_features.csv" || true
+
+      - name: Treina calibração isotônica (histórico)
+        run: |
+          if [ -s "data/history/calibration.csv" ]; then
+            python scripts/calib_isotonic.py --history-path "data/history/calibration.csv" --out-path "models/calib_isotonic.pkl"
+          else
+            echo "[calib] histórico ausente; pulando calibração (stack usará probs sem isotônica)."
+          fi
+          ls -lah models || true
+
+      - name: Stacking (consenso + xG) + calibração
+        run: |
+          test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente (rode pipeline principal antes)"; exit 2; }
+          python scripts/stack_probs.py --rodada "${LOTECA_RODADA}" --w-consensus 0.6 --w-xg 0.4 --calib-path "models/calib_isotonic.pkl"
+          test -s "data/out/${LOTECA_RODADA}/joined_stacked.csv" || { echo "::error::joined_stacked.csv ausente"; exit 2; }
+          head -n 5 "data/out/${LOTECA_RODADA}/joined_stacked.csv" || true
+
+      - name: Upload artifacts (modeling)
+        uses: actions/upload-artifact@v4
+        with:
+          name: modeling-${{ inputs.rodada }}
+          path: |
+            data/out/${{ inputs.rodada }}/xg_features.csv
+            data/out/${{ inputs.rodada }}/joined_stacked.csv
+            models/calib_isotonic.pkl
+          if-no-files-found: warn
