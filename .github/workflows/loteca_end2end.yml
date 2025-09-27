@@ -42,24 +42,20 @@ jobs:
       MIN_MATCH: ${{ inputs.min_match }}
 
     steps:
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: "Setup Python"
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
-        shell: bash
+      - name: "Install deps"
         run: |
-          set -e
           python -m pip install --upgrade pip
           pip install pandas numpy scikit-learn joblib requests PyYAML rapidfuzz==3.9.7 matplotlib
 
-      # 1) MATCHES
-      - name: Ensure matches.csv
-        shell: bash
+      - name: "1) Ensure matches.csv"
         run: |
           set -e
           if [ -s "data/out/${LOTECA_RODADA}/matches.csv" ]; then
@@ -70,9 +66,7 @@ jobs:
           fi
           test -s "data/out/${LOTECA_RODADA}/matches.csv"
 
-      # 2) ODDS REAIS + CONSENSO
-      - name: Coletar odds e fazer consenso
-        shell: bash
+      - name: "2) Odds reais + consenso"
         run: |
           set -e
           USED_ODDS_API=0
@@ -89,38 +83,25 @@ jobs:
           test -s "data/out/${LOTECA_RODADA}/odds.csv" || { echo "::error::odds.csv ausente após coleta/merge"; exit 2; }
           echo "[audit] Odds usadas: TheOddsAPI=${USED_ODDS_API} RapidAPI=${USED_RAPIDAPI}"
 
-      # 3) MODELAGEM
-      - name: Modelagem (xG, DC bivariado, stacking, calib)
-        shell: bash
+      - name: "3) Modelagem (xG + DC bivariado + stacking)"
         run: |
           set -e
           python scripts/features_xg.py --rodada "${LOTECA_RODADA}"
           python scripts/features_xg_bivar.py --rodada "${LOTECA_RODADA}" --kmax 10
-          CALIB_ARG=""
-          if [ -s "data/history/calibration.csv" ]; then
-            python scripts/calib_isotonic.py --history-path "data/history/calibration.csv" --out-path "models/calib_isotonic.pkl"
-            CALIB_ARG="--calib-path models/calib_isotonic.pkl"
-            echo "[audit] Calibração isotônica: USADA"
-          else
-            echo "[audit] Calibração isotônica: NÃO USADA (sem histórico)"
-          fi
-          python scripts/stack_probs_bivar.py --rodada "${LOTECA_RODADA}" --w-consensus 0.5 --w-xg 0.2 --w-bivar 0.2 --w-ml 0.1 ${CALIB_ARG} || true
+          python scripts/stack_probs_bivar.py --rodada "${LOTECA_RODADA}" --w-consensus 0.5 --w-xg 0.25 --w-bivar 0.25 || true
           if [ ! -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" ]; then
-            python scripts/stack_probs.py --rodada "${LOTECA_RODADA}" --w-consensus 0.6 --w-xg 0.4 ${CALIB_ARG}
+            python scripts/stack_probs.py --rodada "${LOTECA_RODADA}" --w-consensus 0.6 --w-xg 0.4
             echo "[audit] Stacking fallback (sem DC bivariado)."
           fi
           test -s "data/out/${LOTECA_RODADA}/joined_stacked_bivar.csv" -o -s "data/out/${LOTECA_RODADA}/joined_stacked.csv"
 
-      # 4) INTEL PRÉ-JOGO (lineups + clima + movement)
-      - name: Lineups (API-Football)
-        shell: bash
+      - name: "4a) Lineups (API-Football)"
         run: |
           set -e
           python scripts/ingest_lineups_apifootball.py --rodada "${LOTECA_RODADA}" || true
           if [ -s "data/out/${LOTECA_RODADA}/lineups_raw.csv" ]; then echo "[audit] Lineups: USADAS"; else echo "[audit] Lineups: NÃO USADAS"; fi
 
-      - name: Weather (OpenWeather)
-        shell: bash
+      - name: "4b) Weather (OpenWeather)"
         run: |
           set -e
           if [ -n "${OPENWEATHER_KEY}" ]; then
@@ -130,27 +111,27 @@ jobs:
           fi
           if [ -s "data/out/${LOTECA_RODADA}/weather_raw.csv" ]; then echo "[audit] Weather: USADO"; else echo "[audit] Weather: NÃO USADO"; fi
 
-      - name: Odds movement
-        shell: bash
+      - name: "4c) Odds movement"
         run: |
           set -e
           python scripts/odds_exchange_movement.py --rodada "${LOTECA_RODADA}" || true
           if [ -s "data/out/${LOTECA_RODADA}/ex_movement.csv" ]; then echo "[audit] Movement: USADO"; else echo "[audit] Movement: NÃO USADO"; fi
 
-      # (fix) GARANTE O SCRIPT DE AJUSTE PRÉ-JOGO
-      - name: Ensure adjust_probs_pregame.py exists
-        shell: bash
+      - name: "(fix) Ensure adjust_probs_pregame.py"
         run: |
           set -e
           mkdir -p scripts
-          cat > scripts/adjust_probs_pregame.py <<'PY'
-from __future__ import annotations
+          python - <<'PY'
+import textwrap, pathlib
+code = r'''from __future__ import annotations
 import argparse, numpy as np, pandas as pd
 from pathlib import Path
 def _renorm(P: np.ndarray) -> np.ndarray:
     P = np.clip(P, 1e-9, 1.0); S = P.sum(axis=1, keepdims=True); S[S <= 0] = 1.0; return P / S
 def _load_probs(base: Path):
-    tried=[("joined_stacked_bivar.csv",["p_home_final","p_draw_final","p_away_final"]),("joined_stacked.csv",["p_home_final","p_draw_final","p_away_final"]),("joined.csv",["p_home","p_draw","p_away"])]
+    tried=[("joined_stacked_bivar.csv",["p_home_final","p_draw_final","p_away_final"]),
+           ("joined_stacked.csv",["p_home_final","p_draw_final","p_away_final"]),
+           ("joined.csv",["p_home","p_draw","p_away"])]
     for fn, cols in tried:
         p=base/fn
         if p.exists() and p.stat().st_size>0:
@@ -164,7 +145,6 @@ def _apply_lineups(df, P, cap):
     if not need.issubset(ln.columns): return P
     df2=df.merge(ln[list(need)], on="match_id", how="left")
     df2[["home_missing","away_missing"]]=df2[["home_missing","away_missing"]].fillna(0)
-    import numpy as np
     miss_h=df2["home_missing"].to_numpy(int); miss_a=df2["away_missing"].to_numpy(int)
     fav=np.argmax(P, axis=1)
     for i in range(len(df2)):
@@ -184,7 +164,6 @@ def _apply_weather(df, P, cap):
     we=pd.read_csv(wp); need={"match_id","rain_mm","wind_ms"}
     if not need.issubset(we.columns): return P
     df2=df.merge(we[list(need)], on="match_id", how="left")
-    import numpy as np
     rain=df2["rain_mm"].fillna(0.0).to_numpy(float); wind=df2["wind_ms"].fillna(0.0).to_numpy(float)
     for i in range(len(df2)):
         bonus=0.0
@@ -203,7 +182,6 @@ def _apply_movement(df, P, cap):
     mv=pd.read_csv(mp); need={"match_id","d_home_pp","d_away_pp"}
     if not need.issubset(mv.columns): return P
     df2=df.merge(mv[list(need)], on="match_id", how="left")
-    import numpy as np
     dH=df2["d_home_pp"].fillna(0.0).to_numpy(float); dA=df2["d_away_pp"].fillna(0.0).to_numpy(float)
     for i in range(len(df2)):
         s=0.0; side=None
@@ -216,7 +194,7 @@ def _apply_movement(df, P, cap):
                 P[i,side]+=red; P[i]=_renorm(P[i][None,:])[0]
     return P
 def main():
-    ap=argparse.ArgumentParser(description="Ajustes pré-jogo: lineups + clima + movimento")
+    ap=argparse.ArgumentParser(description="Ajustes pré-jogo: lineups, clima e movimento")
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--cap-lineups", type=float, default=0.02)
     ap.add_argument("--cap-weather", type=float, default=0.015)
@@ -243,91 +221,88 @@ def main():
         out.rename(columns={"p_home":"p_home_final","p_draw":"p_draw_final","p_away":"p_away_final"}, inplace=True)
         out[["p_home_final","p_draw_final","p_away_final"]]=P
     out_path=base/"joined_pregame.csv"; out.to_csv(out_path, index=False); print(f"[pregame] OK -> {out_path}")
-if __name__=="__main__": main()
+if __name__=="__main__": main()'''
+pathlib.Path("scripts/adjust_probs_pregame.py").write_text(code, encoding="utf-8")
 PY
           python -m py_compile scripts/adjust_probs_pregame.py
           echo "[fix] adjust_probs_pregame.py criado (ou já existia)."
 
-      - name: Ajuste Pré-jogo (gera joined_pregame.csv)
-        shell: bash
+      - name: "4d) Ajuste Pré-jogo (gera joined_pregame.csv)"
         run: |
           set -e
           python scripts/adjust_probs_pregame.py --rodada "${LOTECA_RODADA}" --cap-lineups 0.02 --cap-weather 0.015 --cap-move 0.015
           test -s "data/out/${LOTECA_RODADA}/joined_pregame.csv"
           echo "[audit] Probabilidades FINAIS para o cartão: joined_pregame.csv"
 
-      # 5) CARTÃO
-      - name: Make Ticket
-        shell: bash
+      - name: "5) Cartão (usa joined_pregame.csv)"
         run: |
           set -e
           python - <<'PY'
-          import os, pandas as pd, numpy as np
-          from pathlib import Path
-          rodada = os.environ["LOTECA_RODADA"]
-          max_duplos = int(os.environ["MAX_DUPLOS"])
-          max_triplos = int(os.environ["MAX_TRIPLOS"])
-          base = Path(f"data/out/{rodada}")
-          tried = [
-              ("joined_pregame.csv",        ["p_home_final","p_draw_final","p_away_final"]),
-              ("joined_stacked_bivar.csv",  ["p_home_final","p_draw_final","p_away_final"]),
-              ("joined_stacked.csv",        ["p_home_final","p_draw_final","p_away_final"]),
-              ("joined.csv",                ["p_home","p_draw","p_away"]),
-          ]
-          df=None; cols=None; used=""
-          for fn, cs in tried:
-              p = base/fn
-              if p.exists() and p.stat().st_size>0:
-                  tmp = pd.read_csv(p).rename(columns=str.lower)
-                  have=[c for c in cs if c in tmp.columns]
-                  if len(have)==3:
-                      df=tmp.copy(); cols=have; used=fn; break
-          if df is None:
-              raise SystemExit("::error::Nenhum arquivo de probabilidades encontrado.")
-          P = df[cols].to_numpy(float)
-          P = np.clip(P,1e-12,1.0); P = P/P.sum(axis=1,keepdims=True)
-          matches = pd.read_csv(base/"matches.csv").rename(columns=str.lower)
-          if {"home","away"}.issubset(df.columns):
-              M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left", suffixes=("","_m"))
-              M["home"] = M["home"].fillna(M["home_m"]); M["away"] = M["away"].fillna(M["away_m"])
-          else:
-              M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left")
-          def H(p): p=p/p.sum(); return float(-(p*np.log(p)).sum())
-          ent = np.array([H(P[i]) for i in range(P.shape[0])])
-          order = np.argsort(ent)[::-1]
-          picks = [ {int(np.argmax(P[i]))} for i in range(P.shape[0]) ]
-          used_d = used_t = 0
-          for idx in order:
-              if used_t < max_triplos:
-                  picks[idx] = {0,1,2}; used_t += 1
-              elif used_d < max_duplos:
-                  top2 = np.argsort(P[idx])[::-1][:2]
-                  picks[idx] = {int(top2[0]), int(top2[1])}; used_d += 1
-          sym = {0:"1",1:"X",2:"2"}
-          rows=[]
-          for _, r in M.sort_values("match_id").iterrows():
-              mid = int(r["match_id"])
-              choice = "".join(sorted(sym[x] for x in sorted(list(picks[mid-1]))))
-              rows.append({"match_id": mid, "home": r["home"], "away": r["away"], "pick": choice})
-          pd.DataFrame(rows).to_csv(base/"loteca_ticket.csv", index=False)
-          combos=1; cnt_d=cnt_t=0
-          for r in rows:
-              m=len(r["pick"]); combos*=m
-              if m==2: cnt_d+=1
-              if m==3: cnt_t+=1
-          with open(base/"loteca_ticket.txt","w",encoding="utf-8") as f:
-              f.write(f"Cartão Loteca — {rodada}\n")
-              f.write(f"(Duplos={cnt_d}, Triplos={cnt_t}, Combinações={combos})\n")
-              f.write(f"[Probabilidades usadas: {used}]\n\n")
-              for r in rows:
-                  f.write(f"{r['match_id']:>2}  {r['home']} x {r['away']:<24} → {r['pick']}\n")
-          print("[ticket] Fonte de prob:", used, "| Duplos:", cnt_d, "Triplos:", cnt_t, "Combinações:", combos)
-          PY
+import os, pandas as pd, numpy as np
+from pathlib import Path
+rodada = os.environ["LOTECA_RODADA"]
+max_duplos = int(os.environ["MAX_DUPLOS"])
+max_triplos = int(os.environ["MAX_TRIPLOS"])
+base = Path(f"data/out/{rodada}")
+tried = [
+    ("joined_pregame.csv",        ["p_home_final","p_draw_final","p_away_final"]),
+    ("joined_stacked_bivar.csv",  ["p_home_final","p_draw_final","p_away_final"]),
+    ("joined_stacked.csv",        ["p_home_final","p_draw_final","p_away_final"]),
+    ("joined.csv",                ["p_home","p_draw","p_away"]),
+]
+df=None; cols=None; used=""
+for fn, cs in tried:
+    p = base/fn
+    if p.exists() and p.stat().st_size>0:
+        tmp = pd.read_csv(p).rename(columns=str.lower)
+        have=[c for c in cs if c in tmp.columns]
+        if len(have)==3:
+            df=tmp.copy(); cols=have; used=fn; break
+if df is None:
+    raise SystemExit("::error::Nenhum arquivo de probabilidades encontrado.")
+P = df[cols].to_numpy(float)
+P = np.clip(P,1e-12,1.0); P = P/P.sum(axis=1,keepdims=True)
+matches = pd.read_csv(base/"matches.csv").rename(columns=str.lower)
+if {"home","away"}.issubset(df.columns):
+    M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left", suffixes=("","_m"))
+    M["home"] = M["home"].fillna(M["home_m"]); M["away"] = M["away"].fillna(M["away_m"])
+else:
+    M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left")
+def H(p): p=p/p.sum(); return float(-(p*np.log(p)).sum())
+ent = np.array([H(P[i]) for i in range(P.shape[0])])
+order = np.argsort(ent)[::-1]
+picks = [ {int(np.argmax(P[i]))} for i in range(P.shape[0]) ]
+used_d = used_t = 0
+for idx in order:
+    if used_t < max_triplos:
+        picks[idx] = {0,1,2}; used_t += 1
+    elif used_d < max_duplos:
+        top2 = np.argsort(P[idx])[::-1][:2]
+        picks[idx] = {int(top2[0]), int(top2[1])}; used_d += 1
+sym = {0:"1",1:"X",2:"2"}
+rows=[]
+for _, r in M.sort_values("match_id").iterrows():
+    mid = int(r["match_id"])
+    choice = "".join(sorted(sym[x] for x in sorted(list(picks[mid-1]))))
+    rows.append({"match_id": mid, "home": r["home"], "away": r["away"], "pick": choice})
+pd.DataFrame(rows).to_csv(base/"loteca_ticket.csv", index=False)
+combos=1; cnt_d=cnt_t=0
+for r in rows:
+    m=len(r["pick"]); combos*=m
+    if m==2: cnt_d+=1
+    if m==3: cnt_t+=1
+with open(base/"loteca_ticket.txt","w",encoding="utf-8") as f:
+    f.write(f"Cartão Loteca — {rodada}\n")
+    f.write(f"(Duplos={cnt_d}, Triplos={cnt_t}, Combinações={combos})\n")
+    f.write(f"[Probabilidades usadas: {used}]\n\n")
+    for r in rows:
+        f.write(f"{r['match_id']:>2}  {r['home']} x {r['away']:<24} → {r['pick']}\n")
+print("[ticket] Fonte de prob:", used, "| Duplos:", cnt_d, "Triplos:", cnt_t, "Combinações:", combos)
+PY
           echo "==== loteca_ticket.txt ===="
           cat "data/out/${LOTECA_RODADA}/loteca_ticket.txt"
 
-      # 6) Artefatos
-      - name: Upload artifacts
+      - name: "6) Upload artifacts"
         uses: actions/upload-artifact@v4
         with:
           name: loteca-e2e-${{ inputs.rodada }}
