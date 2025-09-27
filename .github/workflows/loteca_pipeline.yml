@@ -43,7 +43,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LOTECA_RODADA: ${{ inputs.rodada }}
-      # Segredos opcionais: defina no repositório (Settings > Secrets and variables > Actions > New repository secret)
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
@@ -83,7 +82,6 @@ jobs:
       # ----------------- MATCHES -----------------
       - name: Ingest matches (from data/in/<rodada>/matches_source.csv)
         run: |
-          # Se já existir o matches.csv pronto, pulamos ingestão
           if [ -s "data/out/${LOTECA_RODADA}/matches.csv" ]; then
             echo "[matches] data/out/${LOTECA_RODADA}/matches.csv já existe — pulando ingest."
           else
@@ -99,6 +97,7 @@ jobs:
       # ----------------- ODDS (TheOddsAPI) -----------------
       - name: Ingest odds (TheOddsAPI) — opcional
         if: env.ODDS_API_KEY != ''
+        shell: bash
         run: |
           python scripts/ingest_odds.py \
             --rodada "${LOTECA_RODADA}" \
@@ -107,9 +106,7 @@ jobs:
             --market h2h \
             --allow-partial \
             --min-match ${{ inputs.min_match }}
-          # odds.csv pode ser gerado por outro passo; aqui garantimos apenas se existir
           ls -lah "data/out/${LOTECA_RODADA}/" || true
-        shell: bash
 
       # ----------------- ODDS (RapidAPI / API-Football) -----------------
       - name: Ingest odds (API-Football via RapidAPI) — opcional
@@ -138,7 +135,6 @@ jobs:
             --days-window 2 \
             --min-match ${{ inputs.min_match }} \
             --alpha 0.05
-          # joined_enriched ou joined.csv devem existir após esse passo
           ls -lah "data/out/${LOTECA_RODADA}/" || true
 
       # ----------------- PORTFÓLIO -----------------
@@ -162,7 +158,6 @@ jobs:
       # ----------------- BACKTEST (HISTÓRICO + RELATÓRIO) -----------------
       - name: Build calibration history (single rodada)
         run: |
-          # results.csv deve existir para computar calibração; se não houver, gera histórico vazio sem quebrar
           if [ ! -s "data/out/${LOTECA_RODADA}/results.csv" ] && [ ! -s "data/in/${LOTECA_RODADA}/results.csv" ]; then
             echo "[history] aviso: nenhum results.csv encontrado; o relatório sairá com placeholders."
           fi
@@ -176,7 +171,6 @@ jobs:
           echo "Conteúdo de data/history/report:"
           ls -lah data/history/report || true
 
-          # Checagens robustas (exigem os 4 principais artefatos)
           test -s "./data/history/report/report.html"          || { echo "::error::report.html ausente"; exit 2; }
           test -s "./data/history/report/calib_summary.csv"    || { echo "::error::calib_summary.csv ausente"; exit 2; }
           test -s "./data/history/report/reliability_bins.csv" || { echo "::error::reliability_bins.csv ausente"; exit 2; }
@@ -190,7 +184,10 @@ jobs:
           path: |
             data/out/${{ inputs.rodada }}/matches.csv
             data/out/${{ inputs.rodada }}/odds.csv
-            data/out/${{ inputs.rodada }}/joined*.csv
+            data/out/${{ inputs.rodada }}/joined_enriched.csv
+            data/out/${{ inputs.rodada }}/joined_referee.csv
+            data/out/${{ inputs.rodada }}/joined_weather.csv
+            data/out/${{ inputs.rodada }}/joined.csv
             data/out/${{ inputs.rodada }}/portfolio/*
             data/history/calibration.csv
             data/history/report/report.html
@@ -203,4 +200,4 @@ jobs:
             data/history/report/hist_1.png
             data/history/report/hist_X.png
             data/history/report/hist_2.png
-        if-no-files-found: warn
+          if-no-files-found: warn
