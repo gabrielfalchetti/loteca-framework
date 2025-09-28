@@ -9,14 +9,13 @@ normalização de nomes e consenso com devig proporcional.
 Uso:
   python scripts/ingest_odds.py --rodada 2025-09-27_1213 [--debug]
 
-Entradas esperadas:
+Entradas:
   data/in/<RODADA>/matches_source.csv  (colunas mín.: match_id, home, away [,date])
 
 Saídas:
   data/out/<RODADA>/odds_theoddsapi.csv
   data/out/<RODADA>/odds_apifootball.csv
   data/out/<RODADA>/odds.csv                (consenso)
-  (logs no stdout)
 """
 
 from __future__ import annotations
@@ -30,23 +29,17 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
-
 EXPECTED_ODDS_COLS = [
-    # Chaves padronizadas (normalizadas)
-    "home_n", "away_n",
-    # Metadados
-    "home", "away", "book", "ts",
-    # Odds 1X2
-    "k1", "kx", "k2",
-    # Linha de gols (se houver)
-    "total_line", "over", "under",
+    "home_n", "away_n",            # chaves normalizadas
+    "home", "away", "book", "ts",  # metadados
+    "k1", "kx", "k2",              # odds 1-X-2
+    "total_line", "over", "under", # gols (se houver)
 ]
 
-
-# ------------------------ Utilidades ------------------------ #
+# ------------------------ Utils ------------------------ #
 
 def normalize_name(s: str) -> str:
-    """Normaliza nomes de clubes (sem acento, minúsculo, trim)."""
+    """Normaliza nomes (sem acento, minúsculo, sem sufixos comuns)."""
     if s is None or (isinstance(s, float) and np.isnan(s)):
         return ""
     s = str(s)
@@ -56,9 +49,8 @@ def normalize_name(s: str) -> str:
     s = " ".join(s.split())
     return s
 
-
 def ensure_columns(df: pd.DataFrame, cols: List[str] = EXPECTED_ODDS_COLS) -> pd.DataFrame:
-    """Garante que o DataFrame tenha todas as colunas esperadas; adiciona NaN onde faltar."""
+    """Garante presença de todas as colunas esperadas."""
     if df is None:
         df = pd.DataFrame()
     out = df.copy()
@@ -68,9 +60,7 @@ def ensure_columns(df: pd.DataFrame, cols: List[str] = EXPECTED_ODDS_COLS) -> pd
     ordered = list(dict.fromkeys(cols + list(out.columns)))
     return out.loc[:, ordered]
 
-
 def implied_probs_from_odds(row: pd.Series) -> Tuple[float, float, float]:
-    """Converte k1,kx,k2 em probabilidades implícitas simples (sem devig), retorna (p1, px, p2)."""
     k1, kx, k2 = row.get("k1"), row.get("kx"), row.get("k2")
     def inv(o):
         try:
@@ -79,9 +69,7 @@ def implied_probs_from_odds(row: pd.Series) -> Tuple[float, float, float]:
             return np.nan
     return inv(k1), inv(kx), inv(k2)
 
-
 def proportional_devig(p1: float, px: float, p2: float) -> Tuple[float, float, float]:
-    """Remove vigorish proporcionalmente (p_i' = p_i / sum_p)."""
     arr = np.array([p1, px, p2], dtype=float)
     if np.all(np.isnan(arr)):
         return (np.nan, np.nan, np.nan)
@@ -90,9 +78,7 @@ def proportional_devig(p1: float, px: float, p2: float) -> Tuple[float, float, f
         return (np.nan, np.nan, np.nan)
     return tuple(arr / s)
 
-
 def probs_to_odds(p1: float, px: float, p2: float) -> Tuple[float, float, float]:
-    """Converte probabilidades em odds (1/p)."""
     def invp(p):
         try:
             return 1.0 / float(p) if (p and float(p) > 1e-12) else np.nan
@@ -100,12 +86,10 @@ def probs_to_odds(p1: float, px: float, p2: float) -> Tuple[float, float, float]
             return np.nan
     return invp(p1), invp(px), invp(p2)
 
-
 def safe_mkdir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
-
-# ------------------------ I/O: Matches ------------------------ #
+# ------------------------ Matches ------------------------ #
 
 def load_matches(rodada: str) -> pd.DataFrame:
     in_dir = os.path.join("data", "in", rodada)
@@ -128,8 +112,7 @@ def load_matches(rodada: str) -> pd.DataFrame:
     matches = matches.loc[:, base_cols + extra_cols]
     return matches
 
-
-# ------------------------ Provedores (resilientes) ------------------------ #
+# ------------------------ Provedores ------------------------ #
 
 def read_existing_provider_csv(out_dir: str, fname: str) -> pd.DataFrame:
     path = os.path.join(out_dir, fname)
@@ -140,11 +123,11 @@ def read_existing_provider_csv(out_dir: str, fname: str) -> pd.DataFrame:
             return pd.DataFrame()
     return pd.DataFrame()
 
-
 def provider_theoddsapi(matches: pd.DataFrame, out_dir: str, debug: bool = False) -> pd.DataFrame:
     fname = "odds_theoddsapi.csv"
     df = read_existing_provider_csv(out_dir, fname)
     if df.empty:
+        # Sem dados -> mantém pipeline vivo com DF vazio padronizado
         df = pd.DataFrame(columns=["home", "away", "book", "k1", "kx", "k2", "total_line", "over", "under", "ts"])
     df["home_n"] = df["home"].apply(normalize_name)
     df["away_n"] = df["away"].apply(normalize_name)
@@ -156,7 +139,6 @@ def provider_theoddsapi(matches: pd.DataFrame, out_dir: str, debug: bool = False
     else:
         print(f"[theoddsapi] OK -> {path} ({len(df)} linhas)")
     return df
-
 
 def provider_apifootball(matches: pd.DataFrame, out_dir: str, debug: bool = False) -> pd.DataFrame:
     fname = "odds_apifootball.csv"
@@ -170,7 +152,6 @@ def provider_apifootball(matches: pd.DataFrame, out_dir: str, debug: bool = Fals
     df.to_csv(path, index=False)
     print(f"[apifootball] OK -> {path} ({len(df)} linhas)")
     return df
-
 
 # ------------------------ Consenso ------------------------ #
 
@@ -198,6 +179,7 @@ def build_consensus(matches: pd.DataFrame, providers: List[pd.DataFrame]) -> pd.
 
     all_outs = pd.concat(outs, ignore_index=True, sort=False)
 
+    # probs implícitas + devig
     p_cols = []
     for idx in range(len(all_outs)):
         p1, px, p2 = implied_probs_from_odds(all_outs.iloc[idx])
@@ -208,11 +190,13 @@ def build_consensus(matches: pd.DataFrame, providers: List[pd.DataFrame]) -> pd.
     all_outs["px"] = p_arr[:, 1]
     all_outs["p2"] = p_arr[:, 2]
 
+    # média por par
     agg = (all_outs
            .groupby(["home_n", "away_n"], dropna=False)[["p1", "px", "p2"]]
            .mean()
            .reset_index())
 
+    # odds consenso
     cons = agg.copy()
     o_cols = []
     for idx in range(len(cons)):
@@ -223,7 +207,7 @@ def build_consensus(matches: pd.DataFrame, providers: List[pd.DataFrame]) -> pd.
     cons["kx"] = o_arr[:, 1]
     cons["k2"] = o_arr[:, 2]
 
-    # >>> MERGE SEGURO: usa a MESMA chave nos dois lados <<<
+    # >>> MERGE SEGURO (mesmas chaves nos dois lados)
     merged = matches.merge(cons, on=["home_n", "away_n"], how="left")
 
     if "match_id" in merged.columns:
@@ -232,7 +216,6 @@ def build_consensus(matches: pd.DataFrame, providers: List[pd.DataFrame]) -> pd.
     out_cols = [c for c in ["match_id", "home", "away", "home_n", "away_n", "k1", "kx", "k2", "p1", "px", "p2"] if c in merged.columns]
     merged = merged.loc[:, out_cols]
     return merged
-
 
 # ------------------------ Main ------------------------ #
 
@@ -259,7 +242,6 @@ def main():
     flag_theodds = 1 if (theodds_df is not None and len(theodds_df) > 0) else 0
     flag_rapid = 1 if (apifoot_df is not None and len(apifoot_df) > 0) else 0
     print(f"[audit] Odds usadas: TheOddsAPI={flag_theodds} RapidAPI={flag_rapid}")
-
 
 if __name__ == "__main__":
     main()
