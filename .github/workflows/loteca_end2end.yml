@@ -18,6 +18,14 @@ jobs:
   end2end:
     runs-on: ubuntu-latest
 
+    # Mapeia secrets -> env (use env.* nas condições if:)
+    env:
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
+      THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      PYTHONWARNINGS: ignore
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,9 +66,7 @@ jobs:
 
       # ===================== W&B (opcional) =====================
       - name: Weights and Biases login
-        if: ${{ secrets.WANDB_API_KEY != '' }}
-        env:
-          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        if: ${{ env.WANDB_API_KEY != '' }}
         shell: bash
         run: |
           python -m wandb login "${WANDB_API_KEY}" --relogin || true
@@ -68,9 +74,7 @@ jobs:
 
       # ===================== ODDS =====================
       - name: Coletar odds TheOddsAPI (auto)
-        if: ${{ secrets.THEODDSAPI_KEY != '' }}
-        env:
-          THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
+        if: ${{ env.THEODDSAPI_KEY != '' }}
         shell: bash
         run: |
           RODADA="${{ github.event.inputs.rodada }}"
@@ -83,9 +87,7 @@ jobs:
           fi
 
       - name: Coletar odds API-Football (RapidAPI BR)
-        if: ${{ secrets.RAPIDAPI_KEY != '' }}
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        if: ${{ env.RAPIDAPI_KEY != '' }}
         shell: bash
         run: |
           RODADA="${{ github.event.inputs.rodada }}"
@@ -93,9 +95,6 @@ jobs:
           python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --debug
 
       - name: Consolidar odds (consenso)
-        env:
-          THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         shell: bash
         run: |
           RODADA="${{ github.event.inputs.rodada }}"
@@ -127,9 +126,7 @@ jobs:
 
       # ===================== TREINO BASE =====================
       - name: Treinar modelos base
-        env:
-          WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
-          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        if: ${{ env.WANDB_PROJECT != '' }}
         shell: bash
         run: |
           RODADA="${{ github.event.inputs.rodada }}"
@@ -142,8 +139,7 @@ jobs:
 
       # ===================== CALIBRAÇÃO ISOTÔNICA =====================
       - name: Calibração isotônica 1X2
-        env:
-          WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
+        if: ${{ env.WANDB_PROJECT != '' }}
         shell: bash
         run: |
           RODADA="${{ github.event.inputs.rodada }}"
@@ -159,8 +155,7 @@ jobs:
 
       # ===================== STACKING BIVARIADO =====================
       - name: Stacking bivariado
-        env:
-          WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
+        if: ${{ env.WANDB_PROJECT != '' }}
         shell: bash
         run: |
           RODADA="${{ github.event.inputs.rodada }}"
