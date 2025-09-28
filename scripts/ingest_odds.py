@@ -1,126 +1,81 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+ingest_odds.py — Framework Loteca v4.3.RC1+
+Coleta/ingesta de odds por rodada com proteção contra dados ausentes,
+normalização de nomes e consenso com devig proporcional.
+
+Uso:
+  python scripts/ingest_odds.py --rodada 2025-09-27_1213 [--debug]
+
+Entradas esperadas:
+  data/in/<RODADA>/matches_source.csv  (colunas mín.: match_id, home, away [,date])
+
+Saídas:
+  data/out/<RODADA>/odds_theoddsapi.csv
+  data/out/<RODADA>/odds_apifootball.csv
+  data/out/<RODADA>/odds.csv                (consenso)
+  (logs no stdout)
+
+Observações:
+- Este script NÃO chama APIs externas. Ele é resiliente mesmo se algum provedor
+  não gerar linhas. Você pode plugar produtores específicos depois.
+- Caso já exista um CSV de provedor em data/out/<RODADA>/, ele é lido e usado.
+"""
+
 from __future__ import annotations
-import argparse, os, requests, time
+import argparse
+import os
+import sys
+import math
+import unicodedata
+from typing import List, Tuple
+
+import numpy as np
 import pandas as pd
-from pathlib import Path
-from utils_team_aliases import load_aliases, normalize_team
 
-BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-def api_get(path: str, params: dict) -> list[dict] | dict:
-    r = requests.get(f"{BASE_URL}/{path}", params=params, timeout=30)
-    if r.status_code != 200:
-        raise RuntimeError(f"[theoddsapi] GET /{path} HTTP {r.status_code}: {r.text[:300]}")
-    try:
-        return r.json()
-    except Exception:
-        return {}
+EXPECTED_ODDS_COLS = [
+    # Chaves padronizadas (normalizadas)
+    "home_n", "away_n",
+    # Metadados
+    "home", "away", "book", "ts",
+    # Odds 1X2
+    "k1", "kx", "k2",
+    # Linha de gols (se houver)
+    "total_line", "over", "under",
+]
 
-def main():
-    ap = argparse.ArgumentParser(description="Ingest odds TheOddsAPI")
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--sport", required=True, help="ex.: soccer_brazil_campeonato, soccer_epl, soccer_spain_la_liga, ...")
-    ap.add_argument("--regions", default="uk,eu", help="ex.: uk,eu,us")
-    ap.add_argument("--market", default="h2h")
-    ap.add_argument("--allow-partial", action="store_true")
-    ap.add_argument("--min-match", type=int, default=85)  # compat
-    args = ap.parse_args()
 
-    api_key = os.environ.get("ODDS_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("[theoddsapi] ODDS_API_KEY ausente nos Secrets.")
+# ------------------------ Utilidades ------------------------ #
 
-    base = Path(f"data/out/{args.rodada}")
-    base.mkdir(parents=True, exist_ok=True)
+def normalize_name(s: str) -> str:
+    """Normaliza nomes de clubes (sem acento, minúsculo, trim)."""
+    if s is None or (isinstance(s, float) and np.isnan(s)):
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = s.strip().lower()
+    # normalizações adicionais comuns (ajuste conforme seu dataset)
+    s = s.replace(" fc", "").replace(" ac", "").replace(" afc", "").replace(" sc", "").replace(".", " ")
+    s = " ".join(s.split())
+    return s
 
-    # matches (para mapear match_id/home/away normalizados)
-    mpath = base / "matches.csv"
-    if not mpath.exists() or mpath.stat().st_size == 0:
-        raise RuntimeError(f"[theoddsapi] matches.csv ausente: {mpath}")
-    matches = pd.read_csv(mpath).rename(columns=str.lower)
 
-    alias_map = load_aliases()
-    matches["home_n"] = matches["home"].astype(str).apply(lambda x: normalize_team(x, alias_map))
-    matches["away_n"] = matches["away"].astype(str).apply(lambda x: normalize_team(x, alias_map))
+def ensure_columns(df: pd.DataFrame, cols: List[str] = EXPECTED_ODDS_COLS) -> pd.DataFrame:
+    """Garante que o DataFrame tenha todas as colunas esperadas; adiciona NaN onde faltar."""
+    if df is None:
+        df = pd.DataFrame()
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            out[c] = np.nan
+    # Reordena: esperadas primeiro, depois quaisquer extras (sem duplicar)
+    ordered = list(dict.fromkeys(cols + list(out.columns)))
+    return out.loc[:, ordered]
 
-    # consulta de odds do sport
-    params = {
-        "apiKey": api_key,
-        "regions": args.regions,
-        "markets": args.market,
-        "oddsFormat": "decimal",
-        "dateFormat": "iso",
-    }
-    resp = api_get(f"{args.sport}/odds", params=params)
 
-    # Garantir estrutura com cabeçalho mesmo sem odds
-    rows = []
-    if isinstance(resp, list) and resp:
-        for game in resp:
-            try:
-                co = game.get("commence_time")  # iso
-                teams = game.get("teams", []) or []
-                home_team = game.get("home_team", "")
-                if home_team and teams and home_team in teams:
-                    away_team = [t for t in teams if t != home_team][0] if len(teams) == 2 else ""
-                else:
-                    if len(teams) == 2:
-                        home_team, away_team = teams[0], teams[1]
-                    else:
-                        continue
-                hn = normalize_team(str(home_team), alias_map)
-                an = normalize_team(str(away_team), alias_map)
-
-                bookmakers = game.get("bookmakers", []) or []
-                oh = od = oa = None
-                for bk in bookmakers:
-                    for mkt in bk.get("markets", []):
-                        if mkt.get("key") == args.market:
-                            for outc in mkt.get("outcomes", []):
-                                name = str(outc.get("name","")).strip().upper()
-                                price = outc.get("price")
-                                try:
-                                    price = float(price)
-                                except Exception:
-                                    continue
-                                if name == "HOME":
-                                    oh = price if oh is None else min(oh, price)
-                                elif name == "DRAW":
-                                    od = price if od is None else min(od, price)
-                                elif name == "AWAY":
-                                    oa = price if oa is None else min(oa, price)
-                if oh and od and oa:
-                    rows.append({"commence_time": co, "home": hn, "away": an, "odd_home": oh, "odd_draw": od, "odd_away": oa})
-            except Exception:
-                # Em caso de qualquer problema nesse jogo, segue para o próximo
-                continue
-            finally:
-                time.sleep(0.03)  # leve respiro
-    else:
-        print("[theoddsapi] Aviso: nenhuma odd coletada para este sport.")
-
-    # DataFrame de saída das odds da API (sempre com colunas)
-    out_cols = ["commence_time","home","away","odd_home","odd_draw","odd_away"]
-    out = pd.DataFrame(rows, columns=out_cols)
-
-    # tenta casar com matches por nomes normalizados; mesmo se out estiver vazio, isso não quebra
-    merged = matches.merge(out, left_on=["home_n","away_n"], right_on=["home","away"], how="left")
-    have = merged[merged[["odd_home","odd_draw","odd_away"]].notna().all(axis=1)]
-    have = have[["match_id","home","away","odd_home","odd_draw","odd_away"]].sort_values("match_id")
-
-    sport_key = args.sport.lower().replace("/", "_")
-    out_file = base / f"odds_{sport_key}.csv"
-
-    if have.empty:
-        # ainda assim gravamos um CSV com cabeçalho — facilita o merge posterior sem erros
-        pd.DataFrame(columns=["match_id","home","away","odd_home","odd_draw","odd_away"]).to_csv(out_file, index=False)
-        print(f"[theoddsapi] Nenhuma odd casada para {args.sport}. Arquivo vazio com cabeçalho salvo em {out_file}.")
-        # Se você preferir falhar o job quando não houver odds, remova o allow-partial no workflow
-        if not args.allow_partial:
-            # Não levantamos erro aqui para não quebrar toda a coleta multi-sport; o controle fica no merge final
-            pass
-    else:
-        out_file.write_text(have.to_csv(index=False), encoding="utf-8")
-        print(f"[theoddsapi] OK -> {out_file} ({len(have)} jogos)")
-
-if __name__ == "__main__":
-    main()
+def implied_probs_from_odds(row: pd.Series) -> Tuple[float, float, float]:
+    """Converte k1,kx,k2 em probabilidades implícitas simples (sem devig), retorna (p1, px, p2)."""
+    k1, kx, k2 = row.get("k1"), row.get("kx"), row.
