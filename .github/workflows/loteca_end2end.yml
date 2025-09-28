@@ -40,7 +40,11 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas requests rapidfuzz PyYAML numpy scikit-learn scipy tqdm wandb joblib
+          fi
 
       - name: Hotfix merge inseguro
         shell: bash
@@ -50,47 +54,7 @@ jobs:
       - name: Preparar entrada
         shell: bash
         run: |
-          mkdir -p "data/in/$RODADA" "data/out/$RODADA" "artifacts/$RODADA" "data"
-          # aliases BR (caso o repo ainda não tenha)
-          if [ ! -f data/aliases_br.json ]; then
-            cat > data/aliases_br.json << 'JSON'
-{
-  "atletico mineiro": ["atlético mg", "atlético-mg", "atletico mg", "clube atletico mineiro", "atlético mineiro", "atletico-mg"],
-  "mirassol": ["mirassol fc", "mirassol futebol clube"],
-  "palmeiras": ["se palmeiras", "sociedade esportiva palmeiras", "palestra italia"],
-  "corinthians": ["sc corinthians paulista", "sport club corinthians paulista", "corinthians paulista"],
-  "sao paulo": ["são paulo", "são paulo fc", "sao paulo fc"],
-  "santos": ["santos fc"],
-  "flamengo": ["cr flamengo", "clube de regatas do flamengo"],
-  "fluminense": ["fluminense fc"],
-  "botafogo": ["botafogo fr", "botafogo rj"],
-  "vasco da gama": ["vasco", "cr vasco da gama"],
-  "gremio": ["grêmio", "gremio fbpa", "grêmio fbpa"],
-  "internacional": ["sc internacional", "sport club internacional"],
-  "bahia": ["bahia ec", "ec bahia", "esporte clube bahia"],
-  "fortaleza": ["fortaleza ec", "esporte clube fortaleza"],
-  "ceara": ["ceará", "ceara sc"],
-  "america mg": ["américa mg", "america mineiro", "america futebol clube", "américa futebol clube"],
-  "cruzeiro": ["cruzeiro ec", "esporte clube cruzeiro"],
-  "cuiaba": ["cuiabá", "cuiaba ec"],
-  "bragantino": ["red bull bragantino", "rb bragantino"],
-  "athletico pr": ["athletico paranaense", "atletico pr", "atlético pr"],
-  "goias": ["goiás", "goias ec"],
-  "avai": ["avaí", "avai fc"],
-  "chapecoense": ["chapecoense af", "a chapecoense"],
-  "ponte preta": ["aa ponte preta"],
-  "juventude": ["ec juventude"],
-  "crb": ["clube de regatas brasil"],
-  "vitoria": ["esporte clube vitoria", "vitória"],
-  "sport recife": ["sport club do recife", "sport"],
-  "nautico": ["náutico", "clube nautico capibaribe"],
-  "sampaio correa": ["sampaio corrêa", "sampaio correia"],
-  "botafogo sp": ["botafogo ribeirão preto", "botafogo rp"],
-  "ituano": ["ituano fc"]
-}
-JSON
-          fi
-
+          mkdir -p "data/in/$RODADA" "data/out/$RODADA" "artifacts/$RODADA"
           FILE="data/in/$RODADA/matches_source.csv"
           if [ ! -f "$FILE" ]; then
             printf 'match_id,home,away,date\n1,Atletico Mineiro,Mirassol,2025-09-27\n2,Time C,Time D,2025-09-27\n' > "$FILE"
@@ -141,17 +105,20 @@ JSON
         run: |
           python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
 
-      # ===================== (opcionais de modelagem) =====================
+      # ===================== (modelagem opcional) =====================
       - name: Build probabilities
         shell: bash
         run: |
-          python scripts/build_probabilities.py --rodada "$RODADA" \
-            --in "data/out/$RODADA/preds_bivar.csv" \
-            --odds "data/out/$RODADA/odds.csv" \
-            --out "data/out/$RODADA/probabilities.csv" || \
-          python scripts/build_probabilities.py --rodada "$RODADA" \
-            --odds "data/out/$RODADA/odds.csv" \
-            --out "data/out/$RODADA/probabilities.csv"
+          if [ -f "data/out/$RODADA/preds_bivar.csv" ]; then
+            python scripts/build_probabilities.py --rodada "$RODADA" \
+              --in "data/out/$RODADA/preds_bivar.csv" \
+              --odds "data/out/$RODADA/odds.csv" \
+              --out "data/out/$RODADA/probabilities.csv"
+          else
+            python scripts/build_probabilities.py --rodada "$RODADA" \
+              --odds "data/out/$RODADA/odds.csv" \
+              --out "data/out/$RODADA/probabilities.csv"
+          fi
 
       - name: Evaluate risk e edge
         shell: bash
