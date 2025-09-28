@@ -3,19 +3,18 @@
 
 """
 Coletor REAL — TheOddsAPI -> competições nacionais do Brasil
+
 Saída: data/out/<RODADA>/odds_theoddsapi.csv
+Debug: data/out/<RODADA>/theoddsapi_debug.json
 
-Destaques:
-- regions padrão = "uk,eu,us,au" (todas as regiões válidas).
-- Detecta chaves BR via /sports (title contém "Brazil"/"Copa do Brasil" ou key contém "brazil").
-- Fallback explícito para chaves BR conhecidas.
-- Parâmetro --sports para FORÇAR chaves (ex.: --sports soccer_brazil_serie_a,soccer_brazil_cup).
-- Checa /events antes de /odds; logs detalhados e arquivo JSON de debug.
-- Sempre grava CSV com colunas fixas (mesmo vazio).
-
-Uso:
-  python scripts/ingest_odds_theoddsapi.py --rodada 2025-09-27_1213 \
-      --regions "uk,eu,us,au" --sports soccer_brazil_serie_a,soccer_brazil_cup --debug
+Recursos:
+- regions padrão "uk,eu,us,au"
+- Detecção automática de sport keys BR via /sports
+- Aceita --sports para forçar keys; filtra automaticamente por keys realmente disponíveis no plano
+- Ignora chaves que retornem 404 em /events
+- Verifica /events antes de /odds; logs detalhados
+- Match por igualdade, reverso (home/away invertidos) e fuzzy (>=0.90)
+- CSV sempre com colunas fixas
 """
 
 from __future__ import annotations
@@ -49,7 +48,7 @@ def _norm(s: str) -> str:
     s = str(s)
     s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
     s = s.lower().strip().replace(".", " ")
-    for suf in [" fc"," afc"," ac"," sc","-sp","-rj"]:
+    for suf in [" fc"," afc"," ac"," sc","-sp","-rj"," ec"," e.c."]:
         s = s.replace(suf, "")
     return " ".join(s.split())
 
@@ -70,10 +69,24 @@ def _get(url: str, params: Dict[str, Any], debug=False) -> Any:
         print(f"[theoddsapi] ERRO {url} -> {last}", file=sys.stderr)
     return []
 
+def _list_available_sports(key: str, debug=False) -> List[str]:
+    """Retorna TODAS as sport keys disponíveis na conta (não filtra por BR)."""
+    js = _get(f"{API}/sports", {"apiKey": key}, debug=debug) or []
+    keys = []
+    for it in js:
+        k = (it.get("key") or "").strip()
+        if k:
+            keys.append(k)
+    keys = list(dict.fromkeys(keys))
+    if debug:
+        print(f"[theoddsapi] total sports na conta: {len(keys)}")
+    return keys
+
 def _list_brazil_sports(key: str, debug=False) -> List[str]:
-    js = _get(f"{API}/sports", {"apiKey": key}, debug=debug)
+    """Seleciona chaves BR a partir do /sports (title ou key contém 'brazil'/'copa do brasil')."""
+    js = _get(f"{API}/sports", {"apiKey": key}, debug=debug) or []
     sports_keys: List[str] = []
-    for it in js or []:
+    for it in js:
         title = (it.get("title") or "").lower()
         skey  = (it.get("key") or "").lower()
         if ("brazil" in title) or ("copa do brasil" in title) or ("brazil" in skey):
@@ -82,18 +95,28 @@ def _list_brazil_sports(key: str, debug=False) -> List[str]:
     sports_keys = list(dict.fromkeys(sports_keys))
     if debug:
         print(f"[theoddsapi] sports detectados (BR): {sports_keys}")
-    if not sports_keys:
-        sports_keys = FALLBACK_BR_SPORT_KEYS.copy()
-        if debug:
-            print(f"[theoddsapi] fallback aplicado: {sports_keys}")
     return sports_keys
 
+def _events_for_sport(key: str, sport_key: str, debug=False):
+    url = f"{API}/sports/{sport_key}/events"
+    try:
+        js = _get(url, {"apiKey": key}, debug=debug)
+        if isinstance(js, list):
+            return js
+        return []
+    except Exception:
+        return []
+
 def _pull_for_sport(key: str, sport_key: str, regions: str, debug=False) -> Dict[str, Any]:
-    """Retorna dict com diagnóstico e odds para um sport_key."""
-    diag = {"sport": sport_key, "events": 0, "odds_events": 0}
-    # 1) listar eventos
-    evs = _get(f"{API}/sports/{sport_key}/events", {"apiKey": key}, debug=debug) or []
-    diag["events"] = len(evs)
+    """Retorna dict com diagnóstico e odds para um sport_key. Ignora 404."""
+    diag = {"sport": sport_key, "events": 0, "odds_events": 0, "skipped_404": False}
+    # 1) listar eventos — detecta 404 pelo retorno do _get+debug prévio
+    evs = _get(f"{API}/sports/{sport_key}/events", {"apiKey": key}, debug=debug)
+    if evs == []:
+        # pode ser 404 ou simplesmente zero eventos; tentamos outra chamada para diferenciar
+        # (não temos status aqui; então marcamos como zero eventos; o debug de fora mostrará o erro 404 se houver)
+        pass
+    diag["events"] = len(evs) if isinstance(evs, list) else 0
     if debug:
         print(f"[theoddsapi] {sport_key}: eventos listados={diag['events']}")
     if not evs:
@@ -137,8 +160,8 @@ def _pull_for_sport(key: str, sport_key: str, regions: str, debug=False) -> Dict
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    ap.add_argument("--regions", default="uk,eu,us,au", help='regions válidas: "us,uk,eu,au" (combine com vírgula)')
-    ap.add_argument("--sports", default="", help="lista de sport keys separadas por vírgula (para FORÇAR), ex.: soccer_brazil_serie_a,soccer_brazil_cup")
+    ap.add_argument("--regions", default="uk,eu,us,au", help='regions válidas: "us,uk,eu,au"')
+    ap.add_argument("--sports", default="", help="lista de sport keys separadas por vírgula (para FORÇAR)")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
@@ -164,29 +187,42 @@ def main():
     matches["home_n"] = matches["home"].apply(_norm)
     matches["away_n"] = matches["away"].apply(_norm)
 
-    # Esportes alvo
+    # Determina sport keys a consultar
+    available = _list_available_sports(key, debug=args.debug)  # todas as keys do plano
     if args.sports.strip():
-        sports = [s.strip() for s in args.sports.split(",") if s.strip()]
+        requested = [s.strip() for s in args.sports.split(",") if s.strip()]
+        sports = [s for s in requested if s in available]
+        skip = [s for s in requested if s not in available]
         if args.debug:
-            print(f"[theoddsapi] chaves FORÇADAS: {sports}")
+            print(f"[theoddsapi] chaves FORÇADAS: {requested}")
+            if skip:
+                print(f"[theoddsapi] ignoradas (não disponíveis no plano): {skip}")
+            print(f"[theoddsapi] efetivamente consultadas: {sports}")
     else:
-        sports = _list_brazil_sports(key, debug=args.debug)
+        auto_br = _list_brazil_sports(key, debug=args.debug)
+        # filtra pelas disponíveis no plano; se vazio, aplica fallback e filtra de novo
+        sports = [s for s in auto_br if s in available]
+        if not sports:
+            sports = [s for s in FALLBACK_BR_SPORT_KEYS if s in available]
         if args.debug:
-            print(f"[theoddsapi] chaves BR a consultar (auto/fallback): {sports}")
+            print(f"[theoddsapi] chaves BR a consultar (auto/fallback & disponíveis): {sports}")
 
     pulled_rows = []
     diagnostics = []
+
     for sp in sports:
+        # tentativa explícita de /events para registrar 404 no console (via _get com debug)
+        _ = _get(f"{API}/sports/{sp}/events", {"apiKey": key}, debug=True if args.debug else False)
         res = _pull_for_sport(key, sp, args.regions, debug=args.debug)
         diagnostics.append(res["diag"])
         pulled_rows.extend(res["rows"])
         time.sleep(SLEEP)
 
-    # Salva debug JSON para auditoria
+    # Salva debug JSON
     with open(dbg_path, "w", encoding="utf-8") as f:
         json.dump({"when": datetime.now(BR_TZ).isoformat(), "regions": args.regions, "sports": sports, "diag": diagnostics}, f, ensure_ascii=False, indent=2)
 
-    # Monta DF de odds (com colunas garantidas)
+    # Monta DF de odds
     rows = []
     for it in pulled_rows:
         hn = _norm(it.get("home","")); an = _norm(it.get("away",""))
@@ -199,26 +235,35 @@ def main():
     odds_cols = ["home","away","home_n","away_n","book","k1","kx","k2"]
     odds = pd.DataFrame(rows, columns=odds_cols)
 
-    # Match com seus jogos (igualdade → fuzzy 0.90)
+    # Match com seus jogos (igualdade, reverso, depois fuzzy >= 0.90)
     out_rows = []
     if not odds.empty:
         for _, m in matches.iterrows():
             mh, ma = m["home_n"], m["away_n"]
+            # igualdade direta
             hit = odds[(odds["home_n"] == mh) & (odds["away_n"] == ma)]
+            # tenta reverso
+            if hit.empty:
+                hit = odds[(odds["home_n"] == ma) & (odds["away_n"] == mh)]
+            # fuzzy
             if hit.empty:
                 best = None
                 best_sc = 0.0
                 for _, o in odds.iterrows():
-                    sc = 0.5 * (
-                        difflib.SequenceMatcher(a=mh, b=o["home_n"]).ratio()
-                        + difflib.SequenceMatcher(a=ma, b=o["away_n"]).ratio()
+                    sc = max(
+                        0.5 * (difflib.SequenceMatcher(a=mh, b=o["home_n"]).ratio()
+                               + difflib.SequenceMatcher(a=ma, b=o["away_n"]).ratio()),
+                        0.5 * (difflib.SequenceMatcher(a=mh, b=o["away_n"]).ratio()
+                               + difflib.SequenceMatcher(a=ma, b=o["home_n"]).ratio()),
                     )
                     if sc > best_sc:
                         best_sc, best = sc, o
                 if best is not None and best_sc >= 0.90:
                     hit = pd.DataFrame([best])
+
             if not hit.empty:
                 h = hit.iloc[0]
+                # Se casou no reverso, respeitamos o seu home/away
                 out_rows.append({
                     "home": m["home"], "away": m["away"],
                     "book": "theoddsapi_avg",
@@ -228,7 +273,7 @@ def main():
                 })
     else:
         if args.debug:
-            print("[theoddsapi] Nenhum evento BR retornado com odds.")
+            print("[theoddsapi] Nenhum evento BR retornado com odds para as chaves disponíveis.")
 
     df = pd.DataFrame(out_rows, columns=OUT_COLS)
     df.to_csv(out_path, index=False)
