@@ -18,6 +18,13 @@ jobs:
   end2end:
     runs-on: ubuntu-latest
 
+    env:
+      PYTHONWARNINGS: "ignore"
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
+      THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,64 +35,193 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests
+          # Ajuste esta lista se o seu repo tiver requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas numpy requests scikit-learn scipy matplotlib tqdm wandb joblib
+          fi
 
       - name: HOTFIX - corrigir merge inseguro no ingest_odds.py
+        shell: bash
         run: |
           python scripts/patch_merge_hotfix.py || true
 
       - name: Preparar entrada (se faltar)
         shell: bash
         run: |
+          set -e
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-          mkdir -p "data/in/$RODADA" "data/out/$RODADA"
+          mkdir -p "data/in/$RODADA" "data/out/$RODADA" "artifacts/$RODADA"
           FILE="data/in/$RODADA/matches_source.csv"
           if [ ! -f "$FILE" ]; then
             printf 'match_id,home,away,date\n1,Time A,Time B,2025-09-27\n2,Time C,Time D,2025-09-27\n' > "$FILE"
-            echo "Criado arquivo de exemplo: $FILE"
+            echo "Criado: $FILE"
           else
-            echo "Arquivo já existe: $FILE"
+            echo "Entrada OK: $FILE"
           fi
 
-      # ===== THEODDSAPI (auto-detectando chaves disponíveis) =====
-      - name: Coletar odds - TheOddsAPI (BR)
-        env:
-          THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
+      # ===================== W&B =====================
+      - name: Weights & Biases - Login (opcional)
+        shell: bash
+        run: |
+          if [ -n "${WANDB_API_KEY}" ]; then
+            python - <<'PY'
+import os, wandb
+key=os.environ.get("WANDB_API_KEY","").strip()
+if key:
+    import subprocess, sys
+    subprocess.run([sys.executable, "-m", "wandb", "login", key], check=True)
+    print("[wandb] login OK")
+else:
+    print("[wandb] sem chave")
+PY
+          else
+            echo "::warning::WANDB_API_KEY ausente — passos W&B serão pulados (mas o fluxo segue)."
+          fi
+
+      # ===================== ODDS =====================
+      - name: Coletar odds - TheOddsAPI (BR auto)
+        if: ${{ env.THEODDSAPI_KEY != '' }}
         shell: bash
         run: |
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-          if [ -z "${THEODDSAPI_KEY}" ]; then
-            echo "::warning::Secret THEODDSAPI_KEY não definido. Pulando TheOddsAPI."
-            exit 0
-          fi
-          python scripts/ingest_odds_theoddsapi.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug
+          python scripts/ingest_odds_theoddsapi.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug || true
           if [ -f "data/out/$RODADA/theoddsapi_debug.json" ]; then
-            echo "---- theoddsapi_debug.json (primeiros 4000 bytes) ----"
+            echo "---- theoddsapi_debug.json (head) ----"
             head -c 4000 "data/out/$RODADA/theoddsapi_debug.json" || true
             echo ""
           fi
+      - name: Aviso - TheOddsAPI ausente
+        if: ${{ env.THEODDSAPI_KEY == '' }}
+        run: echo "::warning::Secret THEODDSAPI_KEY não definido. Pulando TheOddsAPI."
 
-      # ===== API-FOOTBALL (RapidAPI) =====
       - name: Coletar odds - API-Football (RapidAPI, BR)
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        if: ${{ env.RAPIDAPI_KEY != '' }}
         shell: bash
         run: |
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-          if [ -z "${RAPIDAPI_KEY}" ]; then
-            echo "::warning::Secret RAPIDAPI_KEY não definido. Pulando API-Football."
-            exit 0
-          fi
           python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --debug
+      - name: Aviso - RapidAPI ausente
+        if: ${{ env.RAPIDAPI_KEY == '' }}
+        run: echo "::warning::Secret RAPIDAPI_KEY não definido. Pulando API-Football."
 
-      # ===== CONSENSO / MERGE FINAL =====
       - name: Ingest Odds (consenso e merge final)
-        env:
-          THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         shell: bash
         run: |
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
           python scripts/ingest_odds.py --rodada "$RODADA"
+
+      # ===================== FEATURE ENGINEERING / xG =====================
+      - name: Gerar features base
+        shell: bash
+        run: |
+          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+          if [ -f scripts/join_features.py ]; then
+            python scripts/join_features.py --rodada "$RODADA"
+          else
+            echo "::warning::scripts/join_features.py não encontrado — pulando."
+          fi
+
+      - name: Calcular xG
+        shell: bash
+        run: |
+          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+          if [ -f scripts/compute_xg.py ]; then
+            python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
+          else
+            echo "::warning::scripts/compute_xg.py não encontrado — pulando."
+          fi
+
+      # ===================== TREINO (base) =====================
+      - name: Treinar modelos base
+        shell: bash
+        run: |
+          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+          if [ -f scripts/train_model.py ]; then
+            python scripts/train_model.py --rodada "$RODADA" --wandb_project "${WANDB_PROJECT}"
+          else
+            echo "::warning::scripts/train_model.py não encontrado — pulando."
+          fi
+
+      # ===================== CALIBRAÇÃO ISOTÔNICA =====================
+      - name: Calibração Isotônica (1X2)
+        shell: bash
+        run: |
+          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+          if [ -f scripts/calibrate_isotonic.py ]; then
+            python scripts/calibrate_isotonic.py --rodada "$RODADA" \
+              --in "data/out/$RODADA/preds_base.csv" \
+              --out "data/out/$RODADA/preds_calibrated.csv" \
+              --wandb_project "${WANDB_PROJECT}"
+          else
+            echo "::warning::scripts/calibrate_isotonic.py não encontrado — pulando."
+          fi
+
+      # ===================== STACKING BIVARIADO =====================
+      - name: Stacking Bivariado (prob joint Gols Casa/Away)
+        shell: bash
+        run: |
+          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+          if [ -f scripts/stack_bivariate.py ]; then
+            python scripts/stack_bivariate.py --rodada "$RODADA" \
+              --in "data/out/$RODADA/preds_calibrated.csv" \
+              --out "data/out/$RODADA/preds_bivar.csv" \
+              --wandb_project "${WANDB_PROJECT}"
+          else
+            echo "::warning::scripts/stack_bivariate.py não encontrado — pulando."
+          fi
+
+      # ===================== BUILD PROBABILITIES =====================
+      - name: Build Probabilities (mercados finais)
+        shell: bash
+        run: |
+          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+          if [ -f scripts/build_probabilities.py ]; then
+            python scripts/build_probabilities.py --rodada "$RODADA" \
+              --in "data/out/$RODADA/preds_bivar.csv" \
+              --odds "data/out/$RODADA/odds.csv" \
+              --out "data/out/$RODADA/probabilities.csv"
+          else
+            echo "::warning::scripts/build_probabilities.py não encontrado — pulando."
+          fi
+
+      # ===================== EVALUATE RISK =====================
+      - name: Evaluate Risk / Edge
+        shell: bash
+        run: |
+          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+          if [ -f scripts/evaluate_risk.py ]; then
+            python scripts/evaluate_risk.py --rodada "$RODADA" \
+              --probs "data/out/$RODADA/probabilities.csv" \
+              --odds "data/out/$RODADA/odds.csv" \
+              --out "data/out/$RODADA/risk_report.csv"
+          else
+            echo "::warning::scripts/evaluate_risk.py não encontrado — pulando."
+          fi
+
+      # ===================== SCORECARD / RELATÓRIO =====================
+      - name: Scorecard / Relatório
+        shell: bash
+        run: |
+          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+          if [ -f scripts/scorecard.py ]; then
+            python scripts/scorecard.py --rodada "$RODADA" --out "data/out/$RODADA/scorecard.html"
+          else
+            echo "::warning::scripts/scorecard.py não encontrado — pulando."
+          fi
+
+      # ===================== EXPORT/ARTIFACTS =====================
+      - name: Exportar artefatos
+        uses: actions/upload-artifact@v4
+        with:
+          name: loteca_${{ github.event.inputs.rodada || '2025-09-27_1213' }}
+          path: |
+            data/out/${{ github.event.inputs.rodada || '2025-09-27_1213' }}/odds*.csv
+            data/out/${{ github.event.inputs.rodada || '2025-09-27_1213' }}/theoddsapi_debug.json
+            data/out/${{ github.event.inputs.rodada || '2025-09-27_1213' }}/*.csv
+            data/out/${{ github.event.inputs.rodada || '2025-09-27_1213' }}/*.html
+            artifacts/${{ github.event.inputs.rodada || '2025-09-27_1213' }}/**
