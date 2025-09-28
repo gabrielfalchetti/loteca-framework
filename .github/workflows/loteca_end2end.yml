@@ -49,8 +49,8 @@ jobs:
             echo "Arquivo já existe: $FILE"
           fi
 
-      # ===== THEODDSAPI =====
-      - name: Coletar odds - TheOddsAPI (BR - sports forçados)
+      # ===== THEODDSAPI (auto-detectando chaves disponíveis) =====
+      - name: Coletar odds - TheOddsAPI (BR)
         env:
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
         shell: bash
@@ -60,10 +60,7 @@ jobs:
             echo "::warning::Secret THEODDSAPI_KEY não definido. Pulando TheOddsAPI."
             exit 0
           fi
-          python scripts/ingest_odds_theoddsapi.py --rodada "$RODADA" \
-            --regions "uk,eu,us,au" \
-            --sports "soccer_brazil_serie_a,soccer_brazil_serie_b,soccer_brazil_cup" \
-            --debug
+          python scripts/ingest_odds_theoddsapi.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug
           if [ -f "data/out/$RODADA/theoddsapi_debug.json" ]; then
             echo "---- theoddsapi_debug.json (primeiros 4000 bytes) ----"
             head -c 4000 "data/out/$RODADA/theoddsapi_debug.json" || true
