@@ -2,225 +2,347 @@
 # -*- coding: utf-8 -*-
 
 """
-ingest_odds_theoddsapi.py — coleta odds da TheOddsAPI
-- Descobre esportes disponíveis
-- Força chaves BR quando necessário
-- Suporte a múltiplos aliases para normalização
-- Telemetria opcional em W&B
+ingest_odds_theoddsapi.py — Framework Loteca v4.3
+Coleta odds 1x2 da TheOddsAPI para competições BR (e similares),
+usa endpoint CORRETO por evento (v4: sports/{sport_key}/events/{event_id}/odds),
+normaliza nomes e salva CSV + debug JSON. Integra com W&B (opcional).
 
+Uso:
+  python scripts/ingest_odds_theoddsapi.py --rodada 2025-09-27_1213 --regions "uk,eu,us,au" [--aliases data/aliases_br.json] [--debug]
+Requer:
+  - env var THEODDSAPI_KEY
+Entradas:
+  data/in/<RODADA>/matches_source.csv (colunas: match_id, home, away [,date])
 Saídas:
   data/out/<RODADA>/odds_theoddsapi.csv
   data/out/<RODADA>/theoddsapi_debug.json
 """
 
 from __future__ import annotations
-import os, sys, json, math, time, argparse, unicodedata
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Any, Tuple
+import os
+import sys
+import json
+import time
+import math
+import argparse
+import unicodedata
+from typing import Dict, List, Tuple, Any
 
-import requests
 import pandas as pd
-import numpy as np
+import requests
 
-BR_TZ = timezone(timedelta(hours=-3))
-BASE = "https://api.the-odds-api.com/v4"
+# ------- W&B (opcional) -------
+try:
+    import wandb
+    WANDB_OK = True
+except Exception:
+    WANDB_OK = False
 
-FALLBACK_SPORTS_BR = ["soccer_brazil_campeonato", "soccer_brazil_serie_b", "soccer_brazil_cup"]
 
-def _norm(s: str) -> str:
-    if s is None or (isinstance(s, float) and math.isnan(s)):
+# ----------------- Utils ----------------- #
+def safe_mkdir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+def norm(s: str) -> str:
+    if s is None:
         return ""
-    s = str(s)
-    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
-    s = s.lower().strip().replace(".", " ")
-    return " ".join(s.split())
+    s = str(s).strip().lower()
+    s = "".join(
+        c for c in unicodedata.normalize("NFKD", s)
+        if not unicodedata.combining(c)
+    )
+    # normalizações leves
+    s = s.replace(" fc", "").replace(" afc", "").replace(" ec", "")
+    s = s.replace(".", "").replace("-", " ").replace("_", " ")
+    s = " ".join(s.split())
+    return s
 
-def _load_aliases(paths: list[str]) -> Dict[str, List[str]]:
-    ali: Dict[str, List[str]] = {}
-    for p in paths:
-        if not p or not os.path.isfile(p): continue
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            for k, v in raw.items():
-                canon = _norm(k)
-                vals = list({_norm(x) for x in (v or [])})
-                ali.setdefault(canon, [])
-                for it in vals:
-                    if it and it not in ali[canon]:
-                        ali[canon].append(it)
-        except Exception as e:
-            print(f"[theoddsapi] AVISO aliases '{p}': {e}", file=sys.stderr)
-    return ali
+def load_aliases(paths: List[str]) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    for p in paths or []:
+        if not p:
+            continue
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    j = json.load(f)
+                    for k, arr in j.items():
+                        nk = norm(k)
+                        out.setdefault(nk, [])
+                        # garanta dedup
+                        vals = [norm(x) for x in (arr if isinstance(arr, list) else [arr])]
+                        for v in vals:
+                            if v and v not in out[nk]:
+                                out[nk].append(v)
+            except Exception:
+                pass
+    return out
 
-def _canon(name: str, aliases: Dict[str, List[str]]) -> str:
-    n = _norm(name)
-    if n in aliases: return n
-    for k, vs in aliases.items():
-        if n == k: return k
-        for v in vs:
-            if n == v: return k
+def alias_map_lookup(n: str, aliases: Dict[str, List[str]]) -> str:
+    # se n bater como chave, ok
+    if n in aliases:
+        return n
+    # se n bater em algum value, retorna a chave canônica
+    for k, arr in aliases.items():
+        if n == k:
+            return k
+        if n in arr:
+            return k
     return n
 
-def _wandb_init_safe(project: str | None, job_name: str, config: dict):
+
+# ----------------- TheOddsAPI ----------------- #
+BASE = "https://api.the-odds-api.com/v4"
+
+def _req(path: str, params: Dict[str, Any], debug: bool=False) -> Any:
+    url = f"{BASE}/{path}"
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
     try:
-        import wandb  # type: ignore
-        key = os.getenv("WANDB_API_KEY","").strip()
-        if not key: return None
-        return wandb.init(project=project or "loteca", name=job_name, config=config, reinit=True)
+        return r.json()
     except Exception:
+        if debug:
+            print(f"[theoddsapi] WARN: resposta não-JSON em {url}")
         return None
 
-def _wandb_log_safe(run, data: dict):
-    try:
-        if run: run.log(data)
-    except Exception:
-        pass
+def list_sports(key: str) -> List[Dict[str, Any]]:
+    return _req("sports", {"apiKey": key}, debug=False) or []
 
-def _get(path: str, params: dict, retry=3, sleep=0.8) -> Any:
-    last = None
-    for i in range(retry):
-        try:
-            r = requests.get(f"{BASE}/{path}", params=params, timeout=30)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last = str(e)
-            time.sleep(sleep*(i+1))
-    print(f"[theoddsapi] ERRO https://api.the-odds-api.com/v4/{path} -> {last}", file=sys.stderr)
-    return None
+def list_events_for_sport(key: str, sport_key: str) -> List[Dict[str, Any]]:
+    # v4 correto: /sports/{sport_key}/events
+    return _req(f"sports/{sport_key}/events", {"apiKey": key}, debug=False) or []
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--regions", default="uk,eu,us,au")
-    ap.add_argument("--aliases", action="append", default=[], help="arquivos de aliases (pode repetir)")
-    ap.add_argument("--debug", action="store_true")
-    args = ap.parse_args()
+def get_odds_for_event(key: str, sport_key: str, event_id: str, regions: str, markets: str="h2h") -> Any:
+    # v4 correto: /sports/{sport_key}/events/{event_id}/odds
+    return _req(
+        f"sports/{sport_key}/events/{event_id}/odds",
+        {"apiKey": key, "regions": regions, "markets": markets},
+        debug=False
+    ) or []
 
-    rodada = args.rodada
-    out_dir = os.path.join("data","out",rodada)
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "odds_theoddsapi.csv")
-    dbg_path = os.path.join(out_dir, "theoddsapi_debug.json")
 
-    # W&B
-    wandb_run = _wandb_init_safe(os.getenv("WANDB_PROJECT") or "loteca", f"theoddsapi_{rodada}",
-                                 {"regions": args.regions})
+# ----------------- Coleta principal ----------------- #
+def collect_theodds(matches: pd.DataFrame,
+                    out_dir: str,
+                    api_key: str,
+                    regions: str,
+                    aliases_files: List[str],
+                    debug: bool=False,
+                    wandb_run=None) -> pd.DataFrame:
 
-    key = os.getenv("THEODDSAPI_KEY","").strip()
-    if not key:
-        print("[theoddsapi] Aviso: THEODDSAPI_KEY ausente — salvando CSV vazio.", file=sys.stderr)
-        pd.DataFrame(columns=["match_id","home","away","k1","kx","k2","source"]).to_csv(out_path, index=False)
-        return
+    # aliases
+    aliases = load_aliases(aliases_files)
 
-    aliases = _load_aliases(args.aliases)
+    # detectar sports BR disponíveis na conta
+    sports = list_sports(api_key)
+    br_like = []
+    for s in sports:
+        sk = s.get("key", "")
+        if any(tag in sk for tag in ["brazil", "campeonato", "serie_b", "serie a", "campeonato"]):
+            br_like.append(sk)
 
-    # matches
-    in_path = os.path.join("data","in",rodada,"matches_source.csv")
-    if not os.path.isfile(in_path):
-        raise FileNotFoundError(f"[theoddsapi] arquivo não encontrado: {in_path}")
-    matches = pd.read_csv(in_path)
-    if "match_id" not in matches.columns:
-        matches.insert(0, "match_id", range(1, len(matches)+1))
-    matches["home_n"] = matches["home"].apply(lambda x: _canon(x, aliases))
-    matches["away_n"] = matches["away"].apply(lambda x: _canon(x, aliases))
-
-    # listar esportes
-    sports = _get("sports", {"apiKey": key})
-    all_ids = []
-    if isinstance(sports, list):
-        all_ids = [s.get("key") for s in sports if s.get("active")]
-    print(f"[theoddsapi] total sports na conta: {len(all_ids)}")
-
-    # checar BR
-    detected = [sid for sid in all_ids if isinstance(sid, str) and sid.startswith("soccer_brazil_")]
-    if detected:
-        print(f"[theoddsapi] sports detectados (BR): {detected}")
-        sports_keys = detected
-    else:
-        print("[theoddsapi] AVISO: não detectou sports BR ativos — usando fallback.")
-        sports_keys = FALLBACK_SPORTS_BR
+    # fallback padrão (campeonato brasileiro + série b)
+    fallbacks = ["soccer_brazil_campeonato", "soccer_brazil_serie_b"]
+    # mantém somente os que existem na conta
+    sport_keys = [x for x in br_like if x] or fallbacks
+    if debug:
+        print(f"[theoddsapi] sports detectados (BR): {sport_keys}")
 
     diag = []
-    rows: List[dict] = []
+    rows = []
+    total_events = 0
+    total_odds_found = 0
 
-    for skey in sports_keys:
-        # listar eventos por sport
-        ev = _get(f"sports/{skey}/events", {"apiKey": key})
-        if not isinstance(ev, list):
-            print(f"[theoddsapi] Aviso: nenhuma odd coletada para este sport.", file=sys.stderr)
-            diag.append({"sport": skey, "events": 0, "odds_events": 0, "skipped_404": True})
-            continue
-        print(f"[theoddsapi] {skey}: eventos listados={len(ev)}")
-        odds_ok = 0
+    # normalização de matches
+    matches = matches.copy()
+    matches["home_n"] = matches["home"].map(norm)
+    matches["away_n"] = matches["away"].map(norm)
+    # aplica aliases nas equipes do CSV
+    matches["home_n"] = matches["home_n"].map(lambda x: alias_map_lookup(x, aliases))
+    matches["away_n"] = matches["away_n"].map(lambda x: alias_map_lookup(x, aliases))
 
-        for e in ev:
-            home = _norm((e.get("home_team") or ""))
-            away = _norm((e.get("away_team") or ""))
-            # odds/mercados
-            odds = _get("odds", {"apiKey": key, "regions": args.regions, "markets": "h2h", "eventIds": e.get("id")})
-            if not isinstance(odds, list) or not odds:
+    for skey in sport_keys:
+        events = list_events_for_sport(api_key, skey)
+        total_events += len(events)
+        odds_counter_this_sport = 0
+
+        if debug:
+            print(f"[theoddsapi] {skey}: eventos listados={len(events)}")
+
+        for e in events:
+            event_id = e.get("id")
+            if not event_id:
                 continue
-            # extrair 1x2 de primeiro bookmaker com h2h
-            k1=kx=k2=None
-            src=None
-            for book in odds[0].get("bookmakers", []) or []:
-                for mkt in book.get("markets", []) or []:
-                    if (mkt.get("key") or "").lower() == "h2h":
-                        for outc in mkt.get("outcomes", []) or []:
-                            name = str(outc.get("name","")).strip().lower()
-                            try:
-                                price = float(outc.get("price"))
-                            except Exception:
-                                price = None
-                            if name == "home": k1 = price
-                            elif name == "draw": kx = price
-                            elif name == "away": k2 = price
-                        src = book.get("title","")
+
+            # coleta odds POR EVENTO (endpoint correto)
+            try:
+                odds_payload = get_odds_for_event(api_key, skey, event_id, regions=regions, markets="h2h")
+            except requests.HTTPError as ex:
+                if debug:
+                    print(f"[theoddsapi] HTTPError {skey}/{event_id}: {ex}")
+                continue
+            except Exception as ex:
+                if debug:
+                    print(f"[theoddsapi] erro genérico {skey}/{event_id}: {ex}")
+                continue
+
+            # payload é lista de bookmakers com markets/outcomes
+            # precisamos achar o melhor (qualquer) 1x2 (home/draw/away)
+            # e extrair preços
+            best = None
+            best_bk = None
+            commence_time = e.get("commence_time")
+
+            for bk in odds_payload:
+                mkt_list = bk.get("markets") or []
+                for m in mkt_list:
+                    if (m.get("key") or "").lower() != "h2h":
+                        continue
+                    outcomes = m.get("outcomes") or []
+                    # outcomes ex: [{"name": "Home", "price": 1.90, "point": null}, ...]
+                    # mapeia por nome
+                    price_map = {}
+                    for outc in outcomes:
+                        nm = norm(outc.get("name"))
+                        price_map[nm] = outc.get("price")
+                    # tentativas de chaves
+                    h = price_map.get("home") or price_map.get("team1")
+                    d = price_map.get("draw") or price_map.get("empate") or price_map.get("tie")
+                    a = price_map.get("away") or price_map.get("team2")
+                    if h and a and d:
+                        best = (h, d, a)
+                        best_bk = bk.get("bookmaker")
                         break
-                if k1 and kx and k2:
+                if best:
                     break
-            if not (k1 and kx and k2):
+
+            if not best:
                 continue
 
-            # tentar casar com matches
-            hit = matches[(matches["home_n"] == home) & (matches["away_n"] == away)]
-            if len(hit) == 1:
-                mid = int(hit.iloc[0]["match_id"])
-                rows.append({"match_id": mid, "home": hit.iloc[0]["home"], "away": hit.iloc[0]["away"],
-                             "k1": k1, "kx": kx, "k2": k2, "source": f"TheOddsAPI/{src or 'unknown'}"})
-                odds_ok += 1
+            # nomes do evento (da TheOddsAPI)
+            home_name = norm(e.get("home_team"))
+            away_name = norm(e.get("away_team"))
 
-        diag.append({"sport": skey, "events": len(ev), "odds_events": odds_ok, "skipped_404": False})
+            # aplica aliases nos nomes do evento para cruzar com matches
+            home_name = alias_map_lookup(home_name, aliases)
+            away_name = alias_map_lookup(away_name, aliases)
 
-    df = pd.DataFrame(rows, columns=["match_id","home","away","k1","kx","k2","source"])
-    df.to_csv(out_path, index=False)
-    print(f"[theoddsapi] OK -> {out_path} ({len(df)} linhas)")
+            # tenta cruzar com matches da rodada
+            hit = matches[(matches["home_n"] == home_name) & (matches["away_n"] == away_name)]
+            if len(hit) == 0:
+                # tenta também invertido (por garantia, embora soccer costume ser home/away direto)
+                hit = matches[(matches["home_n"] == away_name) & (matches["away_n"] == home_name)]
+                invert = True
+            else:
+                invert = False
 
+            if len(hit) == 0:
+                # sem match, mas ainda assim registramos as odds “soltas”?
+                # aqui vamos descartar (foco em casar com matches da rodada)
+                continue
+
+            row = {
+                "match_id": hit.iloc[0]["match_id"],
+                "home": hit.iloc[0]["home"],
+                "away": hit.iloc[0]["away"],
+                "home_n": hit.iloc[0]["home_n"],
+                "away_n": hit.iloc[0]["away_n"],
+                "sport": skey,
+                "event_id": event_id,
+                "commence_time": commence_time,
+                "bookmaker": best_bk or "",
+                "odd_home": best[2] if invert else best[0],
+                "odd_draw": best[1],
+                "odd_away": best[0] if invert else best[2],
+            }
+            rows.append(row)
+            odds_counter_this_sport += 1
+            total_odds_found += 1
+
+        diag.append({
+            "sport": skey,
+            "events": len(events),
+            "odds_events": odds_counter_this_sport,
+            "skipped_404": False
+        })
+
+    # monta df final
+    out = pd.DataFrame(rows, columns=[
+        "match_id","home","away","home_n","away_n",
+        "sport","event_id","commence_time","bookmaker",
+        "odd_home","odd_draw","odd_away"
+    ])
+
+    # salva
+    out_path = os.path.join(out_dir, "odds_theoddsapi.csv")
+    out.to_csv(out_path, index=False, encoding="utf-8")
+    print(f"[theoddsapi] OK -> {out_path} ({len(out)} linhas)")
+
+    # debug json
     dbg = {
-        "when": datetime.now(BR_TZ).isoformat(timespec="seconds"),
-        "regions": args.regions,
-        "sports": sports_keys,
+        "when": pd.Timestamp.now(tz="America/Sao_Paulo").isoformat(),
+        "regions": regions,
+        "sports": sport_keys,
         "diag": diag
     }
+    dbg_path = os.path.join(out_dir, "theoddsapi_debug.json")
     with open(dbg_path, "w", encoding="utf-8") as f:
         json.dump(dbg, f, ensure_ascii=False, indent=2)
-    print(f"[theoddsapi] debug salvo em: {dbg_path}")
-    if args.debug:
-        print("---- theoddsapi_debug.json (head) ----")
-        try:
-            with open(dbg_path,"r",encoding="utf-8") as f:
-                print(f.read()[:4000])
-        except Exception:
-            pass
+    if debug:
+        print(f"[theoddsapi] debug salvo em: {dbg_path}")
 
+    # W&B
+    if wandb_run is not None:
+        wandb_run.log({
+            "sports_consultados": len(sport_keys),
+            "theoddsapi_rows": len(out),
+        })
+
+    return out
+
+
+# ----------------- Entradas / Main ----------------- #
+def load_matches(rodada: str) -> pd.DataFrame:
+    p = os.path.join("data", "in", rodada, "matches_source.csv")
+    if not os.path.isfile(p):
+        raise FileNotFoundError(f"[theoddsapi] arquivo ausente: {p}")
+    df = pd.read_csv(p)
+    req = ["match_id", "home", "away"]
+    for c in req:
+        if c not in df.columns:
+            raise RuntimeError(f"[theoddsapi] coluna obrigatória ausente em matches_source.csv: {c}")
+    return df
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rodada", required=True, help="ex.: 2025-09-27_1213")
+    parser.add_argument("--regions", default="uk,eu,us,au")
+    parser.add_argument("--aliases", action="append", default=[], help="caminho(s) para JSON de aliases; pode repetir")
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
+
+    key = os.environ.get("THEODDSAPI_KEY", "")
+    if not key:
+        print("ERRO: defina THEODDSAPI_KEY no ambiente.", file=sys.stderr)
+        sys.exit(2)
+
+    out_dir = os.path.join("data", "out", args.rodada)
+    safe_mkdir(out_dir)
+
+    matches = load_matches(args.rodada)
+
+    wb = None
+    if WANDB_OK and os.environ.get("WANDB_API_KEY"):
+        # substitui reinit=True por finish_previous=True (sem warning)
+        wb = wandb.init(project="loteca",
+                        name=f"theoddsapi_{args.rodada}",
+                        settings=wandb.Settings(start_method="thread"),
+                        finish_previous=True)
     try:
-        run = _wandb_init_safe(os.getenv("WANDB_PROJECT") or "loteca", f"theoddsapi_post_{rodada}", {})
-        _wandb_log_safe(run, {"theoddsapi_rows": len(df), "sports_consultados": len(sports_keys)})
-        if run: run.finish()
-    except Exception:
-        pass
+        df = collect_theodds(matches, out_dir, key, args.regions, args.aliases, debug=args.debug, wandb_run=wb)
+    finally:
+        if wb is not None:
+            wb.finish()
 
 if __name__ == "__main__":
     main()
