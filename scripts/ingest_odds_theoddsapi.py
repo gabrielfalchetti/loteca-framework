@@ -5,17 +5,21 @@
 Coletor REAL — TheOddsAPI -> competições nacionais do Brasil
 Saída: data/out/<RODADA>/odds_theoddsapi.csv
 
-Melhorias:
-- regions padrão = "uk,eu,us" (não existe "br").
-- Detecta chaves BR via /sports (title ou key contendo "brazil").
-- Fallback explícito para: serie_a, serie_b, serie_c, serie_d, cup.
-- Consulta /events antes de /odds (para saber se há jogos listados).
-- Logs detalhados (--debug).
-- Sempre grava CSV com colunas fixas.
+Destaques:
+- regions padrão = "uk,eu,us,au" (todas as regiões válidas).
+- Detecta chaves BR via /sports (title contém "Brazil"/"Copa do Brasil" ou key contém "brazil").
+- Fallback explícito para chaves BR conhecidas.
+- Parâmetro --sports para FORÇAR chaves (ex.: --sports soccer_brazil_serie_a,soccer_brazil_cup).
+- Checa /events antes de /odds; logs detalhados e arquivo JSON de debug.
+- Sempre grava CSV com colunas fixas (mesmo vazio).
+
+Uso:
+  python scripts/ingest_odds_theoddsapi.py --rodada 2025-09-27_1213 \
+      --regions "uk,eu,us,au" --sports soccer_brazil_serie_a,soccer_brazil_cup --debug
 """
 
 from __future__ import annotations
-import argparse, os, sys, time, unicodedata, math, difflib
+import argparse, os, sys, time, unicodedata, math, difflib, json
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any
 import requests
@@ -25,7 +29,7 @@ import pandas as pd
 API = "https://api.the-odds-api.com/v4"
 TIMEOUT = 25
 RETRY = 3
-SLEEP = 0.6
+SLEEP = 0.7
 BR_TZ = timezone(timedelta(hours=-3))
 
 OUT_COLS = ["home","away","book","k1","kx","k2","total_line","over","under","ts"]
@@ -71,10 +75,10 @@ def _list_brazil_sports(key: str, debug=False) -> List[str]:
     sports_keys: List[str] = []
     for it in js or []:
         title = (it.get("title") or "").lower()
-        skey  = it.get("key") or ""
-        if ("brazil" in title) or ("copa do brasil" in title) or ("brazil" in skey.lower()):
-            if skey:
-                sports_keys.append(skey)
+        skey  = (it.get("key") or "").lower()
+        if ("brazil" in title) or ("copa do brasil" in title) or ("brazil" in skey):
+            if it.get("key"):
+                sports_keys.append(it["key"])
     sports_keys = list(dict.fromkeys(sports_keys))
     if debug:
         print(f"[theoddsapi] sports detectados (BR): {sports_keys}")
@@ -84,27 +88,25 @@ def _list_brazil_sports(key: str, debug=False) -> List[str]:
             print(f"[theoddsapi] fallback aplicado: {sports_keys}")
     return sports_keys
 
-def _pull_odds_for_sport(key: str, sport_key: str, regions: str, debug=False) -> List[Dict[str, Any]]:
-    # 1) Verifica se há eventos listados
-    evs = _get(f"{API}/sports/{sport_key}/events", {"apiKey": key}, debug=debug)
+def _pull_for_sport(key: str, sport_key: str, regions: str, debug=False) -> Dict[str, Any]:
+    """Retorna dict com diagnóstico e odds para um sport_key."""
+    diag = {"sport": sport_key, "events": 0, "odds_events": 0}
+    # 1) listar eventos
+    evs = _get(f"{API}/sports/{sport_key}/events", {"apiKey": key}, debug=debug) or []
+    diag["events"] = len(evs)
     if debug:
-        print(f"[theoddsapi] {sport_key}: eventos listados={len(evs) if evs else 0}")
+        print(f"[theoddsapi] {sport_key}: eventos listados={diag['events']}")
     if not evs:
-        return []
+        return {"diag": diag, "rows": []}
 
-    # 2) Puxa odds
+    # 2) odds H2H
     params = {"apiKey": key, "regions": regions, "markets": "h2h", "oddsFormat": "decimal"}
-    js = _get(f"{API}/sports/{sport_key}/odds", params, debug=debug)
+    js = _get(f"{API}/sports/{sport_key}/odds", params, debug=debug) or []
 
-    out: List[Dict[str, Any]] = []
-    total_ev = 0
-    with_odds = 0
-
-    for ev in js or []:
-        total_ev += 1
+    rows = []
+    for ev in js:
         home = (ev.get("home_team") or "").strip()
         away = (ev.get("away_team") or "").strip()
-
         h_list, d_list, a_list = [], [], []
         for bk in (ev.get("bookmakers") or []):
             for mkt in (bk.get("markets") or []):
@@ -122,21 +124,21 @@ def _pull_odds_for_sport(key: str, sport_key: str, regions: str, debug=False) ->
                             d_list.append(oddf)
                         elif name in {"AWAY","2"} or (away and name == away.upper()):
                             a_list.append(oddf)
-
         def avg(x): return float(np.mean(x)) if x else np.nan
         k1, kx, k2 = avg(h_list), avg(d_list), avg(a_list)
         if not (np.isnan(k1) and np.isnan(kx) and np.isnan(k2)):
-            with_odds += 1
-            out.append({"home": home, "away": away, "k1": k1, "kx": kx, "k2": k2})
+            rows.append({"home": home, "away": away, "k1": k1, "kx": kx, "k2": k2})
 
+    diag["odds_events"] = len(rows)
     if debug:
-        print(f"[theoddsapi] sport={sport_key}: eventos={total_ev}, com_odds={with_odds}")
-    return out
+        print(f"[theoddsapi] sport={sport_key}: com_odds={diag['odds_events']}/{diag['events']}")
+    return {"diag": diag, "rows": rows}
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    ap.add_argument("--regions", default="uk,eu,us", help='regions válidas: "us,uk,eu,au" (combine com vírgula)')
+    ap.add_argument("--regions", default="uk,eu,us,au", help='regions válidas: "us,uk,eu,au" (combine com vírgula)')
+    ap.add_argument("--sports", default="", help="lista de sport keys separadas por vírgula (para FORÇAR), ex.: soccer_brazil_serie_a,soccer_brazil_cup")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
@@ -153,6 +155,7 @@ def main():
     out_dir = os.path.join("data","out",args.rodada)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "odds_theoddsapi.csv")
+    dbg_path = os.path.join(out_dir, "theoddsapi_debug.json")
 
     matches = pd.read_csv(in_path)
     if "home" not in matches.columns or "away" not in matches.columns:
@@ -161,18 +164,31 @@ def main():
     matches["home_n"] = matches["home"].apply(_norm)
     matches["away_n"] = matches["away"].apply(_norm)
 
-    sports = _list_brazil_sports(key, debug=args.debug)
-    if args.debug:
-        print(f"[theoddsapi] chaves BR a consultar: {sports}")
+    # Esportes alvo
+    if args.sports.strip():
+        sports = [s.strip() for s in args.sports.split(",") if s.strip()]
+        if args.debug:
+            print(f"[theoddsapi] chaves FORÇADAS: {sports}")
+    else:
+        sports = _list_brazil_sports(key, debug=args.debug)
+        if args.debug:
+            print(f"[theoddsapi] chaves BR a consultar (auto/fallback): {sports}")
 
-    pulled: List[Dict[str, Any]] = []
+    pulled_rows = []
+    diagnostics = []
     for sp in sports:
-        data = _pull_odds_for_sport(key, sp, args.regions, debug=args.debug)
-        pulled.extend(data)
+        res = _pull_for_sport(key, sp, args.regions, debug=args.debug)
+        diagnostics.append(res["diag"])
+        pulled_rows.extend(res["rows"])
         time.sleep(SLEEP)
 
+    # Salva debug JSON para auditoria
+    with open(dbg_path, "w", encoding="utf-8") as f:
+        json.dump({"when": datetime.now(BR_TZ).isoformat(), "regions": args.regions, "sports": sports, "diag": diagnostics}, f, ensure_ascii=False, indent=2)
+
+    # Monta DF de odds (com colunas garantidas)
     rows = []
-    for it in pulled:
+    for it in pulled_rows:
         hn = _norm(it.get("home","")); an = _norm(it.get("away",""))
         rows.append({
             "home": it.get("home",""), "away": it.get("away",""),
@@ -183,6 +199,7 @@ def main():
     odds_cols = ["home","away","home_n","away_n","book","k1","kx","k2"]
     odds = pd.DataFrame(rows, columns=odds_cols)
 
+    # Match com seus jogos (igualdade → fuzzy 0.90)
     out_rows = []
     if not odds.empty:
         for _, m in matches.iterrows():
@@ -216,6 +233,8 @@ def main():
     df = pd.DataFrame(out_rows, columns=OUT_COLS)
     df.to_csv(out_path, index=False)
     print(f"[theoddsapi] OK -> {out_path} ({len(df)} linhas)")
+    if args.debug:
+        print(f"[theoddsapi] debug salvo em: {dbg_path}")
 
 if __name__ == "__main__":
     main()
