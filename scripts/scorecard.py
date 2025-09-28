@@ -3,7 +3,7 @@
 
 """
 scorecard.py — Framework Loteca v4.3
-Gera um HTML de scorecard com KPIs, tabelas e Top Opportunities (edge/kelly).
+Gera um HTML de scorecard com KPIs, tabelas, Top Opportunities e seção de Notícias.
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ def _table_html(df: pd.DataFrame, title: str, max_rows: int = 200) -> str:
 def _best_edges(risk: pd.DataFrame, topn: int = 10) -> pd.DataFrame:
     if risk.empty:
         return pd.DataFrame()
-    # Deriva a melhor oportunidade por linha (max edge entre 1/X/2)
     rows = []
     for _, r in risk.iterrows():
         options = []
@@ -69,10 +68,7 @@ def _best_edges(risk: pd.DataFrame, topn: int = 10) -> pd.DataFrame:
         })
     if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    # Ordena por stake (kelly fracionada) e depois por edge
-    df = df.sort_values(["stake","edge"], ascending=False)
-    # Formatação amigável
+    df = pd.DataFrame(rows).sort_values(["stake","edge"], ascending=False)
     df["edge_%"] = (100.0*df["edge"]).map(lambda x: f"{x:.2f}%")
     df["stake_%"] = (100.0*df["stake"]).map(lambda x: f"{x:.2f}%")
     return df[["home","away","outcome","odds","edge_%","stake_%"]].head(topn)
@@ -91,6 +87,8 @@ def build_scorecard(rodada: str, out_path: str) -> None:
         "odds_theodds":  os.path.join(base, "odds_theoddsapi.csv"),
         "odds_apifoot":  os.path.join(base, "odds_apifootball.csv"),
         "xg":            os.path.join(base, "xg.csv"),
+        "news":          os.path.join(base, "news.csv"),
+        "news_html":     os.path.join(base, "news.html"),
     }
 
     matches   = _read_csv_safe(paths["matches"])
@@ -101,11 +99,13 @@ def build_scorecard(rodada: str, out_path: str) -> None:
     odds_to   = _read_csv_safe(paths["odds_theodds"])
     odds_af   = _read_csv_safe(paths["odds_apifoot"])
     xg        = _read_csv_safe(paths["xg"])
+    news_df   = _read_csv_safe(paths["news"])
 
     n_matches = len(matches) if not matches.empty else 0
     n_odds = len(odds) if not odds.empty else 0
     n_probs = len(probs) if not probs.empty else 0
     n_risk = len(risk) if not risk.empty else 0
+    n_news = len(news_df) if not news_df.empty else 0
 
     overround = np.nan
     if not odds.empty and all(c in odds.columns for c in ["k1","kx","k2"]):
@@ -121,7 +121,6 @@ def build_scorecard(rodada: str, out_path: str) -> None:
             overround = float(np.mean(invsum))
     overround_pct = f"{(overround-1)*100:.2f}%" if not np.isnan(overround) and overround>1 else "n/d"
 
-    # Top opportunities
     top_edges = _best_edges(risk, topn=10)
 
     html_parts = []
@@ -147,6 +146,8 @@ th {{ background: #fafafa; text-align: left; }}
 em {{ color: #666; }}
 .footer {{ margin-top: 36px; color: #777; font-size: 12px; }}
 .badge {{ display:inline-block; padding:2px 6px; border-radius:6px; background:#f5f5f5; font-size:12px; margin-left:6px; }}
+.newsbox {{ border:1px solid #eee; border-radius:10px; padding:12px; }}
+.newsbox a{{ text-decoration:none }}
 </style>
 </head>
 <body>
@@ -157,8 +158,21 @@ em {{ color: #666; }}
   {_kpi_block("Odds (odds.csv)", str(n_odds), f"Overround médio: {overround_pct}")}
   {_kpi_block("Probabilidades (probabilities.csv)", str(n_probs))}
   {_kpi_block("Risco/Edge (risk_report.csv)", str(n_risk))}
+  {_kpi_block("Notícias (news.csv)", str(n_news))}
 </div>
 """)
+
+    # Notícias (resumo e link para news.html)
+    if n_news > 0 and os.path.isfile(paths["news_html"]):
+        html_parts.append(f"""
+<h2>Notícias</h2>
+<div class="newsbox">
+  <p>Foram agregadas <strong>{n_news}</strong> notícias recentes sobre os confrontos desta rodada.</p>
+  <p>Veja a lista com links: <a href="news.html" target="_blank" rel="noopener noreferrer">news.html</a></p>
+</div>
+""")
+    else:
+        html_parts.append("<h2>Notícias</h2><p><em>Nenhuma notícia encontrada nesta rodada.</em></p>")
 
     # Top opportunities
     html_parts.append(_table_html(top_edges, "Top Opportunities (edge/kelly)", max_rows=10))
