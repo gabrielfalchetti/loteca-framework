@@ -8,8 +8,7 @@ Corrige, in-place, o merge inseguro em scripts/ingest_odds.py que usa:
 Substitui por:
     matches.merge(out, on=["home_n","away_n"], how="left")
 
-Também corrige variantes comuns (espaços, aspas simples, quebra de linha, ordem dos argumentos).
-É idempotente: se já estiver correto, não altera nada.
+Também corrige variantes comuns. Idempotente (se já estiver certo, não muda).
 """
 
 import re
@@ -20,14 +19,14 @@ TARGET = Path("scripts/ingest_odds.py")
 
 if not TARGET.exists():
     print(f"[hotfix] Arquivo não encontrado: {TARGET}", file=sys.stderr)
-    sys.exit(2)
+    sys.exit(0)  # não falha o job
 
 src = TARGET.read_text(encoding="utf-8")
 
 patterns = [
     # Variante padrão
     r'matches\.merge\(\s*out\s*,\s*left_on\s*=\s*\[\s*["\']home_n["\']\s*,\s*["\']away_n["\']\s*\]\s*,\s*right_on\s*=\s*\[\s*["\']home["\']\s*,\s*["\']away["\']\s*\]\s*,\s*how\s*=\s*["\']left["\']\s*\)',
-    # Permutação dos argumentos (qualquer ordem), preservando out como 2º arg posicional
+    # Qualquer ordem dos kwargs, mantendo out como 2º arg posicional
     r'matches\.merge\(\s*out\s*,(?:(?!\)).)*left_on\s*=\s*\[\s*["\']home_n["\']\s*,\s*["\']away_n["\']\s*\](?:(?!\)).)*right_on\s*=\s*\[\s*["\']home["\']\s*,\s*["\']away["\']\s*\](?:(?!\)).)*how\s*=\s*["\']left["\'](?:(?!\)).)*\)',
 ]
 
@@ -40,11 +39,11 @@ for pat in patterns:
     count_total += n
 
 if count_total == 0:
-    # Já pode estar corrigido ou com uma variação diferente; tenta detectar merge correto
+    # Já pode estar seguro (usando cons)
     if re.search(r'matches\.merge\(\s*cons?\s*,\s*on\s*=\s*\[\s*["\']home_n["\']\s*,\s*["\']away_n["\']\s*\]\s*,\s*how\s*=\s*["\']left["\']\s*\)', src):
         print("[hotfix] Merge já está no formato seguro — nenhuma alteração.")
         sys.exit(0)
-    # Última tentativa: troca somente o trecho 'left_on=[...], right_on=[...]' por 'on=[...]'
+    # Última tentativa: trocar apenas o trecho left_on/right_on
     new_src2, n2 = re.subn(
         r'left_on\s*=\s*\[\s*["\']home_n["\']\s*,\s*["\']away_n["\']\s*\]\s*,\s*right_on\s*=\s*\[\s*["\']home["\']\s*,\s*["\']away["\']\s*\]',
         r'on=["home_n","away_n"]',
