@@ -29,26 +29,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy
+          pip install pandas numpy requests
 
-      # HOTFIX idempotente: corrige merge antigo se ainda existir no runner
+      # Hotfix idempotente (não falha se não precisar)
       - name: HOTFIX — corrigir merge inseguro no ingest_odds.py
         run: |
           python scripts/patch_merge_hotfix.py || true
-
-      # ✅ Checagem sem parênteses — evita "Unmatched ) or \)"
-      - name: Verificar merge seguro no ingest_odds.py
-        run: |
-          echo '>>> Esperado: on=["home_n","away_n"], how="left"'
-          if grep -n 'on=\["home_n","away_n"\].*how="left"' scripts/ingest_odds.py; then
-            echo "OK: merge seguro encontrado."
-          else
-            echo "AVISO: não encontrei o merge seguro — confira scripts/ingest_odds.py"
-          fi
-          echo "----- head -----"
-          head -n 30 scripts/ingest_odds.py || true
-          echo "----- tail -----"
-          tail -n 30 scripts/ingest_odds.py || true
 
       - name: Preparar entrada (se faltar)
         run: |
@@ -62,22 +48,57 @@ jobs:
             echo "Arquivo já existe: $FILE"
           fi
 
-      - name: Ingest APIFootball (placeholder resiliente)
+      # ===== COLETORES REAIS (antes do Ingest Odds) =====
+
+      - name: Coletar odds — TheOddsAPI (BR)
+        env:
+          THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
         run: |
+          if [ -z "${THEODDSAPI_KEY}" ]; then
+            echo "ERRO: defina o secret THEODDSAPI_KEY em Settings > Secrets > Actions." >&2
+            exit 2
+          fi
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-          python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA"
+          python scripts/ingest_odds_theoddsapi.py --rodada "$RODADA" --regions "br,eu,uk,us"
+
+      - name: Coletar odds — API-Football (RapidAPI, BR)
+        env:
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        run: |
+          if [ -z "${RAPIDAPI_KEY}" ]; then
+            echo "ERRO: defina o secret RAPIDAPI_KEY em Settings > Secrets > Actions." >&2
+            exit 2
+          fi
+          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+          python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025
+
+      # ===== CONSOLIDAÇÃO (consenso + merge final) =====
 
       - name: Ingest Odds (consenso e merge final)
+        env:
+          THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
+          RAPIDAPI_KEY:   ${{ secrets.RAPIDAPI_KEY }}
         run: |
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
           python scripts/ingest_odds.py --rodada "$RODADA"
 
       # (ganchos para o resto do seu E2E)
       # - name: Join features
-      #   run: python scripts/join_features.py --rodada "${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+      #   run: |
+      #     RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+      #     python scripts/join_features.py --rodada "$RODADA"
+      #
       # - name: Train models
-      #   run: python scripts/train_model.py --rodada "${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+      #   run: |
+      #     RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+      #     python scripts/train_model.py --rodada "$RODADA"
+      #
       # - name: Scorecard
-      #   run: python scripts/scorecard.py --rodada "${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+      #   run: |
+      #     RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+      #     python scripts/scorecard.py --rodada "$RODADA"
+      #
       # - name: Export artifacts
-      #   run: python scripts/export_artifacts.py --rodada "${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+      #   run: |
+      #     RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
+      #     python scripts/export_artifacts.py --rodada "$RODADA"
