@@ -31,16 +31,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy
 
-      # HOTFIX: corrige merge inseguro no runner, independente do que estiver commitado
+      # HOTFIX idempotente: corrige merge antigo se ainda existir no runner
       - name: HOTFIX — corrigir merge inseguro no ingest_odds.py
         run: |
           python scripts/patch_merge_hotfix.py || true
-          echo '>>> Verificação do merge seguro em scripts/ingest_odds.py'
-          if grep -n 'merge(cons\|out\), on=\["home_n","away_n"\], how="left"' scripts/ingest_odds.py ; then
+
+      # ✅ Checagem sem parênteses — evita "Unmatched ) or \)"
+      - name: Verificar merge seguro no ingest_odds.py
+        run: |
+          echo '>>> Esperado: on=["home_n","away_n"], how="left"'
+          if grep -n 'on=\["home_n","away_n"\].*how="left"' scripts/ingest_odds.py; then
             echo "OK: merge seguro encontrado."
           else
             echo "AVISO: não encontrei o merge seguro — confira scripts/ingest_odds.py"
           fi
+          echo "----- head -----"
+          head -n 30 scripts/ingest_odds.py || true
+          echo "----- tail -----"
+          tail -n 30 scripts/ingest_odds.py || true
 
       - name: Preparar entrada (se faltar)
         run: |
@@ -54,7 +62,6 @@ jobs:
             echo "Arquivo já existe: $FILE"
           fi
 
-      # Coletores/ingests individuais que fazem parte do seu fluxo “integrado”
       - name: Ingest APIFootball (placeholder resiliente)
         run: |
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
@@ -65,15 +72,12 @@ jobs:
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
           python scripts/ingest_odds.py --rodada "$RODADA"
 
-      # Espaço para os demais passos do seu end2end (exemplos):
+      # (ganchos para o resto do seu E2E)
       # - name: Join features
       #   run: python scripts/join_features.py --rodada "${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-      #
-      # - name: Build models
+      # - name: Train models
       #   run: python scripts/train_model.py --rodada "${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-      #
       # - name: Scorecard
       #   run: python scripts/scorecard.py --rodada "${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-      #
       # - name: Export artifacts
       #   run: python scripts/export_artifacts.py --rodada "${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
