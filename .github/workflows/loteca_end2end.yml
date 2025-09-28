@@ -24,6 +24,7 @@ jobs:
       WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
       THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       PYTHONWARNINGS: ignore
 
     steps:
@@ -105,7 +106,7 @@ jobs:
         run: |
           python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
 
-      # ===================== (modelagem opcional) =====================
+      # ===================== PROBABILIDADES/RISCO =====================
       - name: Build probabilities
         shell: bash
         run: |
@@ -128,6 +129,13 @@ jobs:
             --odds "data/out/$RODADA/odds.csv" \
             --out "data/out/$RODADA/risk_report.csv"
 
+      # ===================== NOTÍCIAS =====================
+      - name: Coletar notícias (NewsAPI ou Google News RSS)
+        shell: bash
+        run: |
+          python scripts/ingest_news.py --rodada "$RODADA" --provider auto --lang pt --regions br --days 7 --limit 6 --aliases "data/aliases_br.json" || true
+
+      # ===================== SCORECARD =====================
       - name: Scorecard relatório
         shell: bash
         run: |
