@@ -31,7 +31,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy requests
 
-      # Hotfix idempotente (não falha se não precisar)
       - name: HOTFIX — corrigir merge inseguro no ingest_odds.py
         run: |
           python scripts/patch_merge_hotfix.py || true
@@ -48,32 +47,46 @@ jobs:
             echo "Arquivo já existe: $FILE"
           fi
 
-      # ===== COLETORES REAIS (antes do Ingest Odds) =====
-
-      - name: Coletar odds — TheOddsAPI (BR)
+      # ===== THEODDSAPI (forçando sport keys e imprimindo debug) =====
+      - name: Coletar odds — TheOddsAPI (BR - forced sports)
         env:
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
         run: |
           if [ -z "${THEODDSAPI_KEY}" ]; then
-            echo "ERRO: defina o secret THEODDSAPI_KEY em Settings > Secrets > Actions." >&2
-            exit 2
+            echo "::warning::Secret THEODDSAPI_KEY não definido. Pulando TheOddsAPI."
+            exit 0
           fi
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-          python scripts/ingest_odds_theoddsapi.py --rodada "$RODADA" --regions "br,eu,uk,us"
+          python scripts/ingest_odds_theoddsapi.py --rodada "$RODADA" \
+            --regions "uk,eu,us,au" \
+            --sports "soccer_brazil_serie_a,soccer_brazil_serie_b,soccer_brazil_cup" \
+            --debug
+          echo "---- theoddsapi_debug.json (se existir) ----"
+          if [ -f "data/out/$RODADA/theoddsapi_debug.json" ]; then
+            python - <<'PY'
+import json,sys,os
+rodada=os.environ.get("RODADA")
+p=f"data/out/{rodada}/theoddsapi_debug.json"
+j=json.load(open(p,'r',encoding='utf-8'))
+print(json.dumps(j, ensure_ascii=False, indent=2)[:4000])
+PY
+          else
+            echo "Arquivo de debug não encontrado."
+          fi
 
+      # ===== API-FOOTBALL (RapidAPI) =====
       - name: Coletar odds — API-Football (RapidAPI, BR)
         env:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         run: |
           if [ -z "${RAPIDAPI_KEY}" ]; then
-            echo "ERRO: defina o secret RAPIDAPI_KEY em Settings > Secrets > Actions." >&2
-            exit 2
+            echo "::warning::Secret RAPIDAPI_KEY não definido. Pulando API-Football."
+            exit 0
           fi
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-          python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025
+          python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --debug
 
-      # ===== CONSOLIDAÇÃO (consenso + merge final) =====
-
+      # ===== CONSENSO / MERGE FINAL =====
       - name: Ingest Odds (consenso e merge final)
         env:
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
@@ -82,7 +95,7 @@ jobs:
           RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
           python scripts/ingest_odds.py --rodada "$RODADA"
 
-      # (ganchos para o resto do seu E2E)
+      # (ganchos para o resto do E2E)
       # - name: Join features
       #   run: |
       #     RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
