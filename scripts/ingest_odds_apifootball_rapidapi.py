@@ -2,190 +2,117 @@
 # -*- coding: utf-8 -*-
 
 """
-Coletor REAL — API-Football (RapidAPI) -> competições nacionais do Brasil
-Gera: data/out/<RODADA>/odds_apifootball.csv com colunas:
-home,away,book,k1,kx,k2,total_line,over,under,ts
+Coletor REAL — API-Football (RapidAPI) -> Brasil (todas as competições nacionais principais)
+Gera: data/out/<RODADA>/odds_apifootball.csv (colunas: home,away,book,k1,kx,k2,total_line,over,under,ts)
+
+Melhorias:
+- Busca fixtures por LIGA (IDs do Brasil) + JANELA DE DATA [-3d, +7d] a partir das datas do matches_source.
+- Não depende de mapear time->id por 'search'; usa fixture oficial da liga.
+- Faz match por nome normalizado com seu matches_source.csv.
+- Logs de debug detalhados (--debug).
 
 Requisitos:
-- Secret/ENV: RAPIDAPI_KEY
-- Input: data/in/<RODADA>/matches_source.csv (match_id,home,away[,date])
+- ENV: RAPIDAPI_KEY com permissão para endpoint /odds
+- Input: data/in/<RODADA>/matches_source.csv (colunas: match_id,home,away[,date])
+
 Uso:
-  python scripts/ingest_odds_apifootball_rapidapi.py --rodada 2025-09-27_1213 [--season 2025] [--debug]
+  python scripts/ingest_odds_apifootball_rapidapi.py --rodada 2025-09-27_1213 --season 2025 [--debug]
 """
 
 from __future__ import annotations
-import argparse, os, sys, time, json, math, unicodedata, difflib
+import argparse, os, sys, time, unicodedata, math, difflib
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Tuple, List, Any
+from typing import Dict, List, Any, Tuple
 import requests
 import numpy as np
 import pandas as pd
 
 API_HOST = "api-football-v1.p.rapidapi.com"
 BASE_URL = f"https://{API_HOST}/v3"
-TIMEOUT = 20
+TIMEOUT = 25
 RETRY = 3
-SLEEP_BETWEEN = 0.8  # respeitar rate limit free
+SLEEP = 0.7
 BR_TZ = timezone(timedelta(hours=-3))
+
+# Principais ligas nacionais (API-Football league IDs)
+# (A lista cobre A, B, C, D e Copa do Brasil; adicione estaduais se quiser.)
+BR_LEAGUES = {
+    71: "Serie A",
+    72: "Serie B",
+    73: "Copa do Brasil",
+    128: "Serie C",
+    776: "Serie D",
+}
+
+OUT_COLS = ["home","away","book","k1","kx","k2","total_line","over","under","ts"]
 
 def _norm(s: str) -> str:
     if s is None or (isinstance(s, float) and math.isnan(s)):
         return ""
     s = str(s)
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
     s = s.lower().strip().replace(".", " ")
-    for suf in [" fc", " afc", " ac", " sc", " - sp", " - rj", "-sp", "-rj"]:
+    for suf in [" fc"," afc"," ac"," sc","-sp","-rj"]:
         s = s.replace(suf, "")
     return " ".join(s.split())
 
 def _req(path: str, params: Dict[str, Any], key: str, debug=False) -> Dict[str, Any]:
     url = f"{BASE_URL}{path}"
     headers = {"X-RapidAPI-Key": key, "X-RapidAPI-Host": API_HOST}
-    last_err = None
+    last = None
     for i in range(RETRY):
         try:
             r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
             if r.status_code == 429:
-                time.sleep(2.0 + i)
+                time.sleep(1.5 + i)
                 continue
             r.raise_for_status()
             return r.json()
         except Exception as e:
-            last_err = e
-            time.sleep(1.0 + i * 0.5)
+            last = e
+            time.sleep(0.8 + 0.4*i)
     if debug:
-        print(f"[apifootball] ERRO {url} params={params} -> {last_err}", file=sys.stderr)
-    return {"errors": [{"message": str(last_err)}], "response": []}
+        print(f"[apifootball] ERRO {url} params={params} -> {last}", file=sys.stderr)
+    return {"response": []}
 
-def _map_brazil_team_ids(key: str, names: List[str], debug=False) -> Dict[str, int]:
-    """Resolve team_id por nome (apenas Brasil) usando /teams?search= e country=Brazil."""
-    out: Dict[str, int] = {}
-    cache: Dict[str, List[Tuple[str, int]]] = {}
-    for nm in set(names):
-        q = nm.strip()
-        if not q:
-            continue
-        qn = _norm(q)
-        if qn in out:
-            continue
-        js = _req("/teams", {"search": q, "country": "Brazil"}, key, debug=debug)
-        cand = []
-        for it in js.get("response", []):
-            t = it.get("team", {})
-            tid = t.get("id")
-            tname = t.get("name") or ""
-            cand.append((_norm(tname), tid))
-        cache[qn] = cand
-        # match por igualdade ou fuzzy > 0.85
-        best_id = None
-        best_score = 0.0
-        for (nn, tid) in cand:
-            if nn == qn:
-                best_id, best_score = tid, 1.0
-                break
-            sc = difflib.SequenceMatcher(a=qn, b=nn).ratio()
-            if sc > best_score:
-                best_id, best_score = tid, sc
-        if best_id:
-            out[qn] = best_id
-        elif cand:
-            out[qn] = cand[0][1]
-        time.sleep(SLEEP_BETWEEN)
-    if debug:
-        print(f"[apifootball] map teams -> {out}")
-    return out
+def _collect_fixtures_for_league(key: str, league_id: int, season: int, d_from: str, d_to: str, debug=False) -> List[Dict[str, Any]]:
+    js = _req("/fixtures", {"league": league_id, "season": season, "from": d_from, "to": d_to}, key, debug=debug)
+    return js.get("response", []) or []
 
-def _find_fixture_id(key: str, hid: int, aid: int, date_iso: str | None, season: int | None, debug=False) -> int | None:
-    """Tenta achar fixture id pelo par de equipes e (opcionalmente) data/temporada."""
-    # 1) H2H direta + season
-    params = {"h2h": f"{hid}-{aid}"}
-    if season:
-        params["season"] = season
-    if date_iso:
-        # API não filtra por data com h2h; então usamos janela por 'from'/'to' via /fixtures
-        pass
-    js = _req("/fixtures", params, key, debug=debug)
-    resp = js.get("response", [])
-    if date_iso:
-        try:
-            dt = datetime.fromisoformat(date_iso).date()
-        except Exception:
-            dt = None
-        if dt:
-            # tolera +/- 2 dias
-            rng = {dt + timedelta(days=d) for d in range(-2, 3)}
-            for fx in resp:
-                try:
-                    dfx = fx["fixture"]["date"][:10]
-                    dfxd = datetime.fromisoformat(dfx).date()
-                    if dfxd in rng:
-                        return fx["fixture"]["id"]
-                except Exception:
-                    continue
-    if resp:
-        return resp[0]["fixture"]["id"]
-    # 2) Busca por ambos teams + janela de datas (se houver)
-    if date_iso:
-        try:
-            dt = datetime.fromisoformat(date_iso).date()
-        except Exception:
-            dt = None
-        if dt:
-            params = {
-                "team": hid,
-                "season": season or datetime.now(BR_TZ).year,
-                "from": (dt - timedelta(days=7)).isoformat(),
-                "to": (dt + timedelta(days=7)).isoformat(),
-            }
-            js = _req("/fixtures", params, key, debug=debug)
-            cand = []
-            for fx in js.get("response", []):
-                teams = fx.get("teams", {})
-                th = teams.get("home", {}).get("id")
-                ta = teams.get("away", {}).get("id")
-                if {th, ta} == {hid, aid}:
-                    cand.append((fx["fixture"]["id"], fx["fixture"]["date"]))
-            if cand:
-                cand.sort(key=lambda x: x[1])
-                return cand[0][0]
-    return None
-
-def _odds_for_fixture(key: str, fixture_id: int, debug=False) -> Tuple[float, float, float]:
-    """Retorna (k1,kx,k2) médios (decimal) agregando casas."""
+def _collect_odds_for_fixture(key: str, fixture_id: int, debug=False) -> Tuple[float, float, float]:
     js = _req("/odds", {"fixture": fixture_id}, key, debug=debug)
-    resp = js.get("response", [])
-    prices_h, prices_d, prices_a = [], [], []
+    resp = js.get("response", []) or []
+    h, d, a = [], [], []
     for blk in resp:
         for bm in blk.get("bookmakers", []):
-            for mkt in bm.get("bets", []):
-                # API-Football nomeia 1X2 como "Match Winner" (id 1) ou "Home/Away" dependendo do provider
-                if str(mkt.get("id")) in {"1", "12"} or str(mkt.get("name","")).lower().startswith("match"):
-                    vals = mkt.get("values", [])
-                    for v in vals:
-                        val = v.get("value","").strip().upper()
+            for bet in bm.get("bets", []):
+                # 1X2 geralmente id=1 e/ou nome contendo "Match"
+                if str(bet.get("id")) in {"1","12"} or str(bet.get("name","")).lower().startswith("match"):
+                    for v in bet.get("values", []):
+                        tag = (v.get("value","")).strip().upper()
                         odd = v.get("odd")
                         try:
                             o = float(odd)
                         except Exception:
                             continue
-                        if val in {"1","HOME"}:
-                            prices_h.append(o)
-                        elif val in {"X","DRAW"}:
-                            prices_d.append(o)
-                        elif val in {"2","AWAY"}:
-                            prices_a.append(o)
+                        if tag in {"1","HOME"}:
+                            h.append(o)
+                        elif tag in {"X","DRAW"}:
+                            d.append(o)
+                        elif tag in {"2","AWAY"}:
+                            a.append(o)
     def avg(x): return float(np.mean(x)) if x else np.nan
-    return avg(prices_h), avg(prices_d), avg(prices_a)
+    return avg(h), avg(d), avg(a)
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    ap.add_argument("--season", type=int, default=None, help="ex.: 2025 (p/ filtrar fixtures)")
+    ap.add_argument("--season", type=int, default=None, help="ex.: 2025")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
-    api_key = os.getenv("RAPIDAPI_KEY", "").strip()
-    if not api_key:
+    key = os.getenv("RAPIDAPI_KEY","").strip()
+    if not key:
         print("[apifootball] ERRO: defina RAPIDAPI_KEY no ambiente.", file=sys.stderr)
         sys.exit(2)
 
@@ -196,57 +123,102 @@ def main():
 
     out_dir = os.path.join("data","out",args.rodada)
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "odds_apifootball.csv")
+    out_path = os.path.join(out_dir,"odds_apifootball.csv")
 
     matches = pd.read_csv(in_path)
     for c in ["home","away"]:
         if c not in matches.columns:
-            print(f"[apifootball] ERRO: coluna ausente em matches_source.csv: {c}", file=sys.stderr)
+            print(f"[apifootball] ERRO: matches_source.csv precisa da coluna '{c}'.", file=sys.stderr)
             sys.exit(2)
     if "date" not in matches.columns:
         matches["date"] = ""
 
+    # Normalização p/ match final
     matches["home_n"] = matches["home"].apply(_norm)
     matches["away_n"] = matches["away"].apply(_norm)
 
-    # Mapeia IDs de times (Brasil) uma única vez
-    unique_names = list(set(matches["home"].astype(str).tolist() + matches["away"].astype(str).tolist()))
-    name2id = _map_brazil_team_ids(api_key, unique_names, debug=args.debug)
+    # Deduz janela de data
+    dates = []
+    for v in matches["date"].astype(str).tolist():
+        try:
+            dates.append(datetime.fromisoformat(v[:10]).date())
+        except Exception:
+            pass
+    if dates:
+        d0 = min(dates)
+        d1 = max(dates)
+    else:
+        # fallback: hoje
+        today = datetime.now(BR_TZ).date()
+        d0 = today
+        d1 = today
 
+    # Janela estendida [-3, +7] para cobrir adiantamentos/adiamentos
+    d_from = (d0 - timedelta(days=3)).isoformat()
+    d_to   = (d1 + timedelta(days=7)).isoformat()
+
+    season = args.season or d0.year
+
+    if args.debug:
+        print(f"[apifootball] Janela: {d_from} -> {d_to}; season={season}; ligas={sorted(BR_LEAGUES.keys())}")
+
+    # 1) Coleta fixtures por liga/temporada e janela
+    fixtures = []
+    for lid in BR_LEAGUES.keys():
+        fx = _collect_fixtures_for_league(key, lid, season, d_from, d_to, debug=args.debug)
+        fixtures.extend(fx)
+        time.sleep(SLEEP)
+
+    if args.debug:
+        print(f"[apifootball] Fixtures coletados (total): {len(fixtures)}")
+
+    # 2) Odds por fixture
     rows = []
-    for _, r in matches.iterrows():
-        hn, an = r["home_n"], r["away_n"]
-        hid = name2id.get(hn)
-        aid = name2id.get(an)
-        if not hid or not aid:
-            if args.debug:
-                print(f"[apifootball] sem team_id para {r['home']} vs {r['away']}")
+    for fx in fixtures:
+        try:
+            fid = fx["fixture"]["id"]
+            th  = (fx["teams"]["home"]["name"] or "").strip()
+            ta  = (fx["teams"]["away"]["name"] or "").strip()
+        except Exception:
             continue
-        date_iso = None
-        if str(r.get("date","")).strip():
-            try:
-                date_iso = str(r["date"])[:10]
-            except Exception:
-                date_iso = None
+        k1,kx,k2 = _collect_odds_for_fixture(key, fid, debug=args.debug)
+        time.sleep(SLEEP)
+        rows.append({"home": th, "away": ta, "k1": k1, "kx": kx, "k2": k2})
 
-        fx_id = _find_fixture_id(api_key, hid, aid, date_iso, args.season, debug=args.debug)
-        time.sleep(SLEEP_BETWEEN)
-        if not fx_id:
-            if args.debug:
-                print(f"[apifootball] fixture não encontrado: {r['home']} vs {r['away']}")
-            continue
+    odds = pd.DataFrame(rows, columns=["home","away","k1","kx","k2"])
+    odds["home_n"] = odds["home"].apply(_norm)
+    odds["away_n"] = odds["away"].apply(_norm)
 
-        k1,kx,k2 = _odds_for_fixture(api_key, fx_id, debug=args.debug)
-        time.sleep(SLEEP_BETWEEN)
+    # 3) Match com sua lista de jogos
+    out_rows = []
+    for _, m in matches.iterrows():
+        mh, ma = m["home_n"], m["away_n"]
+        hit = odds[(odds["home_n"] == mh) & (odds["away_n"] == ma)]
+        if hit.empty:
+            # fuzzy (>= 0.90)
+            best = None
+            best_sc = 0.0
+            for _, o in odds.iterrows():
+                sc = 0.5 * (
+                    difflib.SequenceMatcher(a=mh, b=o["home_n"]).ratio()
+                    + difflib.SequenceMatcher(a=ma, b=o["away_n"]).ratio()
+                )
+                if sc > best_sc:
+                    best_sc, best = sc, o
+            if best is not None and best_sc >= 0.90:
+                hit = pd.DataFrame([best])
 
-        rows.append({
-            "home": r["home"], "away": r["away"],
-            "book": "apifootball_avg", "k1": k1, "kx": kx, "k2": k2,
-            "total_line": np.nan, "over": np.nan, "under": np.nan,
-            "ts": datetime.now(BR_TZ).isoformat(timespec="seconds")
-        })
+        if not hit.empty:
+            h = hit.iloc[0]
+            out_rows.append({
+                "home": m["home"], "away": m["away"],
+                "book": "apifootball_avg",
+                "k1": h["k1"], "kx": h["kx"], "k2": h["k2"],
+                "total_line": np.nan, "over": np.nan, "under": np.nan,
+                "ts": datetime.now(BR_TZ).isoformat(timespec="seconds"),
+            })
 
-    df = pd.DataFrame(rows, columns=["home","away","book","k1","kx","k2","total_line","over","under","ts"])
+    df = pd.DataFrame(out_rows, columns=OUT_COLS)
     df.to_csv(out_path, index=False)
     print(f"[apifootball] OK -> {out_path} ({len(df)} linhas)")
 
