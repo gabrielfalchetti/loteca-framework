@@ -22,7 +22,7 @@ def main():
     ap.add_argument("--regions", default="uk,eu", help="ex.: uk,eu,us")
     ap.add_argument("--market", default="h2h")
     ap.add_argument("--allow-partial", action="store_true")
-    ap.add_argument("--min-match", type=int, default=85)  # mantido pra compat
+    ap.add_argument("--min-match", type=int, default=85)  # compat
     args = ap.parse_args()
 
     api_key = os.environ.get("ODDS_API_KEY", "")
@@ -51,68 +51,76 @@ def main():
         "dateFormat": "iso",
     }
     resp = api_get(f"{args.sport}/odds", params=params)
-    if not isinstance(resp, list):
-        raise RuntimeError("[theoddsapi] Resposta inesperada (não-list).")
 
+    # Garantir estrutura com cabeçalho mesmo sem odds
     rows = []
-    for game in resp:
-        try:
-            co = game.get("commence_time")  # iso
-            teams = game.get("teams", []) or []
-            home_team = game.get("home_team", "")
-            if home_team and teams and home_team in teams:
-                away_team = [t for t in teams if t != home_team][0] if len(teams) == 2 else ""
-            else:
-                if len(teams) == 2:
-                    home_team, away_team = teams[0], teams[1]
+    if isinstance(resp, list) and resp:
+        for game in resp:
+            try:
+                co = game.get("commence_time")  # iso
+                teams = game.get("teams", []) or []
+                home_team = game.get("home_team", "")
+                if home_team and teams and home_team in teams:
+                    away_team = [t for t in teams if t != home_team][0] if len(teams) == 2 else ""
                 else:
-                    continue
-            hn = normalize_team(home_team, alias_map)
-            an = normalize_team(away_team, alias_map)
+                    if len(teams) == 2:
+                        home_team, away_team = teams[0], teams[1]
+                    else:
+                        continue
+                hn = normalize_team(str(home_team), alias_map)
+                an = normalize_team(str(away_team), alias_map)
 
-            markets = game.get("bookmakers", []) or []
-            oh = od = oa = None
-            for bk in markets:
-                for mkt in bk.get("markets", []):
-                    if mkt.get("key") == args.market:
-                        for outc in mkt.get("outcomes", []):
-                            name = str(outc.get("name","")).strip().upper()
-                            price = outc.get("price")
-                            try:
-                                price = float(price)
-                            except Exception:
-                                continue
-                            if name == "HOME":
-                                oh = price if oh is None else min(oh, price)
-                            elif name == "DRAW":
-                                od = price if od is None else min(od, price)
-                            elif name == "AWAY":
-                                oa = price if oa is None else min(oa, price)
-
-            if oh and od and oa:
-                rows.append({"commence_time": co, "home": hn, "away": an, "odd_home": oh, "odd_draw": od, "odd_away": oa})
-        except Exception:
-            continue
-
-        time.sleep(0.05)  # leve respiro
-
-    if not rows:
+                bookmakers = game.get("bookmakers", []) or []
+                oh = od = oa = None
+                for bk in bookmakers:
+                    for mkt in bk.get("markets", []):
+                        if mkt.get("key") == args.market:
+                            for outc in mkt.get("outcomes", []):
+                                name = str(outc.get("name","")).strip().upper()
+                                price = outc.get("price")
+                                try:
+                                    price = float(price)
+                                except Exception:
+                                    continue
+                                if name == "HOME":
+                                    oh = price if oh is None else min(oh, price)
+                                elif name == "DRAW":
+                                    od = price if od is None else min(od, price)
+                                elif name == "AWAY":
+                                    oa = price if oa is None else min(oa, price)
+                if oh and od and oa:
+                    rows.append({"commence_time": co, "home": hn, "away": an, "odd_home": oh, "odd_draw": od, "odd_away": oa})
+            except Exception:
+                # Em caso de qualquer problema nesse jogo, segue para o próximo
+                continue
+            finally:
+                time.sleep(0.03)  # leve respiro
+    else:
         print("[theoddsapi] Aviso: nenhuma odd coletada para este sport.")
-        if not args.allow_partial:
-            raise SystemExit(0)
 
-    out = pd.DataFrame(rows)
-    # tenta casar com matches por nomes normalizados
+    # DataFrame de saída das odds da API (sempre com colunas)
+    out_cols = ["commence_time","home","away","odd_home","odd_draw","odd_away"]
+    out = pd.DataFrame(rows, columns=out_cols)
+
+    # tenta casar com matches por nomes normalizados; mesmo se out estiver vazio, isso não quebra
     merged = matches.merge(out, left_on=["home_n","away_n"], right_on=["home","away"], how="left")
     have = merged[merged[["odd_home","odd_draw","odd_away"]].notna().all(axis=1)]
     have = have[["match_id","home","away","odd_home","odd_draw","odd_away"]].sort_values("match_id")
+
+    sport_key = args.sport.lower().replace("/", "_")
+    out_file = base / f"odds_{sport_key}.csv"
+
     if have.empty:
-        print("[theoddsapi] Nenhuma odd casada com matches (talvez sport não cobre esses jogos).")
+        # ainda assim gravamos um CSV com cabeçalho — facilita o merge posterior sem erros
+        pd.DataFrame(columns=["match_id","home","away","odd_home","odd_draw","odd_away"]).to_csv(out_file, index=False)
+        print(f"[theoddsapi] Nenhuma odd casada para {args.sport}. Arquivo vazio com cabeçalho salvo em {out_file}.")
+        # Se você preferir falhar o job quando não houver odds, remova o allow-partial no workflow
+        if not args.allow_partial:
+            # Não levantamos erro aqui para não quebrar toda a coleta multi-sport; o controle fica no merge final
+            pass
     else:
-        # salva em arquivo específico por sport, permitindo múltiplos merges depois
-        sport_key = args.sport.lower().replace("/", "_")
-        (base / f"odds_{sport_key}.csv").write_text(have.to_csv(index=False), encoding="utf-8")
-        print(f"[theoddsapi] OK -> {base/f'odds_{sport_key}.csv'} ({len(have)} jogos)")
+        out_file.write_text(have.to_csv(index=False), encoding="utf-8")
+        print(f"[theoddsapi] OK -> {out_file} ({len(have)} jogos)")
 
 if __name__ == "__main__":
     main()
