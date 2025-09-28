@@ -27,18 +27,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy
 
-      - name: Sanity check merge line in ingest_odds.py
+      - name: HOTFIX — corrigir merge inseguro no ingest_odds.py
         run: |
-          echo '>>> Expect: merged = matches.merge(cons, on=["home_n","away_n"], how="left")'
-          if grep -n 'merge(cons, on=\["home_n", "away_n"\], how="left")' scripts/ingest_odds.py; then
-            echo "OK: merge seguro encontrado."
-          else
-            echo "AVISO: linha de merge seguro não encontrada — confira scripts/ingest_odds.py"
-          fi
-          echo "----- file head -----"
-          head -n 30 scripts/ingest_odds.py || true
-          echo "----- file tail -----"
-          tail -n 30 scripts/ingest_odds.py || true
+          python scripts/patch_merge_hotfix.py
+          echo '>>> Verificação do merge em scripts/ingest_odds.py'
+          nl -ba scripts/engest_odds.py 2>/dev/null || true
+          nl -ba scripts/ingest_odds.py | sed -n '1,220p' | grep -n 'merge(.*on=\["home_n","away_n"\].*how="left")' || true
 
       - name: Prepare sample input if missing
         run: |
