@@ -5,7 +5,7 @@ on:
     inputs:
       rodada:
         description: "Identificador da rodada (ex.: 2025-09-27_1213)"
-        required: true
+        required: false
         type: string
   push:
     branches:
@@ -18,7 +18,9 @@ jobs:
   end2end:
     runs-on: ubuntu-latest
 
+    # Define tudo aqui e use env.RODADA em todos os passos
     env:
+      RODADA: ${{ github.event.inputs.rodada != '' && github.event.inputs.rodada || '2025-09-27_1213' }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
       THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
@@ -42,10 +44,9 @@ jobs:
             pip install -r requirements.txt
           fi
 
-      - name: Ensure core deps (forçar instalação dos básicos)
+      - name: Ensure core deps (sempre garante pacotes-base)
         shell: bash
         run: |
-          # Garante que estes pacotes sempre existem (mesmo se requirements.txt não tiver)
           pip install --upgrade \
             requests \
             pandas \
@@ -64,8 +65,6 @@ jobs:
       - name: Preparar entrada
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           mkdir -p "data/in/$RODADA" "data/out/$RODADA" "artifacts/$RODADA"
           FILE="data/in/$RODADA/matches_source.csv"
           if [ ! -f "$FILE" ]; then
@@ -88,8 +87,6 @@ jobs:
         if: ${{ env.THEODDSAPI_KEY != '' }}
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           python scripts/ingest_odds_theoddsapi.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug || true
           if [ -f "data/out/$RODADA/theoddsapi_debug.json" ]; then
             echo "---- theoddsapi_debug.json (head) ----"
@@ -101,23 +98,17 @@ jobs:
         if: ${{ env.RAPIDAPI_KEY != '' }}
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --debug
 
       - name: Consolidar odds (consenso)
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           python scripts/ingest_odds.py --rodada "$RODADA"
 
       # ===================== FEATURE ENGINEERING / xG =====================
       - name: Gerar features base
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           if [ -f scripts/join_features.py ]; then
             python scripts/join_features.py --rodada "$RODADA"
           else
@@ -127,8 +118,6 @@ jobs:
       - name: Calcular xG
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           if [ -f scripts/compute_xg.py ]; then
             python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
           else
@@ -140,8 +129,6 @@ jobs:
         if: ${{ env.WANDB_PROJECT != '' }}
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           if [ -f scripts/train_model.py ]; then
             python scripts/train_model.py --rodada "$RODADA" --wandb_project "${WANDB_PROJECT}"
           else
@@ -153,8 +140,6 @@ jobs:
         if: ${{ env.WANDB_PROJECT != '' }}
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           if [ -f scripts/calibrate_isotonic.py ]; then
             python scripts/calibrate_isotonic.py --rodada "$RODADA" \
               --in "data/out/$RODADA/preds_base.csv" \
@@ -169,8 +154,6 @@ jobs:
         if: ${{ env.WANDB_PROJECT != '' }}
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           if [ -f scripts/stack_bivariate.py ]; then
             python scripts/stack_bivariate.py --rodada "$RODADA" \
               --in "data/out/$RODADA/preds_calibrated.csv" \
@@ -184,8 +167,6 @@ jobs:
       - name: Build probabilities
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           if [ -f scripts/build_probabilities.py ]; then
             python scripts/build_probabilities.py --rodada "$RODADA" \
               --in "data/out/$RODADA/preds_bivar.csv" \
@@ -199,8 +180,6 @@ jobs:
       - name: Evaluate risk e edge
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           if [ -f scripts/evaluate_risk.py ]; then
             python scripts/evaluate_risk.py --rodada "$RODADA" \
               --probs "data/out/$RODADA/probabilities.csv" \
@@ -214,8 +193,6 @@ jobs:
       - name: Scorecard relatório
         shell: bash
         run: |
-          RODADA="${{ github.event.inputs.rodada }}"
-          if [ -z "$RODADA" ]; then RODADA='2025-09-27_1213'; fi
           if [ -f scripts/scorecard.py ]; then
             python scripts/scorecard.py --rodada "$RODADA" --out "data/out/$RODADA/scorecard.html"
           else
@@ -226,10 +203,7 @@ jobs:
       - name: Exportar artefatos
         uses: actions/upload-artifact@v4
         with:
-          name: loteca_${{ github.event.inputs.rodada }}
+          name: loteca_${{ env.RODADA }}
           path: |
-            data/out/${{ github.event.inputs.rodada }}/odds*.csv
-            data/out/${{ github.event.inputs.rodada }}/theoddsapi_debug.json
-            data/out/${{ github.event.inputs.rodada }}/*.csv
-            data/out/${{ github.event.inputs.rodada }}/*.html
-            artifacts/${{ github.event.inputs.rodada }}/**
+            data/out/${{ env.RODADA }}/**
+            artifacts/${{ env.RODADA }}/**
