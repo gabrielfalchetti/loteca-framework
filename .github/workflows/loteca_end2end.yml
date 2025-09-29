@@ -31,12 +31,14 @@ jobs:
           pip install -r requirements.txt
 
       - name: Hotfix merges (tolerante)
-        run: python scripts/patch_merge_hotfix.py || true
+        run: |
+          python scripts/patch_merge_hotfix.py || true
 
       - name: Validate input
-        run: echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
+        run: |
+          echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
 
-      - name: W&B login (opcional)
+      - name: WandB login (opcional)
         run: |
           if [ -n "$WANDB_API_KEY" ]; then
             python -m wandb login "$WANDB_API_KEY" --relogin || true
@@ -44,41 +46,53 @@ jobs:
 
       # ==== ODDS REAIS (FAIL-FAST se nenhum provedor entregar) ====
       - name: Ingest TheOddsAPI (SAFE)
-        run: python scripts/ingest_odds_theoddsapi_safe.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug
+        run: |
+          python scripts/ingest_odds_theoddsapi_safe.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug
 
       - name: Ingest API-Football RapidAPI (SAFE)
-        run: python scripts/ingest_odds_apifootball_rapidapi_safe.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug
+        run: |
+          python scripts/ingest_odds_apifootball_rapidapi_safe.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug
 
       - name: Consenso de odds (erro se nenhum provedor)
-        run: python scripts/ingest_odds.py --rodada "$RODADA"
+        run: |
+          python scripts/ingest_odds.py --rodada "$RODADA"
 
       # ==== FEATURES / MODEL ====
       - name: Join features
-        run: python scripts/join_features.py --rodada "$RODADA"
+        run: |
+          python scripts/join_features.py --rodada "$RODADA"
 
       - name: Compute xG
-        run: python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
+        run: |
+          python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
 
       - name: Build probabilities
-        run: python scripts/build_probs.py --rodada "$RODADA"
+        run: |
+          python scripts/build_probs.py --rodada "$RODADA"
 
       - name: Blend probabilities (tolerante)
-        run: python scripts/blend_probs.py --rodada "$RODADA" --alpha 0.75 || true
+        run: |
+          python scripts/blend_probs.py --rodada "$RODADA" --alpha 0.75 || true
 
       - name: Calibrate probabilities (tolerante)
-        run: python scripts/calibrate_probs.py --rodada "$RODADA" || true
+        run: |
+          python scripts/calibrate_probs.py --rodada "$RODADA" || true
 
       - name: Evaluate risk
-        run: python scripts/evaluate_risk.py --rodada "$RODADA"
+        run: |
+          python scripts/evaluate_risk.py --rodada "$RODADA"
 
       - name: Loteca picker (tolerante)
-        run: python scripts/loteca_picker.py --rodada "$RODADA" --duplos 4 --triplos 2 || true
+        run: |
+          python scripts/loteca_picker.py --rodada "$RODADA" --duplos 4 --triplos 2 || true
 
       - name: News (opcional)
-        run: python scripts/ingest_news.py --rodada "$RODADA" --provider auto --lang pt --regions br --days 7 --limit 6 --aliases "data/aliases_br.json" || true
+        run: |
+          python scripts/ingest_news.py --rodada "$RODADA" --provider auto --lang pt --regions br --days 7 --limit 6 --aliases "data/aliases_br.json" || true
 
       - name: Scorecard
-        run: python scripts/scorecard.py --rodada "$RODADA" --out "data/out/$RODADA/scorecard.html"
+        run: |
+          python scripts/scorecard.py --rodada "$RODADA" --out "data/out/$RODADA/scorecard.html"
 
       - name: Upload artifact (data/out)
         uses: actions/upload-artifact@v4
