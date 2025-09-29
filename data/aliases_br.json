@@ -43,15 +43,12 @@
     "CSA": ["CSA", "Centro Sportivo Alagoano"],
     "Guarani": ["Guarani", "Guarani FC"],
     "Londrina": ["Londrina", "Londrina EC"],
-    "Chapecoense-SC": ["Chapecoense", "Chapecoense-SC", "A Chapecoense"],
     "ABC": ["ABC", "ABC FC"],
     "Tombense": ["Tombense", "Tombense FC"],
     "Vila Nova": ["Vila Nova", "Vila Nova FC"],
-    "Goianesia": ["Goianésia", "Goianesia"],
     "Figueirense": ["Figueirense", "Figueirense FC"],
     "Parana": ["Paraná", "Parana", "Parana Clube"]
   },
-
   "leagues": {
     "Copa do Brasil": ["Copa do Brasil", "Brazil Cup", "Copa Brasil"],
     "Série B": ["Série B", "Serie B", "Brasileirao B", "Campeonato Brasileiro Serie B", "Brasileirão Série B"],
