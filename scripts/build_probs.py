@@ -1,243 +1,180 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Gera o arquivo de probabilidades consolidado para a rodada.
+Constrói probabilities.csv a partir de:
+- preds_bivar.csv (se existir), ou
+- xg.csv / features_base.csv (gerando preds_bivar na hora).
 
-Ordem de preferência:
-  1) data/out/<RODADA>/preds_bivar.csv
-  2) data/out/<RODADA>/features_base.csv
-  3) data/out/<RODADA>/matches.csv  -> gera 1/3-1/3-1/3
-
-Compatibilidade:
-- wandb==0.22.0 (não usa finish_previous)
-- Aceita argumento legado --source (ignorado com aviso)
-- Permite sobrescrever caminhos com --preds, --features, --matches
-
-Saída:
-  data/out/<RODADA>/probabilities.csv
-  colunas: rodada, home, away, p_home, p_draw, p_away, source
+Saídas:
+- data/out/<rodada>/probabilities.csv
+- (se necessário) data/out/<rodada>/preds_bivar.csv
 """
 
 from __future__ import annotations
-
 import argparse
 import os
 import sys
-from typing import Dict, List, Optional
-
 import pandas as pd
 
-# wandb é opcional
-try:
-    import wandb  # type: ignore
-    _HAS_WANDB = True
-except Exception:
-    _HAS_WANDB = False
+# W&B é opcional; mantemos o mesmo comportamento dos seus logs
+def _try_wandb_init(run_name: str, rodada: str):
+    try:
+        import wandb
+        wandb.init(project="loteca", name=f"{run_name}_{rodada}", reinit=True)
+        return wandb
+    except Exception:
+        return None
 
-
-OUT_COLS = ["rodada", "home", "away", "p_home", "p_draw", "p_away", "source"]
-
-
-def _log(msg: str) -> None:
-    print(f"[build_probs] {msg}")
-
-
-def _safe_mkdir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
-
-
-def _paths(rodada: str, preds: Optional[str], features: Optional[str], matches: Optional[str]) -> Dict[str, str]:
-    base_in = os.path.join("data", "in", rodada)
-    base_out = os.path.join("data", "out", rodada)
-    _safe_mkdir(base_in)
-    _safe_mkdir(base_out)
-    return {
-        "preds_bivar": preds or os.path.join(base_out, "preds_bivar.csv"),
-        "features_base": features or os.path.join(base_out, "features_base.csv"),
-        "matches": matches or os.path.join(base_out, "matches.csv"),
-        "out": os.path.join(base_out, "probabilities.csv"),
-    }
-
-
-def _read_csv_if_exists(path: str, empty_cols: Optional[List[str]] = None) -> pd.DataFrame:
-    if path and os.path.isfile(path):
-        return pd.read_csv(path)
-    return pd.DataFrame(columns=empty_cols or [])
-
-
-def _pick_first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    cols_norm = {c.lower().strip(): c for c in df.columns}
-    for c in candidates:
-        if c in cols_norm:
-            return cols_norm[c]
-    return None
-
-
-def _normalize_team_cols(df: pd.DataFrame) -> pd.DataFrame:
-    home_col = _pick_first_existing(df, ["home", "mandante", "time_home", "team_home"])
-    away_col = _pick_first_existing(df, ["away", "visitante", "time_away", "team_away"])
-
-    if home_col is None or away_col is None:
-        if len(df.columns) >= 2:
-            home_col, away_col = df.columns[:2]
-        else:
-            return pd.DataFrame(columns=["home", "away"])
-
-    out = pd.DataFrame(
-        {
-            "home": df[home_col].astype(str).fillna("").str.strip(),
-            "away": df[away_col].astype(str).fillna("").str.strip(),
-        }
-    )
-    out = out[(out["home"] != "") & (out["away"] != "")]
-    return out
-
-
-def _extract_probs(df: pd.DataFrame) -> pd.DataFrame:
+def _ensure_preds_bivar(rodada: str, max_goals: int = None) -> str:
     """
-    Procura colunas de probabilidade. Aceita várias convenções:
-      home: p_home, prob_home, home_prob, home_win_prob
-      draw: p_draw, prob_draw, draw_prob, empate_prob, x, p_empate
-      away: p_away, prob_away, away_prob, away_win_prob
-    Se só existir (home, away), calcula draw = 1 - home - away (clip 0..1).
+    Garante a existência de preds_bivar.csv. Se não existir, chama o gerador interno.
+    Retorna o caminho do arquivo.
     """
-    c_home = _pick_first_existing(df, ["p_home", "prob_home", "home_prob", "home_win_prob"])
-    c_draw = _pick_first_existing(df, ["p_draw", "prob_draw", "draw_prob", "empate_prob", "x", "p_empate"])
-    c_away = _pick_first_existing(df, ["p_away", "prob_away", "away_prob", "away_win_prob"])
+    out_dir = os.path.join("data", "out", rodada)
+    pred_path = os.path.join(out_dir, "preds_bivar.csv")
+    if os.path.exists(pred_path):
+        return pred_path
 
-    out = pd.DataFrame()
+    # gera localmente (importando a função do script irmão sem depender de CLI)
+    # para evitar circularidade, copiamos uma implementação mínima aqui:
+    import math
 
-    if c_home and c_draw and c_away:
-        out["p_home"] = pd.to_numeric(df[c_home], errors="coerce")
-        out["p_draw"] = pd.to_numeric(df[c_draw], errors="coerce")
-        out["p_away"] = pd.to_numeric(df[c_away], errors="coerce")
-    elif c_home and c_away:
-        out["p_home"] = pd.to_numeric(df[c_home], errors="coerce")
-        out["p_away"] = pd.to_numeric(df[c_away], errors="coerce")
-        p_draw = 1.0 - out["p_home"].fillna(0) - out["p_away"].fillna(0)
-        out["p_draw"] = p_draw.clip(lower=0.0, upper=1.0)
+    def _poisson_pmf(k: int, lam: float) -> float:
+        if lam <= 0:
+            return 1.0 if k == 0 else 0.0
+        return math.exp(-lam) * (lam ** k) / math.factorial(k)
+
+    def _grid_probs(lh: float, la: float, max_g: int | None) -> tuple[float,float,float]:
+        if max_g is None:
+            max_g = int(min(18, max(10, math.ceil(lh + la + 8))))
+        ph = [_poisson_pmf(i, lh) for i in range(max_g + 1)]
+        pa = [_poisson_pmf(j, la) for j in range(max_g + 1)]
+        p1 = px = p2 = 0.0
+        for i, p_i in enumerate(ph):
+            for j, p_j in enumerate(pa):
+                pij = p_i * p_j
+                if i > j:
+                    p1 += pij
+                elif i == j:
+                    px += pij
+                else:
+                    p2 += pij
+        s = p1 + px + p2
+        if s > 0:
+            p1 /= s; px /= s; p2 /= s
+        return p1, px, p2
+
+    # fonte: xg.csv preferido; fallback features_base.csv
+    xg_path = os.path.join(out_dir, "xg.csv")
+    fb_path = os.path.join(out_dir, "features_base.csv")
+    if os.path.exists(xg_path):
+        df = pd.read_csv(xg_path)
+        df["_source"] = "xg"
+    elif os.path.exists(fb_path):
+        df = pd.read_csv(fb_path)
+        df["_source"] = "features_base"
     else:
-        return pd.DataFrame(columns=["p_home", "p_draw", "p_away"])
+        raise FileNotFoundError("Nem xg.csv nem features_base.csv encontrados para gerar preds_bivar.")
 
-    out = out.fillna(0.0)
-    sums = out.sum(axis=1).replace(0, 1)
-    out = out.div(sums, axis=0)
-    return out[["p_home", "p_draw", "p_away"]]
+    # detectar colunas
+    mid = None
+    for c in df.columns:
+        if c.lower() in ("match_id","id_partida","id","partida_id"):
+            mid = c; break
+    cand_home = [c for c in df.columns if c.lower() in ("xg_home","xh","home_xg","xgh","lambda_home","lambda_h","lh")]
+    cand_away = [c for c in df.columns if c.lower() in ("xg_away","xa","away_xg","xga","lambda_away","lambda_a","la")]
+    if mid is None or not cand_home or not cand_away:
+        raise ValueError("Não consegui identificar match_id e xG home/away para gerar preds_bivar.")
+    ch, ca = cand_home[0], cand_away[0]
 
-
-def _merge_teams_and_probs(teams: pd.DataFrame, probs: pd.DataFrame, default_equal: bool = False) -> pd.DataFrame:
-    if probs.empty or len(probs) != len(teams):
-        if default_equal:
-            probs = pd.DataFrame(
-                {"p_home": [1/3]*len(teams), "p_draw": [1/3]*len(teams), "p_away": [1/3]*len(teams)}
+    # tentar nomes dos times
+    home_col = away_col = None
+    try:
+        matches = pd.read_csv(os.path.join(out_dir, "matches.csv"))
+        m_mid = [c for c in matches.columns if c.lower() == "match_id"]
+        m_home = [c for c in matches.columns if c.lower() in ("home","mandante","time_casa")]
+        m_away = [c for c in matches.columns if c.lower() in ("away","visitante","time_fora")]
+        if m_mid and m_home and m_away:
+            matches = matches[[m_mid[0], m_home[0], m_away[0]]].rename(
+                columns={m_mid[0]:"match_id", m_home[0]:"home", m_away[0]:"away"}
             )
-        else:
-            probs = pd.DataFrame(columns=["p_home", "p_draw", "p_away"])
-    return pd.concat([teams.reset_index(drop=True), probs.reset_index(drop=True)], axis=1)
+            df = df.merge(matches, left_on=mid, right_on="match_id", how="left")
+            home_col, away_col = "home", "away"
+    except Exception:
+        pass
 
+    rows = []
+    for _, r in df.iterrows():
+        lh = float(max(0.0, r[ch]))
+        la = float(max(0.0, r[ca]))
+        p1, px, p2 = _grid_probs(lh, la, max_goals)
+        row = {
+            "match_id": r[mid],
+            "lambda_home": lh,
+            "lambda_away": la,
+            "p1": p1, "px": px, "p2": p2
+        }
+        if home_col and away_col:
+            row["home"] = r.get(home_col, None)
+            row["away"] = r.get(away_col, None)
+        rows.append(row)
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Build probabilities for a rodada")
-    parser.add_argument("--rodada", required=True, help="Identificador da rodada (ex.: 2025-09-27_1213)")
-    # Compat: alguns workflows antigos passavam --source; aqui só avisamos e ignoramos.
-    parser.add_argument("--source", help="(LEGADO) Ignorado. O script decide automaticamente.", default=None)
-    # Sobrescritas opcionais de caminho
-    parser.add_argument("--preds", help="Caminho para preds_bivar.csv", default=None)
-    parser.add_argument("--features", help="Caminho para features_base.csv", default=None)
-    parser.add_argument("--matches", help="Caminho para matches.csv", default=None)
+    out = pd.DataFrame(rows)
+    out.to_csv(pred_path, index=False, encoding="utf-8")
+    print(f"[build_probs] preds_bivar gerado -> {pred_path} ({len(out)} linhas)")
+    return pred_path
 
-    args = parser.parse_args()
+def main():
+    parser = argparse.ArgumentParser(description="Constrói probabilities.csv a partir de preds_bivar/xg/features.")
+    parser.add_argument("--rodada", required=True, help="Rodada ex.: 2025-09-27_1213")
+    # manter compat com chamadas antigas:
+    parser.add_argument("--source", required=False, help="(LEGADO) Ignorado; lógica agora é automática.")
+    parser.add_argument("--max_goals", type=int, default=None, help="Grade máxima de gols ao gerar preds_bivar (se necessário).")
+    args, _unknown = parser.parse_known_args()
 
-    rodada = args.rodada
+    out_dir = os.path.join("data", "out", args.rodada)
+    os.makedirs(out_dir, exist_ok=True)
+
     if args.source:
-        _log(f"AVISO: argumento legado --source='{args.source}' ignorado. Usando lógica automática.")
+        print(f"[build_probs] AVISO: argumento legado --source='{args.source}' ignorado. Usando lógica automática.")
 
-    p = _paths(rodada, preds=args.preds, features=args.features, matches=args.matches)
+    # 1) garantir preds_bivar.csv
+    pred_path = os.path.join(out_dir, "preds_bivar.csv")
+    if not os.path.exists(pred_path):
+        pred_path = _ensure_preds_bivar(args.rodada, args.max_goals)
 
-    # wandb (opcional)
-    run = None
-    if _HAS_WANDB:
+    # 2) carregar e montar probabilities.csv (aqui já está praticamente pronto)
+    preds = pd.read_csv(pred_path)
+
+    # Padronizar colunas esperadas
+    required = {"match_id","lambda_home","lambda_away","p1","px","p2"}
+    miss = required - set(map(str.lower, preds.columns))
+    # se os nomes vierem com case diferente, normalizar
+    cols_map = {c: c.lower() for c in preds.columns}
+    preds.rename(columns=cols_map, inplace=True)
+
+    # garantir ordenação de colunas
+    base_cols = ["match_id","lambda_home","lambda_away","p1","px","p2"]
+    extra_cols = [c for c in preds.columns if c not in base_cols]
+    probs = preds[base_cols + extra_cols]
+
+    # 3) salvar probabilities.csv
+    out_probs = os.path.join(out_dir, "probabilities.csv")
+    probs.to_csv(out_probs, index=False, encoding="utf-8")
+    print(f"[build_probs] Fonte='preds_bivar' -> {out_probs} ({len(probs)} linhas)")
+
+    # 4) wandb (opcional, como nos seus logs)
+    wandb = _try_wandb_init("build_probs", args.rodada)
+    if wandb:
         try:
-            run = wandb.init(project="loteca", name=f"build_probs_{rodada}", config={"rodada": rodada})
-        except Exception as e:
-            _log(f"AVISO wandb: {e}")
-            run = None
-
-    # 1) tentar preds_bivar
-    df_bivar = _read_csv_if_exists(p["preds_bivar"])
-    # 2) fallback: features_base
-    df_feat = _read_csv_if_exists(p["features_base"])
-
-    source_used = ""
-    df_out = pd.DataFrame(columns=OUT_COLS)
-
-    if not df_bivar.empty:
-        teams = _normalize_team_cols(df_bivar)
-        probs = _extract_probs(df_bivar)
-        df_tmp = _merge_teams_and_probs(teams, probs, default_equal=True)
-        if not df_tmp.empty:
-            df_tmp["rodada"] = rodada
-            df_out = df_tmp[["rodada", "home", "away", "p_home", "p_draw", "p_away"]].copy()
-            df_out["source"] = "preds_bivar"
-            source_used = "preds_bivar"
-
-    if df_out.empty and not df_feat.empty:
-        teams = _normalize_team_cols(df_feat)
-        probs = _extract_probs(df_feat)
-        df_tmp = _merge_teams_and_probs(teams, probs, default_equal=True)
-        if not df_tmp.empty:
-            df_tmp["rodada"] = rodada
-            df_out = df_tmp[["rodada", "home", "away", "p_home", "p_draw", "p_away"]].copy()
-            df_out["source"] = "features_base"
-            source_used = "features_base"
-
-    if df_out.empty:
-        df_matches = _read_csv_if_exists(p["matches"])
-        teams = _normalize_team_cols(df_matches)
-        if not teams.empty:
-            df_tmp = _merge_teams_and_probs(teams, pd.DataFrame(), default_equal=True)
-            df_tmp["rodada"] = rodada
-            df_out = df_tmp[["rodada", "home", "away", "p_home", "p_draw", "p_away"]].copy()
-            df_out["source"] = "fallback_equal"
-            source_used = "fallback_equal"
-        else:
-            df_out = pd.DataFrame(columns=OUT_COLS)
-
-    for c in OUT_COLS:
-        if c not in df_out.columns:
-            df_out[c] = "" if c in ("rodada", "home", "away", "source") else 0.0
-    df_out = df_out[OUT_COLS]
-
-    out_csv = p["out"]
-    _safe_mkdir(os.path.dirname(out_csv))
-    df_out.to_csv(out_csv, index=False)
-    _log(f"Fonte='{source_used or 'none'}' -> {out_csv} ({len(df_out)} linhas)")
-
-    if run:
-        try:
-            wandb.summary["probs_rows"] = int(len(df_out))
-            wandb.summary["probs_source"] = source_used or "none"
-        finally:
+            wandb.log({"probs_rows": len(probs), "probs_source": "preds_bivar"})
             wandb.finish()
-
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt:
-        sys.exit(130)
     except Exception as e:
-        print(f"[build_probs] ERRO não fatal: {e}")
-        try:
-            arg_map = {sys.argv[i].lstrip("-"): sys.argv[i + 1]
-                       for i in range(len(sys.argv) - 1)
-                       if sys.argv[i].startswith("--")}
-            rodada = arg_map.get("rodada", "unknown")
-            base_out = os.path.join("data", "out", rodada)
-            os.makedirs(base_out, exist_ok=True)
-            pd.DataFrame(columns=OUT_COLS).to_csv(os.path.join(base_out, "probabilities.csv"), index=False)
-            print(f"[build_probs] OK -> data/out/{rodada}/probabilities.csv (0 linhas)")
-        except Exception:
-            pass
-        sys.exit(0)
+        print(f"[build_probs] ERRO: {e}", file=sys.stderr)
+        sys.exit(1)
