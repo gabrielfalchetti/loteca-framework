@@ -1,0 +1,17 @@
+{
+  "ENG:Premier League": "soccer_epl",
+  "ENG:Championship": "soccer_efl_champ",
+  "ENG:League One": "soccer_efl_league_one",
+  "ENG:League Two": "soccer_efl_league_two",
+
+  "ITA:Serie A": "soccer_italy_serie_a",
+  "ITA:Serie B": "soccer_italy_serie_b",
+
+  "PRT:Primeira Liga": "soccer_portugal_primeira_liga",
+
+  "ESP:La Liga": "soccer_spain_la_liga",
+  "ESP:Segunda Division": "soccer_spain_segunda_division",
+
+  "BRA:Serie A": "soccer_brazil_campeonato",
+  "BRA:Serie B": "soccer_brazil_serie_b"
+}
