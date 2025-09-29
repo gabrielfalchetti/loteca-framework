@@ -19,6 +19,7 @@ def main():
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--regions", default="uk,eu,us,au")
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--consensus-allow-empty", action="store_true", help="Não aborta se não houver odds.")
     args = ap.parse_args()
 
     # 1) TheOddsAPI
@@ -33,8 +34,11 @@ def main():
     if rc2 != 0:
         print("[end2end] AVISO: API-Football falhou (segue).")
 
-    # 3) Consenso (não aborte se 1 provedor apenas; só falha se 0)
-    rc3 = run([sys.executable, "-m", "scripts.consensus_odds", "--rodada", args.rodada])
+    # 3) Consenso (com tolerância)
+    cmd = [sys.executable, "-m", "scripts.consensus_odds", "--rodada", args.rodada]
+    if args.consensus_allow_empty or args.debug:
+        cmd.append("--allow-empty")  # no modo debug também não derruba
+    rc3 = run(cmd)
     if rc3 != 0:
         print("[end2end] ERRO: nenhum provedor retornou odds (consenso).")
         raise SystemExit(1)
