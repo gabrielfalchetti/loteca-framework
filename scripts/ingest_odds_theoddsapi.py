@@ -2,273 +2,278 @@
 # -*- coding: utf-8 -*-
 
 """
-Coleta odds da TheOddsAPI e salva em data/out/<RODADA>/odds_theoddsapi.csv.
-
-Notas:
-- Compatível com wandb==0.22.0 (NÃO usa finish_previous).
-- Se THEODDS_API_KEY não estiver definido, o script não falha: gera CSV vazio com cabeçalho.
-- Se não houver odds (ex.: jogos já finalizados), gera CSV vazio também.
-- Suporta múltiplas convenções de colunas no matches_source.csv.
-
-Uso:
-  python scripts/ingest_odds_theoddsapi.py --rodada RODADA --regions "uk,eu,us,au" --debug
+Coleta odds H2H (1X2) do TheOddsAPI por sport_key e cruza com os jogos da rodada.
 
 Saída:
-  data/out/<RODADA>/odds_theoddsapi.csv
-"""
+  data/out/{rodada}/odds_theoddsapi.csv
 
-from __future__ import annotations
+Colunas:
+  match_id, utc_kickoff, country_code, league_name,
+  home_team, away_team,
+  bookmaker, home_odds, draw_odds, away_odds,
+  provider, last_update
+
+Requisitos:
+  - Secret THEODDS_API_KEY definido no ambiente
+  - Arquivo de entrada: data/in/{rodada}/matches_source.csv
+  - Mapa de ligas -> sport_key: data/theodds_league_map.json
+"""
 
 import os
 import sys
 import json
 import time
 import argparse
-from typing import List, Dict, Any, Tuple
+from datetime import datetime, timezone
+import unicodedata
 
 import pandas as pd
 import requests
 
-# wandb é opcional: se der erro de init, seguimos sem quebrar o job
-try:
-    import wandb  # type: ignore
-    _HAS_WANDB = True
-except Exception:
-    _HAS_WANDB = False
+THEODDS_BASE = "https://api.the-odds-api.com/v4"
+DEFAULT_MARKETS = "h2h"
+DEFAULT_ODDS_FORMAT = "decimal"
+DEFAULT_DATE_FORMAT = "iso"
 
+def log(msg: str):
+    print(f"[theoddsapi] {msg}", flush=True)
 
-CSV_COLUMNS = [
-    "rodada",
-    "home",
-    "away",
-    "league_hint",
-    "market",
-    "bookmaker",
-    "price_home",
-    "price_draw",
-    "price_away",
-    "last_update",
-    "source",
-]
+def fail(code: int, msg: str):
+    log(f"ERRO: {msg}")
+    sys.exit(code)
 
+def normalize_name(s: str) -> str:
+    if s is None:
+        return ""
+    s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("ASCII")
+    return " ".join(s.strip().lower().split())
 
-def log(msg: str, debug: bool = False) -> None:
-    prefix = "[theoddsapi]"
-    if debug:
-        print(f"{prefix} {msg}")
-    else:
-        # mesmo sem --debug, mensagens importantes
-        if any(k in msg.lower() for k in ["erro", "error", "ok", "aviso", "warning", "csv", "saida", "api key"]):
-            print(f"{prefix} {msg}")
+def read_matches(rodada: str) -> pd.DataFrame:
+    inp = f"data/in/{rodada}/matches_source.csv"
+    if not os.path.exists(inp):
+        fail(2, f"arquivo de entrada nao encontrado: {inp}")
+    df = pd.read_csv(inp)
+    required = ["match_id", "utc_kickoff", "country_code", "league_name", "home_team", "away_team"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        fail(2, f"colunas ausentes em matches_source.csv: {missing}")
 
+    # Normalizações auxiliares
+    for c in ["home_team", "away_team", "country_code", "league_name"]:
+        df[c] = df[c].astype(str)
 
-def safe_mkdir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+    df["norm_home"] = df["home_team"].map(normalize_name)
+    df["norm_away"] = df["away_team"].map(normalize_name)
+    df["league_key"] = (df["country_code"].str.upper().str.strip() + ":" + df["league_name"].str.strip())
+    return df
 
+def load_league_map() -> dict:
+    path = "data/theodds_league_map.json"
+    if not os.path.exists(path):
+        fail(2, f"mapa de ligas nao encontrado: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def resolve_paths(rodada: str) -> Tuple[str, str]:
-    in_dir = os.path.join("data", "in", rodada)
-    out_dir = os.path.join("data", "out", rodada)
-    safe_mkdir(in_dir)
-    safe_mkdir(out_dir)
-    src_csv = os.path.join(in_dir, "matches_source.csv")
-    out_csv = os.path.join(out_dir, "odds_theoddsapi.csv")
-    return src_csv, out_csv
-
-
-def read_matches(src_csv: str, debug: bool) -> pd.DataFrame:
-    if not os.path.isfile(src_csv):
-        log(f"AVISO: não encontrei {src_csv} — seguirei com zero partidas.", True)
-        return pd.DataFrame(columns=["home", "away", "league_hint"])
-
-    df = pd.read_csv(src_csv)
-    cols = {c.lower().strip(): c for c in df.columns}
-
-    # tentar mapear várias convenções
-    home_candidates = ["home", "mandante", "time_home", "team_home"]
-    away_candidates = ["away", "visitante", "time_away", "team_away"]
-    league_candidates = ["league", "liga", "competition", "campeonato", "league_hint"]
-
-    def pick(cands: List[str]) -> str | None:
-        for c in cands:
-            if c in cols:
-                return cols[c]
-        return None
-
-    home_col = pick(home_candidates)
-    away_col = pick(away_candidates)
-    league_col = pick(league_candidates)
-
-    if home_col is None or away_col is None:
-        # fallback bruto: tentar pegar duas primeiras colunas como home/away
-        if len(df.columns) >= 2:
-            home_col, away_col = df.columns[:2]
-            log("AVISO: colunas não reconhecidas em matches_source.csv — usando duas primeiras como home/away.", True)
-        else:
-            return pd.DataFrame(columns=["home", "away", "league_hint"])
-
-    out = pd.DataFrame(
-        {
-            "home": df[home_col].astype(str).fillna("").str.strip(),
-            "away": df[away_col].astype(str).fillna("").str.strip(),
-        }
+def fetch_odds_for_sport(sport_key: str, api_key: str, regions: str) -> list:
+    """
+    Retorna lista de eventos (JSON) para um sport_key.
+    """
+    url = (
+        f"{THEODDS_BASE}/sports/{sport_key}/odds"
+        f"?apiKey={api_key}"
+        f"&regions={regions}"
+        f"&markets={DEFAULT_MARKETS}"
+        f"&oddsFormat={DEFAULT_ODDS_FORMAT}"
+        f"&dateFormat={DEFAULT_DATE_FORMAT}"
     )
-    out["league_hint"] = df[league_col].astype(str).fillna("").str.strip() if league_col else ""
-    # filtrar vazios evidentes
-    out = out[(out["home"] != "") & (out["away"] != "")]
-    if debug:
-        log(f"Partidas lidas: {len(out)}", True)
-    return out
-
-
-def fetch_odds_for_matches(
-    matches: pd.DataFrame,
-    api_key: str,
-    regions: str,
-    debug: bool,
-) -> List[Dict[str, Any]]:
-    """
-    IMPORTANTE:
-    A TheOddsAPI v4 exige um 'sport_key' (ex.: soccer_epl, soccer_brazil_campeonato_brasileiro_serie_a).
-    Sem mapear cada liga/competição -> sport_key, não é possível fazer a consulta direta por times.
-
-    Para manter o job estável (principal meta aqui), implementamos um fluxo "fail-soft":
-    - se não houver sport_keys mapeadas, retornamos lista vazia.
-    - você pode evoluir depois incluindo um mapa de league_hint -> sport_key.
-
-    Exemplo de chamada real:
-      GET https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato_brasileiro_serie_a/odds
-          ?apiKey=...&regions=br,uk,eu,us,au&markets=h2h&oddsFormat=decimal
-    """
-    # Placeholder: sem mapeamento de ligas, retornamos vazio de forma consciente.
-    if matches.empty:
+    r = requests.get(url, timeout=20)
+    if r.status_code == 429:
+        # rate limit: segura 2s e tenta 1 vez
+        time.sleep(2)
+        r = requests.get(url, timeout=20)
+    if r.status_code != 200:
+        log(f"AVISO: status {r.status_code} ao consultar {sport_key}: {r.text[:180]}")
+        return []
+    try:
+        data = r.json()
+        if not isinstance(data, list):
+            log(f"AVISO: retorno inesperado em {sport_key}: {str(data)[:180]}")
+            return []
+        return data
+    except Exception as e:
+        log(f"AVISO: erro parseando JSON de {sport_key}: {e}")
         return []
 
-    # Caso deseje habilitar liga do Brasil como demonstração, descomente e ajuste:
-    # league_map = {
-    #     "brasileirao": "soccer_brazil_campeonato_brasileiro_serie_a",
-    #     "serie a": "soccer_brazil_campeonato_brasileiro_serie_a",
-    #     "premier league": "soccer_epl",
-    # }
-    # sport_keys = set()
-    # for hint in matches["league_hint"].str.lower().fillna(""):
-    #     for k, v in league_map.items():
-    #         if k in hint:
-    #             sport_keys.add(v)
-    # if not sport_keys:
-    #     return []
+def event_candidates_to_rows(event: dict) -> list:
+    """
+    Converte um evento do TheOddsAPI em linhas por bookmaker com odds (home,draw,away).
+    """
+    rows = []
+    try:
+        commence_time = event.get("commence_time")  # ISO
+        home = event.get("home_team", "")
+        away = event.get("away_team", "")
+        bookmakers = event.get("bookmakers", []) or []
+        for bk in bookmakers:
+            bk_name = bk.get("title") or bk.get("key") or ""
+            last_update = bk.get("last_update") or event.get("commence_time")
+            markets = bk.get("markets", []) or []
+            for m in markets:
+                if (m.get("key") or "").lower() != "h2h":
+                    continue
+                outcomes = m.get("outcomes", []) or []
+                # outcomes: list of { name: "Home/Draw/Away team name", price: float }
+                home_odds = None
+                draw_odds = None
+                away_odds = None
+                for o in outcomes:
+                    name = (o.get("name") or "").strip()
+                    price = o.get("price")
+                    nname = normalize_name(name)
+                    # tenta identificar home/away por comparação com nomes do evento
+                    if nname == normalize_name(home):
+                        home_odds = price
+                    elif nname == normalize_name(away):
+                        away_odds = price
+                    elif nname in ("draw", "empate", "x"):
+                        draw_odds = price
+                # fallback: se não identificou pelo nome, usa posição (não é o ideal, mas evita perder dado)
+                if home_odds is None or away_odds is None:
+                    # alguns feeds não repetem o nome do time na outcome
+                    if len(outcomes) == 3:
+                        # supõe ordem [home, draw, away]
+                        home_odds = home_odds or outcomes[0].get("price")
+                        draw_odds = draw_odds or outcomes[1].get("price")
+                        away_odds = away_odds or outcomes[2].get("price")
 
-    # Como os jogos já aconteceram (contexto do usuário), odds correntes não existirão.
-    # Retornamos vazio de forma explícita.
-    log("Sem consulta à API: jogos já finalizados e sem mapeamento de sport_key — retornando 0 odds.", debug)
-    return []
+                if home_odds and away_odds and draw_odds:
+                    rows.append({
+                        "utc_kickoff": commence_time,
+                        "home_team": home,
+                        "away_team": away,
+                        "bookmaker": bk_name,
+                        "home_odds": home_odds,
+                        "draw_odds": draw_odds,
+                        "away_odds": away_odds,
+                        "provider": "theoddsapi",
+                        "last_update": last_update,
+                    })
+    except Exception as e:
+        log(f"AVISO: erro convertendo evento -> rows: {e}")
+    return rows
 
-
-def save_csv(rows: List[Dict[str, Any]], out_csv: str, rodada: str) -> None:
-    if not rows:
-        df = pd.DataFrame(columns=CSV_COLUMNS)
-        df.to_csv(out_csv, index=False)
-        print(f"[theoddsapi] OK -> {out_csv} (0 linhas)")
-        return
-
-    df = pd.DataFrame(rows)
-    # garantir colunas e ordem
-    for c in CSV_COLUMNS:
-        if c not in df.columns:
-            df[c] = ""  # preenchimento
-    df = df[CSV_COLUMNS]
-    df.to_csv(out_csv, index=False)
-    print(f"[theoddsapi] OK -> {out_csv} ({len(df)} linhas)")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest odds from TheOddsAPI")
-    parser.add_argument("--rodada", required=True, help="Identificador da rodada (ex.: 2025-09-27_1213)")
-    parser.add_argument("--regions", default="uk,eu,us,au", help="Regiões da TheOddsAPI (ex.: uk,eu,us,au)")
-    parser.add_argument("--debug", action="store_true", help="Ativa logs detalhados")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rodada", required=True, help="ID da rodada (ex: 2025-09-27_1213)")
+    parser.add_argument("--regions", default="uk,eu,us,au", help="regioes TheOddsAPI (ex: uk,eu,us,au)")
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     rodada = args.rodada
     regions = args.regions
-    debug = args.debug
-
-    src_csv, out_csv = resolve_paths(rodada)
-    if debug:
-        log(f"Entrada: {src_csv}", True)
-        log(f"Saída:   {out_csv}", True)
-
-    # W&B: tentar iniciar, mas sem travar caso falhe
-    run = None
-    if _HAS_WANDB:
-        try:
-            run = wandb.init(
-                project="loteca",
-                name=f"theoddsapi_{rodada}",
-                config={
-                    "rodada": rodada,
-                    "regions": regions,
-                    "script": "ingest_odds_theoddsapi.py",
-                },
-                # NÃO usar finish_previous aqui (incompatível com 0.22.0)
-                # NÃO usar reinit=True (gera warning); manter default
-            )
-        except Exception as e:
-            log(f"AVISO: falha ao iniciar wandb: {e}", True)
-            run = None
-
-    df_matches = read_matches(src_csv, debug)
 
     api_key = os.getenv("THEODDS_API_KEY", "").strip()
     if not api_key:
-        log("AVISO: THEODDS_API_KEY não definido — pulando consulta e gerando CSV vazio.", False)
-        save_csv([], out_csv, rodada)
-        if run:
-            wandb.summary["theodds_used"] = 0
-            wandb.finish()
-        return
+        fail(1, "THEODDS_API_KEY nao definido")
 
-    rows = fetch_odds_for_matches(
-        matches=df_matches,
-        api_key=api_key,
-        regions=regions,
-        debug=debug,
-    )
+    out_dir = f"data/out/{rodada}"
+    os.makedirs(out_dir, exist_ok=True)
+    out_csv = f"{out_dir}/odds_theoddsapi.csv"
 
-    # Acrescentar metadados padrões se houver linhas
-    enriched: List[Dict[str, Any]] = []
-    for r in rows:
-        r2 = dict(r)
-        r2.setdefault("rodada", rodada)
-        r2.setdefault("market", "h2h")
-        r2.setdefault("source", "theoddsapi")
-        enriched.append(r2)
+    matches = read_matches(rodada)
+    log(f"Entrada: data/in/{rodada}/matches_source.csv")
+    log(f"Saida:   {out_csv}")
+    log(f"Partidas lidas: {len(matches)}")
 
-    save_csv(enriched, out_csv, rodada)
+    league_map = load_league_map()
 
-    if run:
+    # Seleciona jogos ainda futuros (TheOdds trabalha com 'upcoming' p/ odds)
+    now_utc = datetime.now(timezone.utc)
+    def is_future(row):
         try:
-            wandb.summary["theodds_used"] = int(len(enriched) > 0)
-            wandb.log({"rows": len(enriched)})
-        finally:
-            wandb.finish()
+            dt = datetime.fromisoformat(str(row["utc_kickoff"]).replace("Z", "+00:00"))
+            return dt > now_utc
+        except Exception:
+            return True  # se não conseguir parsear, não bloqueia
+    matches["is_future"] = matches.apply(is_future, axis=1)
+    # Mesmo que alguns jogos não sejam futuros, ainda tentamos casar com odds retornadas (não filtramos agressivo)
 
+    # Agrupa por league_key para buscar o sport_key correspondente
+    league_keys = sorted(matches["league_key"].unique())
+    all_rows = []
+
+    for lk in league_keys:
+        sport_key = league_map.get(lk)
+        if not sport_key:
+            log(f"AVISO: league_key sem sport_key no mapa: '{lk}' (adicionar em data/theodds_league_map.json)")
+            continue
+
+        # Busca odds no provedor por sport_key
+        events = fetch_odds_for_sport(sport_key, api_key, regions)
+        if args.debug:
+            log(f"DEBUG: {sport_key} retornou {len(events)} eventos")
+
+        # Converte todos os eventos para linhas por bookmaker
+        sport_rows = []
+        for ev in events:
+            sport_rows.extend(event_candidates_to_rows(ev))
+        if not sport_rows:
+            continue
+        df_sport = pd.DataFrame(sport_rows)
+        # Normaliza auxiliar p/ join por nome
+        df_sport["norm_home"] = df_sport["home_team"].map(normalize_name)
+        df_sport["norm_away"] = df_sport["away_team"].map(normalize_name)
+
+        # Subconjunto de matches da liga
+        sub = matches[matches["league_key"] == lk].copy()
+
+        # Join por nome normalizado (home/away + kickoff por data, com tolerância)
+        # Primeiro, tenta join por nomes; depois, se necessário, aproxima kickoff por data (mesmo dia)
+        merged = sub.merge(
+            df_sport,
+            how="left",
+            left_on=["norm_home", "norm_away"],
+            right_on=["norm_home", "norm_away"],
+            suffixes=("", "_prov")
+        )
+
+        # Filtra por mesmo dia (para reduzir colisões de jogos homônimos)
+        def same_day(a, b) -> bool:
+            try:
+                da = datetime.fromisoformat(str(a).replace("Z", "+00:00")).date()
+                db = datetime.fromisoformat(str(b).replace("Z", "+00:00")).date()
+                return da == db
+            except Exception:
+                return True
+
+        if "utc_kickoff_prov" in merged.columns:
+            merged = merged[ merged.apply(lambda r: same_day(r.get("utc_kickoff"), r.get("utc_kickoff_prov")), axis=1) ]
+
+        # Mantém apenas linhas com odds coletadas
+        merged = merged.dropna(subset=["home_odds", "away_odds", "draw_odds"])
+
+        # Seleciona colunas finais
+        keep_cols = [
+            "match_id", "utc_kickoff", "country_code", "league_name",
+            "home_team", "away_team",
+            "bookmaker", "home_odds", "draw_odds", "away_odds",
+            "provider", "last_update"
+        ]
+        merged = merged[keep_cols] if set(keep_cols).issubset(merged.columns) else merged
+
+        all_rows.append(merged)
+
+    if all_rows:
+        out = pd.concat(all_rows, ignore_index=True)
+    else:
+        out = pd.DataFrame(columns=[
+            "match_id","utc_kickoff","country_code","league_name",
+            "home_team","away_team","bookmaker",
+            "home_odds","draw_odds","away_odds","provider","last_update"
+        ])
+
+    out.to_csv(out_csv, index=False)
+    log(f"OK -> {out_csv} ({len(out)} linhas)")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        sys.exit(130)
-    except Exception as e:
-        # Não deixar o job falhar: imprimir e sair com sucesso (pipeline usa `|| true`)
-        print(f"[theoddsapi] ERRO não fatal: {e}")
-        # Tenta ainda assim produzir um CSV vazio para manter consistência
-        try:
-            # deduz rodada de argv se possível
-            arg_map = {args[i].lstrip("-"): args[i + 1] for i in range(len(sys.argv) - 1) if sys.argv[i].startswith("--")}
-            rodada = arg_map.get("rodada", "unknown")
-            _, out_csv = resolve_paths(rodada)
-            save_csv([], out_csv, rodada)
-        except Exception:
-            pass
-        # não propagar erro
-        sys.exit(0)
+    main()
