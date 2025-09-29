@@ -1,91 +1,53 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Relatório de risco para a rodada:
-- Checa odds presentes
-- Checa probabilidade bem-formada (p1+px+p2 ~ 1)
-- Marca flags úteis p/ o picker
+import os, argparse, pandas as pd, numpy as np
 
-Entrada esperada:
-  data/out/{rodada}/matches.csv           (match_id, home_team, away_team, ...)
-  data/out/{rodada}/probabilities_calibrated.csv  (ou probabilities.csv) (match_id, p1, px, p2)
-  data/out/{rodada}/odds.csv              (match_id, ...)
+def to_str_id(s):
+    if pd.isna(s):
+        return ""
+    return str(s).strip()
 
-Saída:
-  data/out/{rodada}/risk_report.csv
-"""
-
-import argparse
-import os
-import sys
-import pandas as pd
-import numpy as np
-
-def read_csv_force_str(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame()
-    df = pd.read_csv(path, dtype=str)  # força tudo como string
-    # converte probs se existirem
-    for col in ["p1","px","p2"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
-
-def main():
+def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    args = ap.parse_args()
+    ap.add_argument("--out", default=None)
+    return ap.parse_args()
 
-    base = f"data/out/{args.rodada}"
-    p_matches = os.path.join(base, "matches.csv")
-    p_probs_cal = os.path.join(base, "probabilities_calibrated.csv")
-    p_probs = os.path.join(base, "probabilities.csv")
-    p_odds = os.path.join(base, "odds.csv")
-    out_path = os.path.join(base, "risk_report.csv")
+def main():
+    args = parse_args()
+    rodada = args.rodada
+    outdir = f"data/out/{rodada}"
+    os.makedirs(outdir, exist_ok=True)
 
-    df_matches = read_csv_force_str(p_matches)
-    df_odds = read_csv_force_str(p_odds)
+    f_probs = f"{outdir}/probabilities_calibrated.csv"
+    if not os.path.exists(f_probs):
+        f_probs = f"{outdir}/probabilities.csv"  # fallback
 
-    # probabilities_calibrated preferência; se não existir, usa probabilities
-    df_probs = read_csv_force_str(p_probs_cal) if os.path.exists(p_probs_cal) else read_csv_force_str(p_probs)
+    if not os.path.exists(f_probs):
+        print(f"[risk] AVISO: não encontrei probabilities*.csv em {outdir}. Saída vazia.")
+        pd.DataFrame(columns=[
+            "match_id","risk_flag","reason"
+        ]).to_csv(args.out or f"{outdir}/risk_report.csv", index=False)
+        return
 
-    if df_matches.empty:
-        print("[risk] ERRO: matches.csv não encontrado/sem linhas.", flush=True)
-        sys.exit(1)
-    if df_probs.empty:
-        print("[risk] ERRO: probabilities(.csv|_calibrated.csv) não encontrado/sem linhas.", flush=True)
-        sys.exit(1)
-    if df_odds.empty:
-        print("[risk] ERRO: odds.csv não encontrado/sem linhas.", flush=True)
-        sys.exit(1)
+    probs = pd.read_csv(f_probs)
+    feats_path = f"{outdir}/features_base.csv"
+    feats = pd.read_csv(feats_path) if os.path.exists(feats_path) else pd.DataFrame(columns=["match_id"])
 
-    # Normaliza chave
-    for df in (df_matches, df_probs, df_odds):
-        if "match_id" not in df.columns:
-            print("[risk] ERRO: falta coluna 'match_id' em um dos arquivos.", flush=True)
-            sys.exit(1)
-        df["match_id"] = df["match_id"].astype(str)
+    # normaliza tipos
+    probs["match_id"] = probs["match_id"].apply(to_str_id)
+    feats["match_id"] = feats["match_id"].apply(to_str_id)
 
-    # Merge
-    df = df_matches.merge(df_probs, on="match_id", how="left", suffixes=("",""))
-    df = df.merge(df_odds, on="match_id", how="left", suffixes=("","_odds"))
+    df = probs.merge(feats[["match_id","k1","kx","k2"]], on="match_id", how="left")
 
-    # Regras de risco
-    df["risk_missing_odds"] = df.filter(like="_odds").isna().all(axis=1).astype(int)
-    df["risk_missing_probs"] = df[["p1","px","p2"]].isna().any(axis=1).astype(int)
-    df["sum_probs"] = df[["p1","px","p2"]].sum(axis=1)
-    df["risk_bad_calibration"] = ((df["sum_probs"] < 0.98) | (df["sum_probs"] > 1.02)).astype(int)
+    # Exemplo simples de checagem: odds ausentes -> risco
+    df["risk_flag"] = np.where(df[["k1","kx","k2"]].isna().any(axis=1), 1, 0)
+    df["reason"] = np.where(df["risk_flag"]==1, "Sem odds completas (k1/kx/k2) no join_features", "")
 
-    # Score simples
-    df["risk_score"] = df[["risk_missing_odds","risk_missing_probs","risk_bad_calibration"]].sum(axis=1)
-
-    keep_cols = [c for c in ["match_id","home_team","away_team","p1","px","p2","sum_probs",
-                             "risk_missing_odds","risk_missing_probs","risk_bad_calibration","risk_score"]
-                 if c in df.columns]
-    df_out = df[keep_cols].copy()
-    df_out.to_csv(out_path, index=False)
-    print(f"[risk] OK -> {out_path} ({len(df_out)} linhas)", flush=True)
+    out = args.out or f"{outdir}/risk_report.csv"
+    df[["match_id","risk_flag","reason"]].to_csv(out, index=False)
+    print(f"[risk] OK -> {out} ({len(df)} linhas)")
 
 if __name__ == "__main__":
     main()
