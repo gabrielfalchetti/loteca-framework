@@ -1,25 +1,6 @@
 {
-  "Premier League": "soccer_epl",
-  "England Premier League": "soccer_epl",
-  "EPL": "soccer_epl",
-
-  "Serie A": "soccer_italy_serie_a",
-  "Italy Serie A": "soccer_italy_serie_a",
-  "Italian Serie A": "soccer_italy_serie_a",
-
-  "Primeira Liga": "soccer_portugal_primeira_liga",
-  "Liga Portugal": "soccer_portugal_primeira_liga",
-  "Portugal Primeira Liga": "soccer_portugal_primeira_liga",
-
-  "Brasileirão Série A": "soccer_brazil_campeonato",
-  "Brazil Serie A": "soccer_brazil_campeonato",
-  "Serie A (Brazil)": "soccer_brazil_campeonato",
-
-  "Copa do Brasil": "soccer_brazil_cup",
-
-  "La Liga": "soccer_spain_la_liga",
-  "Spain La Liga": "soccer_spain_la_liga",
-
-  "Serie B": "soccer_italy_serie_b",
-  "Italy Serie B": "soccer_italy_serie_b"
+  "BR-1": "soccer_brazil_cup",
+  "BR-2": "soccer_brazil_serie_b",
+  "BR-3": "soccer_brazil_serie_b",
+  "BR-4": "soccer_brazil_serie_b"
 }
