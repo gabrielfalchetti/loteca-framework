@@ -1,27 +1,24 @@
 # utils/match_normalize.py
-# Normalização de nomes e aliases recorrentes do Brasil, + fuzzy helper.
-
 from __future__ import annotations
 import unicodedata, re, difflib
 from typing import List, Dict
 
 ALIASES: Dict[str, List[str]] = {
-    "america mineiro": ["america mg", "america-mg", "america futebol clube mg", "america"],
-    "chapecoense": ["chapecoense sc", "associacao chapecoense de futebol", "chapeco"],
-    "avai": ["avai fc", "avai sc", "avai futebol clube", "avai-sc"],
-    "volta redonda": ["volta redonda rj", "volta redonda fc", "volta redonda futebol clube"],
-    "sao paulo": ["sao paulo fc", "sao paulo futebol clube", "spfc"],
-    "ceara": ["ceara sc", "ceara sporting club"],
-    "amazonas": ["amazonas fc", "amazonas futebol clube"],
-    "atletico mineiro": ["atletico mg", "clube atletico mineiro", "cam", "atletico-mg"],
-    "atletico paranaense": ["athletico pr", "athletico paranaense", "cap", "athletico-pr", "atletico-pr"],
-    # adicione conforme for encontrando
+    "america mineiro": ["america mg","america-mg","america futebol clube mg","america"],
+    "chapecoense": ["chapecoense sc","associacao chapecoense de futebol","chapeco"],
+    "avai": ["avai fc","avai sc","avai futebol clube","avai-sc"],
+    "volta redonda": ["volta redonda rj","volta redonda fc","volta redonda futebol clube"],
+    "sao paulo": ["sao paulo fc","sao paulo futebol clube","spfc"],
+    "ceara": ["ceara sc","ceara sporting club"],
+    "amazonas": ["amazonas fc","amazonas futebol clube"],
+    "atletico mineiro": ["atletico mg","clube atletico mineiro","cam","atletico-mg"],
+    "atletico paranaense": ["athletico pr","athletico paranaense","cap","athletico-pr","atletico-pr"],
 }
 
 def canonical(name: str) -> str:
-    n = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
-    n = re.sub(r"[^a-z0-9 ]+", " ", n)
-    n = re.sub(r"\b(ec|fc|afc|sc|ac|esporte clube|futebol clube)\b", "", n)
+    n = unicodedata.normalize("NFKD", name).encode("ascii","ignore").decode("ascii").lower()
+    n = re.sub(r"[^a-z0-9 ]+"," ", n)
+    n = re.sub(r"\b(ec|fc|afc|sc|ac|esporte clube|futebol clube)\b","", n)
     n = " ".join(n.split())
     for can, alts in ALIASES.items():
         if n == can or n in alts:
@@ -29,6 +26,7 @@ def canonical(name: str) -> str:
     return n
 
 def fuzzy_match(target: str, candidates: List[str], threshold: float = 0.92) -> str | None:
+    import difflib
     t = canonical(target)
     cands = list({canonical(c) for c in candidates})
     best, score = None, -1.0
