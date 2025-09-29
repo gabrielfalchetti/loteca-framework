@@ -4,23 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       rodada:
-        description: 'Identificador da rodada (ex: 2025-09-27_1213). Se vazio, será detectado automaticamente de data/in/*'
-        required: false
-        default: ''
+        description: "Rodada ex: 2025-09-27_1213"
+        required: true
   push:
-    branches:
-      - main
-    paths:
-      - 'scripts/**'
-      - 'data/**'
-      - '.github/workflows/end2end.yml'
-      - 'requirements.txt'
+    branches: [ main ]
 
 jobs:
   end2end:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
-      PYTHONUNBUFFERED: "1"
+      RODADA: ${{ github.event.inputs.rodada }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
@@ -34,93 +27,77 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalar dependências
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Hotfix de merges inseguros (opcional)
+      - name: Patch merge hotfix (idempotente)
+        run: python scripts/patch_merge_hotfix.py || true
+
+      - name: Verifica entrada da rodada
+        if: ${{ env.RODADA != '' }}
         run: |
-          python scripts/patch_merge_hotfix.py || true
+          echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
 
-      - name: Definir RODADA e preparar diretórios
-        shell: bash
-        run: |
-          if [ -n "${{ github.event.inputs.rodada }}" ]; then
-            RODADA_IN="${{ github.event.inputs.rodada }}"
-          else
-            # pega a primeira subpasta de data/in/*
-            RODADA_IN="$(basename "$(ls -d data/in/* | head -n1)")"
-          fi
+      - name: W&B login
+        run: python -m wandb login "${WANDB_API_KEY}" --relogin || true
 
-          if [ -z "$RODADA_IN" ] || [ ! -f "data/in/$RODADA_IN/matches_source.csv" ]; then
-            echo "ERRO: não foi possível detectar a rodada ou arquivo data/in/<RODADA>/matches_source.csv não existe."
-            exit 1
-          fi
+      # -------- Odds (ok mesmo sem credencial – gera CSV vazio) --------
+      - name: TheOddsAPI (safe)
+        run: python scripts/ingest_odds_theoddsapi_safe.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug || true
 
-          echo "RODADA=$RODADA_IN" >> "$GITHUB_ENV"
-          mkdir -p "data/in/$RODADA_IN" "data/out/$RODADA_IN" "artifacts/$RODADA_IN"
-          echo "Entrada OK: data/in/$RODADA_IN/matches_source.csv"
+      - name: RapidAPI API-Football
+        run: python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug || true
 
-      - name: Login W&B
-        run: |
-          python -m wandb login "${WANDB_API_KEY}" --relogin || true
-          echo "[wandb] login executado"
+      - name: Odds de consenso
+        run: python scripts/ingest_odds.py --rodada "$RODADA"
 
-      # ===== ODDS =====
-      - name: Ingest odds (TheOddsAPI) — SAFE
-        run: |
-          python scripts/ingest_odds_theoddsapi_safe.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug || true
-
-      - name: Ingest odds (API-Football via RapidAPI)
-        run: |
-          python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug
-
-      - name: Consolidar odds (consensus)
-        run: |
-          python scripts/ingest_odds.py --rodada "$RODADA"
-
-      # ===== FEATURES / XG / PROBS / RISK =====
+      # -------- Features / XG --------
       - name: Join features
-        run: |
-          python scripts/join_features.py --rodada "$RODADA"
+        run: python scripts/join_features.py --rodada "$RODADA"
 
       - name: Compute xG
-        run: |
-          python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
+        run: python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
 
-      - name: Build probabilities (usa preds_bivar se existir)
-        shell: bash
+      # -------- Probabilidades --------
+      - name: Build probabilities (gera preds_bivar se faltar)
         run: |
           if [ -f "data/out/$RODADA/preds_bivar.csv" ]; then
-            python scripts/build_probs.py --rodada "$RODADA" --source "data/out/$RODADA/preds_bivar.csv"
-          else
             python scripts/build_probs.py --rodada "$RODADA" --source "data/out/$RODADA/features_base.csv"
+          else
+            python scripts/build_probs.py --rodada "$RODADA"
           fi
 
+      # -------- (3) Blend --------
+      - name: Blend de modelos (fallback seguro sem odds)
+        run: python scripts/blend_probs.py --rodada "$RODADA" --alpha 0.75 || true
+
+      # -------- (4) Calibração --------
+      - name: Calibração de probabilidades
+        run: python scripts/calibrate_probs.py --rodada "$RODADA" || true
+
+      # -------- Risk (corrigido) --------
       - name: Evaluate risk
         run: |
-          python scripts/evaluate_risk.py --rodada "$RODADA" \
-            --odds "data/out/$RODADA/odds.csv" \
-            --probs "data/out/$RODADA/probabilities.csv" \
-            --out "data/out/$RODADA/risk_report.csv"
+          python scripts/evaluate_risk.py --rodada "$RODADA"
 
-      # ===== NEWS / SCORECARD =====
+      # -------- (5) Picker Loteca --------
+      - name: Loteca picker (duplos/triplos)
+        run: python scripts/loteca_picker.py --rodada "$RODADA" --duplos 4 --triplos 2 || true
+
+      # -------- Notícias / Scorecard --------
       - name: Ingest news
-        run: |
-          python scripts/ingest_news.py --rodada "$RODADA" --provider auto --lang pt --regions br --days 7 --limit 6 --aliases "data/aliases_br.json" || true
+        run: python scripts/ingest_news.py --rodada "$RODADA" --provider auto --lang pt --regions br --days 7 --limit 6 --aliases "data/aliases_br.json" || true
 
       - name: Scorecard
-        run: |
-          python scripts/scorecard.py --rodada "$RODADA" --out "data/out/$RODADA/scorecard.html"
+        run: python scripts/scorecard.py --rodada "$RODADA" --out "data/out/$RODADA/scorecard.html"
 
-      # ===== ARTIFACTS =====
-      - name: Upload artifact (pacote da rodada)
+      # -------- Artefatos --------
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: loteca_${{ env.RODADA }}.zip
           path: |
-            data/out/${{ env.RODADA }}/**
-            data/in/${{ env.RODADA }}/matches_source.csv
-            artifacts/${{ env.RODADA }}/**
-          if-no-files-found: warn
+            data/out/${{ env.RODADA }}/*
+            data/in/${{ env.RODADA }}/*
