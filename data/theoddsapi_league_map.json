@@ -1,27 +1,75 @@
 {
-  "Copa do Brasil": {
-    "sport_key": "soccer_brazil_cup",
-    "aliases": ["Copa do Brasil", "Brazil Cup", "Copa Brasil"]
+  "br_serie_a": {
+    "sport_key": "soccer_brazil_serie_a",
+    "aliases": [
+      "Serie A",
+      "Série A",
+      "Brasileirao Serie A",
+      "Brasileirão Série A",
+      "Brazil Serie A",
+      "Campeonato Brasileiro A",
+      "Brasileirao A",
+      "Brasileirão A"
+    ]
   },
-  "Serie B (Brasil)": {
+  "br_serie_b": {
     "sport_key": "soccer_brazil_serie_b",
-    "aliases": ["Série B", "Serie B", "Brasileirao B", "Campeonato Brasileiro Serie B", "Brasileirão Série B"]
+    "aliases": [
+      "Serie B",
+      "Série B",
+      "Brasileirao Serie B",
+      "Brasileirão Série B",
+      "Brazil Serie B",
+      "Campeonato Brasileiro B",
+      "Brasileirao B",
+      "Brasileirão B"
+    ]
   },
-
-  "Premier League (Inglaterra)": {
+  "br_copa": {
+    "sport_key": "soccer_brazil_cup",
+    "aliases": [
+      "Copa do Brasil",
+      "Copa Brasil",
+      "Brazil Cup",
+      "Copa do Brasil 2025",
+      "Copa do Brasil (Knockout)"
+    ]
+  },
+  "eng_premier": {
     "sport_key": "soccer_epl",
-    "aliases": ["Premier League", "English Premier League", "EPL", "Inglaterra - Premier League"]
+    "aliases": [
+      "Premier League",
+      "EPL",
+      "Inglaterra Premier League",
+      "English Premier League"
+    ]
   },
-  "Serie A (Itália)": {
+  "ita_serie_a": {
     "sport_key": "soccer_italy_serie_a",
-    "aliases": ["Serie A", "Italy Serie A", "Itália - Serie A", "Italian Serie A"]
+    "aliases": [
+      "Serie A (IT)",
+      "Italy Serie A",
+      "Itália Serie A",
+      "Serie A Italiana"
+    ]
   },
-  "La Liga (Espanha)": {
-    "sport_key": "soccer_spain_la_liga",
-    "aliases": ["La Liga", "LaLiga", "Spain La Liga", "Espanha - La Liga"]
-  },
-  "Primeira Liga (Portugal)": {
+  "por_primeira": {
     "sport_key": "soccer_portugal_primeira_liga",
-    "aliases": ["Primeira Liga", "Liga Portugal", "Liga NOS", "Portugal Primeira Liga", "Liga Portugal Betclic"]
+    "aliases": [
+      "Primeira Liga",
+      "Liga Portugal",
+      "Liga NOS",
+      "Portugal Primeira Liga",
+      "Liga Portuguesa"
+    ]
+  },
+  "esp_laliga": {
+    "sport_key": "soccer_spain_la_liga",
+    "aliases": [
+      "La Liga",
+      "LaLiga",
+      "Espanha La Liga",
+      "Spain La Liga"
+    ]
   }
 }
