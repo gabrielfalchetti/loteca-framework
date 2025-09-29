@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 # HOTFIX de import p/ end2end
-import sys
+import sys, json
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import argparse, csv
+import argparse, csv, datetime as dt
 from typing import Dict, Any, List
 from utils.apifootball import resolve_league_id, resolve_current_season, find_fixture_id, fetch_odds_by_fixture, ApiFootballError
 from utils.match_normalize import canonical
@@ -23,8 +23,7 @@ def read_matches(path: Path) -> List[Dict[str, str]]:
         reader = csv.DictReader(f)
         needed = {"match_id","home","away"}
         if not needed.issubset(reader.fieldnames or []):
-            print("Error: matches_source.csv precisa de colunas: match_id,home,away[,date].")
-            raise SystemExit(2)
+            print("Error: matches_source.csv precisa de colunas: match_id,home,away[,date]."); raise SystemExit(2)
         rows.extend(reader)
     return rows
 
@@ -57,9 +56,10 @@ def main():
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
+    ts = dt.datetime.utcnow().isoformat()
     base_in = Path("data/in") / args.rodada
     base_out = Path("data/out") / args.rodada
-    base_out.mkdir(parents=True, exist_ok=True)
+    base_dbg = base_out / "debug"; base_dbg.mkdir(parents=True, exist_ok=True)
 
     matches = read_matches(base_in / "matches_source.csv")
 
@@ -67,11 +67,17 @@ def main():
     for lname in LEAGUES:
         try:
             lid = resolve_league_id(country="Brazil", league_name=lname)
-            leagues[lname] = lid; seasons[lname] = resolve_current_season(lid)
+            leagues[lname] = lid
+            seasons[lname] = resolve_current_season(lid)
         except Exception as e:
             print(f"[apifootball] AVISO: não consegui resolver {lname}: {e}")
+    if args.debug:
+        (base_dbg / "apifootball_leagues_seasons.json").write_text(
+            json.dumps({"leagues": leagues, "seasons": seasons, "ts": ts}, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     collected: List[Dict[str, Any]] = []; unmatched: List[Dict[str, Any]] = []
+    fixture_map: Dict[str, int] = {}
 
     for m in matches:
         date_iso = infer_date_iso(m)
@@ -82,13 +88,12 @@ def main():
             try:
                 fixture_id = find_fixture_id(date_iso, m["home"], m["away"], lid, season)
                 if fixture_id:
-                    if args.debug:
-                        print(f"[apifootball] {m['match_id']} → fixture={fixture_id} ({lname} {season})")
+                    fixture_map[m["match_id"]] = fixture_id
                     break
             except ApiFootballError as e:
                 print(f"[apifootball] AVISO find_fixture_id {lname}: {e}")
         if not fixture_id:
-            unmatched.append({"match_id": m["match_id"], "home": m["home"], "away": m["away"], "motivo": "fixture_nao_encontrado"})
+            unmatched.append({"match_id": m["match_id"], "home": m["home"], "away": m["away"], "date": date_iso, "motivo": "fixture_nao_encontrado"})
             continue
 
         try:
@@ -96,7 +101,7 @@ def main():
             flat = flatten_apifootball_odds(resp)
             if not flat:
                 print(f"[apifootball] sem odds p/ {m['match_id']} '{m['home']}' vs '{m['away']}'")
-                unmatched.append({"match_id": m["match_id"], "home": m["home"], "away": m["away"], "motivo": "sem_odds_no_fixture"})
+                unmatched.append({"match_id": m["match_id"], "home": m["home"], "away": m["away"], "date": date_iso, "motivo": "sem_odds_no_fixture"})
                 continue
             mh, ma = canonical(m["home"]), canonical(m["away"])
             for r in flat:
@@ -115,11 +120,14 @@ def main():
         wr = csv.DictWriter(f, fieldnames=["match_id","home","away","bookmaker","market","selection","price"])
         wr.writeheader(); wr.writerows(collected)
 
+    if args.debug:
+        (base_dbg / "apifootball_fixture_map.json").write_text(json.dumps({"fixture_map": fixture_map, "ts": ts}, ensure_ascii=False, indent=2), encoding="utf-8")
     if unmatched:
         um_csv = base_out / "unmatched_apifootball.csv"
         with um_csv.open("w", newline="", encoding="utf-8") as f:
-            wr = csv.DictWriter(f, fieldnames=["match_id","home","away","motivo"])
+            wr = csv.DictWriter(f, fieldnames=["match_id","home","away","date","motivo"])
             wr.writeheader(); wr.writerows(unmatched)
+        (base_dbg / "apifootball_unmatched_report.json").write_text(json.dumps({"unmatched": unmatched, "ts": ts}, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[apifootball] AVISO: {len(unmatched)} sem odds/fixture → {um_csv}")
 
     print(f"[apifootball] OK -> {out_csv} ({len(collected)} linhas)")
