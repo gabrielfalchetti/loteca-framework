@@ -1,4 +1,4 @@
-name: end2end
+name: loteca_end2end
 
 on:
   workflow_dispatch:
@@ -6,13 +6,14 @@ on:
       rodada:
         description: "Rodada (ex: 2025-09-27_1213)"
         required: true
-  push:
+        default: "2025-09-27_1213"
 
 jobs:
   end2end:
     runs-on: ubuntu-latest
     env:
-      RODADA: ${{ github.event.inputs.rodada || '2025-09-27_1213' }}
+      # como só rodamos por workflow_dispatch, o input sempre existe
+      RODADA: ${{ github.event.inputs.rodada }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
@@ -36,13 +37,18 @@ jobs:
         run: echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
 
       - name: W&B login (opcional)
+        if: ${{ env.WANDB_API_KEY != '' }}
         run: python -m wandb login "${WANDB_API_KEY}" --relogin || true
 
       # ==== ODDS (sempre reais, fail-fast) ====
       - name: Ingest TheOddsAPI (SAFE)
+        env:
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: python scripts/ingest_odds_theoddsapi_safe.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug
 
       - name: Ingest API-Football RapidAPI (SAFE)
+        env:
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         run: python scripts/ingest_odds_apifootball_rapidapi_safe.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug
 
       - name: Consenso de odds (fail se nenhum provedor)
@@ -56,11 +62,7 @@ jobs:
         run: python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
 
       - name: Build probabilities
-        run: |
-          if [ -f "data/out/$RODADA/preds_bivar.csv" ]; then
-            echo "Usando preds_bivar..."
-          fi
-          python scripts/build_probs.py --rodada "$RODADA"
+        run: python scripts/build_probs.py --rodada "$RODADA"
 
       - name: Blend probabilities
         run: python scripts/blend_probs.py --rodada "$RODADA" --alpha 0.75 || true
@@ -84,5 +86,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: loteca_${{ env.RODADA }}.zip
-          path: |
-            data/out/${{ env.RODADA }}/**
+          path: data/out/${{ env.RODADA }}
