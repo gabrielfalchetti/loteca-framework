@@ -9,7 +9,9 @@
       "Brazil Serie A",
       "Campeonato Brasileiro A",
       "Brasileirao A",
-      "Brasileirão A"
+      "Brasileirão A",
+      "Serie A Brasil",
+      "Brasileirao"
     ]
   },
   "br_serie_b": {
@@ -22,7 +24,28 @@
       "Brazil Serie B",
       "Campeonato Brasileiro B",
       "Brasileirao B",
-      "Brasileirão B"
+      "Brasileirão B",
+      "Serie B Brasil"
+    ]
+  },
+  "br_serie_c": {
+    "sport_key": "soccer_brazil_serie_c",
+    "aliases": [
+      "Serie C",
+      "Série C",
+      "Brazil Serie C",
+      "Campeonato Brasileiro C",
+      "Serie C Brasil"
+    ]
+  },
+  "br_serie_d": {
+    "sport_key": "soccer_brazil_serie_d",
+    "aliases": [
+      "Serie D",
+      "Série D",
+      "Brazil Serie D",
+      "Campeonato Brasileiro D",
+      "Serie D Brasil"
     ]
   },
   "br_copa": {
@@ -31,45 +54,7 @@
       "Copa do Brasil",
       "Copa Brasil",
       "Brazil Cup",
-      "Copa do Brasil 2025",
-      "Copa do Brasil (Knockout)"
-    ]
-  },
-  "eng_premier": {
-    "sport_key": "soccer_epl",
-    "aliases": [
-      "Premier League",
-      "EPL",
-      "Inglaterra Premier League",
-      "English Premier League"
-    ]
-  },
-  "ita_serie_a": {
-    "sport_key": "soccer_italy_serie_a",
-    "aliases": [
-      "Serie A (IT)",
-      "Italy Serie A",
-      "Itália Serie A",
-      "Serie A Italiana"
-    ]
-  },
-  "por_primeira": {
-    "sport_key": "soccer_portugal_primeira_liga",
-    "aliases": [
-      "Primeira Liga",
-      "Liga Portugal",
-      "Liga NOS",
-      "Portugal Primeira Liga",
-      "Liga Portuguesa"
-    ]
-  },
-  "esp_laliga": {
-    "sport_key": "soccer_spain_la_liga",
-    "aliases": [
-      "La Liga",
-      "LaLiga",
-      "Espanha La Liga",
-      "Spain La Liga"
+      "Copa do Brasil 2025"
     ]
   }
 }
