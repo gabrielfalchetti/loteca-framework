@@ -2,124 +2,97 @@
 # -*- coding: utf-8 -*-
 
 """
-ingest_odds.py — consolida odds de múltiplas fontes (TheOddsAPI, API-Football)
-- left-join por (home_n, away_n) com proteção a ausências
-- consenso simples por média harmônica das cotações disponíveis
-- telemetria opcional (WANDB)
+Gera odds de consenso a partir dos arquivos:
+  data/out/{rodada}/odds_theoddsapi.csv
+  data/out/{rodada}/odds_apifootball.csv
 
-Saída:
-  data/out/<RODADA>/odds.csv
+Regras:
+- Pelo menos um provedor precisa ter retornado odds (fail-fast caso contrário)
+- Concatena e (opcional) aplica desvig/peso/mediana (placeholder simples aqui)
+- Salva em data/out/{rodada}/odds.csv
 """
 
-from __future__ import annotations
-import os, sys, math, argparse, unicodedata
-from typing import List
+import argparse
+import os
+import sys
 import pandas as pd
-import numpy as np
 
-def _norm(s: str) -> str:
-    if s is None or (isinstance(s, float) and math.isnan(s)):
-        return ""
-    import unicodedata
-    s = str(s)
-    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
-    s = s.lower().strip().replace(".", " ")
-    return " ".join(s.split())
+def read_if_exists(path: str) -> pd.DataFrame:
+    if os.path.exists(path):
+        try:
+            return pd.read_csv(path)
+        except Exception as e:
+            print(f"[consensus] ERRO ao ler {path}: {e}", flush=True)
+            sys.exit(1)
+    return pd.DataFrame()
 
-def _wandb_init_safe(project: str | None, name: str, config: dict):
-    try:
-        import wandb  # type: ignore
-        if not os.getenv("WANDB_API_KEY","").strip(): return None
-        return wandb.init(project=project or "loteca", name=name, config=config, reinit=True)
-    except Exception:
-        return None
+def simple_consensus(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assume colunas mínimas:
+      match_id, home_team, away_team, market (1X2), book, o1, ox, o2
+    Se o seu esquema for diferente, adapte aqui.
+    """
+    if df.empty:
+        return df
 
-def _wandb_log_safe(run, data: dict):
-    try:
-        if run: run.log(data)
-    except Exception:
-        pass
+    # Remove linhas sem odds
+    keep_cols = [c for c in df.columns if c.lower() in {"match_id","home_team","away_team","market","o1","ox","o2"}]
+    missing = {"match_id","o1","ox","o2"} - set([c.lower() for c in df.columns])
+    if missing:
+        # Se quiser ser tolerante, só avisa:
+        print(f"[consensus] AVISO: colunas esperadas ausentes: {missing}. Mantendo todas as colunas originais.", flush=True)
+        return df
 
-def load_matches(rodada: str) -> pd.DataFrame:
-    p = os.path.join("data","in",rodada,"matches_source.csv")
-    if not os.path.isfile(p):
-        raise FileNotFoundError(f"[consensus] matches_source ausente: {p}")
-    df = pd.read_csv(p)
-    if "match_id" not in df.columns:
-        df.insert(0, "match_id", range(1, len(df)+1))
-    df["home_n"] = df["home"].map(_norm)
-    df["away_n"] = df["away"].map(_norm)
-    return df
+    # Desvig simplificado (placeholder): converter odds -> probs e renormalizar
+    def odds_to_probs(row):
+        try:
+            p1 = 1.0/float(row["o1"])
+            px = 1.0/float(row["ox"])
+            p2 = 1.0/float(row["o2"])
+            s = p1 + px + p2
+            return pd.Series({"p1": p1/s, "px": px/s, "p2": p2/s})
+        except Exception:
+            return pd.Series({"p1": None, "px": None, "p2": None})
 
-def load_provider(path: str) -> pd.DataFrame:
-    if not os.path.isfile(path):
-        return pd.DataFrame(columns=["match_id","home","away","k1","kx","k2","source"])
-    df = pd.read_csv(path)
-    for c in ["home","away"]:
-        if c in df.columns:
-            df[c+"_n"] = df[c].map(_norm)
-    return df
-
-def harm_mean(vals: List[float]) -> float | None:
-    arr = [v for v in vals if v and v>0]
-    if not arr: return None
-    inv = sum(1.0/v for v in arr)
-    if inv <= 0: return None
-    return len(arr)/inv
+    probs = df.apply(odds_to_probs, axis=1)
+    df_probs = pd.concat([df, probs], axis=1)
+    # Agrega por match_id tirando média (ou mediana)
+    agg = df_probs.groupby("match_id", as_index=False)[["p1","px","p2"]].mean()
+    # Mantém nomes
+    first = df.drop_duplicates("match_id")[["match_id","home_team","away_team"]] if "home_team" in df.columns and "away_team" in df.columns else agg[["match_id"]].copy()
+    out = first.merge(agg, on="match_id", how="right")
+    return out
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
     args = ap.parse_args()
 
-    rodada = args.rodada
-    out_dir = os.path.join("data","out",rodada); os.makedirs(out_dir, exist_ok=True)
-    to_path = os.path.join(out_dir, "odds_theoddsapi.csv")
-    af_path = os.path.join(out_dir, "odds_apifootball.csv")
-    out_path = os.path.join(out_dir, "odds.csv")
+    base = f"data/out/{args.rodada}"
+    p_theodds = os.path.join(base, "odds_theoddsapi.csv")
+    p_rapid   = os.path.join(base, "odds_apifootball.csv")
 
-    matches = load_matches(rodada)
-    to_df = load_provider(to_path)
-    af_df = load_provider(af_path)
+    df_list = []
+    for name, p in [("theoddsapi", p_theodds), ("apifootball", p_rapid)]:
+        df = read_if_exists(p)
+        if not df.empty:
+            df["provider"] = name
+            df_list.append(df)
 
-    # merge por (home_n, away_n)
-    merged = matches[["match_id","home","away","home_n","away_n"]].copy()
+    if not df_list:
+        print("[consensus] ERRO: nenhum provedor retornou odds. Aborte.", flush=True)
+        sys.exit(1)
 
-    for prov, df in [("TheOddsAPI", to_df), ("APIFootball", af_df)]:
-        if df.empty: continue
-        df2 = df.rename(columns={"k1": f"k1_{prov}", "kx": f"kx_{prov}", "k2": f"k2_{prov}"})
-        merged = merged.merge(
-            df2[["home_n","away_n",f"k1_{prov}",f"kx_{prov}",f"k2_{prov}"]],
-            on=["home_n","away_n"], how="left"
-        )
+    df_all = pd.concat(df_list, ignore_index=True)
+    consensus = simple_consensus(df_all)
 
-    # consenso (média harmônica por coluna)
-    ks = []
-    out_rows = []
-    for _, r in merged.iterrows():
-        k1_vals = [r.get("k1_TheOddsAPI"), r.get("k1_APIFootball")]
-        kx_vals = [r.get("kx_TheOddsAPI"), r.get("kx_APIFootball")]
-        k2_vals = [r.get("k2_TheOddsAPI"), r.get("k2_APIFootball")]
-        k1 = harm_mean([float(x) for x in k1_vals if pd.notna(x)])
-        kx = harm_mean([float(x) for x in kx_vals if pd.notna(x)])
-        k2 = harm_mean([float(x) for x in k2_vals if pd.notna(x)])
-        out_rows.append({"match_id": r["match_id"], "home": r["home"], "away": r["away"], "k1": k1, "kx": kx, "k2": k2})
+    out_path = os.path.join(base, "odds.csv")
+    consensus.to_csv(out_path, index=False)
+    print(f"[consensus] odds de consenso -> {out_path} (n={len(consensus)})", flush=True)
 
-    out = pd.DataFrame(out_rows, columns=["match_id","home","away","k1","kx","k2"])
-    out.to_csv(out_path, index=False)
-    print(f"[consensus] odds de consenso -> {out_path} (n={len(out)})")
-
-    flag_to = 1 if (not to_df.empty) else 0
-    flag_rapid = 1 if (not af_df.empty) else 0
-    print(f"[audit] Odds usadas: TheOddsAPI={flag_to} RapidAPI={flag_rapid}")
-
-    # W&B
-    run = _wandb_init_safe(os.getenv("WANDB_PROJECT") or "loteca", f"consensus_{rodada}", {})
-    _wandb_log_safe(run, {"consensus_rows": len(out), "theodds_used": flag_to, "rapidapi_used": flag_rapid})
-    try:
-        if run: run.finish()
-    except Exception:
-        pass
+    # Telemetria resumida
+    used = ", ".join(sorted(set(df_all["provider"].unique())))
+    print(f"[audit] Odds usadas: {used}", flush=True)
 
 if __name__ == "__main__":
     main()
