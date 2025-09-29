@@ -4,18 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       rodada:
-        description: "Rodada (ex: 2025-09-27_1213)"
+        description: "Identificador da rodada (ex: 2025-09-27_1213)"
         required: true
-        default: "2025-09-27_1213"
+        type: string
+
+env:
+  RODADA: ${{ github.event.inputs.rodada }}
+  WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+  THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+  RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
 
 jobs:
   end2end:
     runs-on: ubuntu-latest
-    env:
-      RODADA: ${{ github.event.inputs.rodada }}
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,41 +25,69 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install deps
+      - name: Install requirements
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Hotfix merges (tolerante)
+      - name: Hotfix merge (opcional)
         run: |
           python scripts/patch_merge_hotfix.py || true
 
-      - name: Validate input
+      - name: Validar entrada (arquivo da rodada)
         run: |
+          set -e
           echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
+          test -f "data/in/${RODADA}/matches_source.csv"
 
-      - name: WandB login (opcional)
+      # ✅ Checa se as secrets foram definidas (sem vazar valores)
+      - name: Check required secrets
         run: |
-          if [ -n "$WANDB_API_KEY" ]; then
-            python -m wandb login "$WANDB_API_KEY" --relogin || true
+          set -e
+          missing=0
+          for v in THEODDS_API_KEY RAPIDAPI_KEY; do
+            if [ -z "${!v}" ]; then
+              echo "::error title=Missing secret::$v não está definido em Settings > Secrets and variables > Actions."
+              missing=1
+            else
+              echo "$v: OK"
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            exit 1
           fi
 
-      # ==== ODDS REAIS (FAIL-FAST se nenhum provedor entregar) ====
+      - name: W&B login (opcional)
+        run: |
+          python -m wandb login "${WANDB_API_KEY}" --relogin || true
+          echo "[wandb] login executado"
+
+      # 🔒 TheOddsAPI: wrapper que falha se não houver chave ou retorno vazio
       - name: Ingest TheOddsAPI (SAFE)
         run: |
           python scripts/ingest_odds_theoddsapi_safe.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug
 
-      - name: Ingest API-Football RapidAPI (SAFE)
+      # API-Football (RapidAPI) – odds reais
+      - name: Ingest RapidAPI (API-Football)
         run: |
-          python scripts/ingest_odds_apifootball_rapidapi_safe.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug
+          python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug || true
 
-      - name: Consenso de odds (erro se nenhum provedor)
+      # Consolida odds (sem simulação). Se nenhum provedor trouxe odds, falha.
+      - name: Build consensus odds
         run: |
+          set -e
           python scripts/ingest_odds.py --rodada "$RODADA"
+          OUT="data/out/$RODADA/odds.csv"
+          echo "[consensus] Verificando odds em $OUT"
+          test -f "$OUT"
+          # Precisa ter pelo menos 1 linha de dados além do cabeçalho
+          if [ "$(tail -n +2 "$OUT" | wc -l)" -lt 1 ]; then
+            echo "::error title=Sem odds reais::Nenhuma odd encontrada nos provedores (TheOddsAPI/RapidAPI)."
+            exit 1
+          fi
 
-      # ==== FEATURES / MODEL ====
       - name: Join features
         run: |
           python scripts/join_features.py --rodada "$RODADA"
@@ -66,36 +96,49 @@ jobs:
         run: |
           python scripts/compute_xg.py --rodada "$RODADA" --out "data/out/$RODADA/xg.csv"
 
-      - name: Build probabilities
+      - name: Build probabilities (bivar)
         run: |
+          # Se existir preds_bivar.csv, usa; se não, gera automaticamente
+          if [ -f "data/out/$RODADA/preds_bivar.csv" ]; then
+            echo "[build_probs] usando preds_bivar existente"
+          fi
           python scripts/build_probs.py --rodada "$RODADA"
 
-      - name: Blend probabilities (tolerante)
+      - name: Blend probabilities
         run: |
           python scripts/blend_probs.py --rodada "$RODADA" --alpha 0.75 || true
 
-      - name: Calibrate probabilities (tolerante)
+      - name: Calibrate probabilities
         run: |
           python scripts/calibrate_probs.py --rodada "$RODADA" || true
 
-      - name: Evaluate risk
+      - name: Evaluate risk (fail se odds faltarem)
         run: |
+          set -e
           python scripts/evaluate_risk.py --rodada "$RODADA"
+          RR="data/out/$RODADA/risk_report.csv"
+          test -f "$RR"
+          if [ "$(tail -n +2 "$RR" | wc -l)" -lt 1 ]; then
+            echo "::error title=Risk vazio::O relatório de risco não gerou linhas. Verifique joins/ids."
+            exit 1
+          fi
 
-      - name: Loteca picker (tolerante)
+      - name: Loteca picker
         run: |
           python scripts/loteca_picker.py --rodada "$RODADA" --duplos 4 --triplos 2 || true
 
-      - name: News (opcional)
+      - name: Ingest news (opcional)
         run: |
           python scripts/ingest_news.py --rodada "$RODADA" --provider auto --lang pt --regions br --days 7 --limit 6 --aliases "data/aliases_br.json" || true
 
-      - name: Scorecard
+      - name: Scorecard (HTML)
         run: |
           python scripts/scorecard.py --rodada "$RODADA" --out "data/out/$RODADA/scorecard.html"
 
-      - name: Upload artifact (data/out)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: loteca_${{ env.RODADA }}.zip
-          path: data/out/${{ env.RODADA }}
+          path: |
+            data/out/${{ env.RODADA }}/
+            data/in/${{ env.RODADA }}/matches_source.csv
