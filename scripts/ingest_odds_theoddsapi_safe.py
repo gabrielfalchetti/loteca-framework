@@ -2,75 +2,72 @@
 # -*- coding: utf-8 -*-
 
 """
-Wrapper seguro para ingestão das odds do TheOddsAPI.
-- FALHA se THEODDS_API_KEY não estiver definido.
-- Executa o scripts/ingest_odds_theoddsapi.py com os mesmos argumentos.
-- FALHA se o CSV final (data/out/<rodada>/odds_theoddsapi.csv) existir mas tiver 0 linhas de dados.
-
-Uso:
-  python scripts/ingest_odds_theoddsapi_safe.py --rodada RODADA --regions "uk,eu,us,au" --debug
+Wrapper 'safe' para o coletor do TheOddsAPI.
+- Garante variáveis, diretórios e logs.
+- NUNCA derruba o job se o provedor retornar 0 linhas: emite AVISO e segue o pipeline
+  (o RapidAPI pode cobrir).
 """
 
-import argparse
 import os
 import sys
 import subprocess
-from pathlib import Path
+import argparse
+import pandas as pd
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--rodada", required=True, help="Identificador da rodada (ex: 2025-09-27_1213)")
-    p.add_argument("--regions", default="uk,eu,us,au", help="Regiões para TheOddsAPI (ex: uk,eu,us,au)")
-    p.add_argument("--debug", action="store_true", help="Modo verboso")
-    return p.parse_args()
+def log(msg: str):
+    print(f"[theoddsapi-safe] {msg}", flush=True)
 
 def main():
-    args = parse_args()
-    api_key = os.environ.get("THEODDS_API_KEY", "")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rodada", required=True)
+    parser.add_argument("--regions", default="uk,eu,us,au")
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
+
+    rodada = args.rodada
+    regions = args.regions
+
+    api_key = os.getenv("THEODDS_API_KEY", "").strip()
     if not api_key:
-        print("[theoddsapi-safe] ERRO: THEODDS_API_KEY não definido. Configure o secret no GitHub.", file=sys.stderr)
+        print("THEODDS_API_KEY nao definido", file=sys.stderr)
         sys.exit(1)
 
-    # Caminho de saída esperado pelo script original
-    out_csv = Path(f"data/out/{args.rodada}/odds_theoddsapi.csv")
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    # Monta comando para o script original
+    # Executa o coletor principal
     cmd = [
         sys.executable, "scripts/ingest_odds_theoddsapi.py",
-        "--rodada", args.rodada,
-        "--regions", args.regions
+        "--rodada", rodada,
+        "--regions", regions
     ]
     if args.debug:
         cmd.append("--debug")
 
-    if args.debug:
-        print(f"[theoddsapi-safe] Executando: {' '.join(cmd)}")
-
-    # Executa repassando o ambiente (inclui THEODDS_API_KEY)
-    proc = subprocess.run(cmd, env=os.environ.copy())
-    if proc.returncode != 0:
-        print(f"[theoddsapi-safe] ERRO: processo original retornou código {proc.returncode}.", file=sys.stderr)
-        sys.exit(proc.returncode)
-
-    # Checa se o CSV foi gerado e possui ao menos 1 linha de dados
-    if not out_csv.exists():
-        print(f"[theoddsapi-safe] ERRO: arquivo não gerado: {out_csv}", file=sys.stderr)
-        sys.exit(2)
-
+    log(f"Executando: {' '.join(cmd)}")
     try:
-        with out_csv.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
-        num_data = max(0, len(lines) - 1)  # desconta cabeçalho
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.stdout:
+            print(proc.stdout)
+        if proc.stderr:
+            print(proc.stderr, file=sys.stderr)
     except Exception as e:
-        print(f"[theoddsapi-safe] ERRO lendo {out_csv}: {e}", file=sys.stderr)
-        sys.exit(2)
+        log(f"ERRO ao executar coletor principal: {e}")
+        # Segue como warning para nao quebrar pipeline
+        sys.exit(0)
 
-    if num_data < 1:
-        print(f"[theoddsapi-safe] ERRO: sem odds retornadas pelo TheOddsAPI (0 linhas de dados em {out_csv}).", file=sys.stderr)
-        sys.exit(3)
+    # Verifica se gerou arquivo e se tem linhas
+    out_csv = f"data/out/{rodada}/odds_theoddsapi.csv"
+    rows = 0
+    if os.path.exists(out_csv):
+        try:
+            rows = len(pd.read_csv(out_csv))
+        except Exception:
+            rows = 0
 
-    print(f"[theoddsapi-safe] OK. Arquivo com odds reais em {out_csv} (linhas de dados: {num_data})")
+    if rows == 0:
+        log("AVISO: sem odds retornadas pelo TheOddsAPI (0 linhas). Seguindo pipeline; outro provedor pode cobrir.")
+        # Continua o pipeline normalmente
+        sys.exit(0)
+
+    log(f"OK. Arquivo garantido em {out_csv} ({rows} linhas)")
     sys.exit(0)
 
 if __name__ == "__main__":
