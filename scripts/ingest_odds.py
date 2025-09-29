@@ -1,98 +1,108 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Gera odds de consenso a partir dos arquivos:
-  data/out/{rodada}/odds_theoddsapi.csv
-  data/out/{rodada}/odds_apifootball.csv
-
-Regras:
-- Pelo menos um provedor precisa ter retornado odds (fail-fast caso contrário)
-- Concatena e (opcional) aplica desvig/peso/mediana (placeholder simples aqui)
-- Salva em data/out/{rodada}/odds.csv
-"""
-
+import os, sys, csv, json, time
 import argparse
-import os
-import sys
+from datetime import datetime, timedelta, timezone
+import requests
 import pandas as pd
 
-def read_if_exists(path: str) -> pd.DataFrame:
-    if os.path.exists(path):
-        try:
-            return pd.read_csv(path)
-        except Exception as e:
-            print(f"[consensus] ERRO ao ler {path}: {e}", flush=True)
-            sys.exit(1)
-    return pd.DataFrame()
+API_BASE = "https://api.the-odds-api.com/v4"
 
-def simple_consensus(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Assume colunas mínimas:
-      match_id, home_team, away_team, market (1X2), book, o1, ox, o2
-    Se o seu esquema for diferente, adapte aqui.
-    """
-    if df.empty:
-        return df
-
-    # Remove linhas sem odds
-    keep_cols = [c for c in df.columns if c.lower() in {"match_id","home_team","away_team","market","o1","ox","o2"}]
-    missing = {"match_id","o1","ox","o2"} - set([c.lower() for c in df.columns])
-    if missing:
-        # Se quiser ser tolerante, só avisa:
-        print(f"[consensus] AVISO: colunas esperadas ausentes: {missing}. Mantendo todas as colunas originais.", flush=True)
-        return df
-
-    # Desvig simplificado (placeholder): converter odds -> probs e renormalizar
-    def odds_to_probs(row):
-        try:
-            p1 = 1.0/float(row["o1"])
-            px = 1.0/float(row["ox"])
-            p2 = 1.0/float(row["o2"])
-            s = p1 + px + p2
-            return pd.Series({"p1": p1/s, "px": px/s, "p2": p2/s})
-        except Exception:
-            return pd.Series({"p1": None, "px": None, "p2": None})
-
-    probs = df.apply(odds_to_probs, axis=1)
-    df_probs = pd.concat([df, probs], axis=1)
-    # Agrega por match_id tirando média (ou mediana)
-    agg = df_probs.groupby("match_id", as_index=False)[["p1","px","p2"]].mean()
-    # Mantém nomes
-    first = df.drop_duplicates("match_id")[["match_id","home_team","away_team"]] if "home_team" in df.columns and "away_team" in df.columns else agg[["match_id"]].copy()
-    out = first.merge(agg, on="match_id", how="right")
-    return out
-
-def main():
+def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    args = ap.parse_args()
+    ap.add_argument("--regions", default="uk,eu,us,au")
+    ap.add_argument("--markets", default="h2h")
+    ap.add_argument("--debug", action="store_true")
+    return ap.parse_args()
 
-    base = f"data/out/{args.rodada}"
-    p_theodds = os.path.join(base, "odds_theoddsapi.csv")
-    p_rapid   = os.path.join(base, "odds_apifootball.csv")
+def load_matches(rodada):
+    fn = f"data/in/{rodada}/matches_source.csv"
+    df = pd.read_csv(fn)
+    # campos obrigatórios
+    for col in ["match_id","home_team","away_team","sport_key_theoddsapi"]:
+        if col not in df.columns:
+            raise ValueError(f"Campo obrigatório ausente: {col}")
+    return df
 
-    df_list = []
-    for name, p in [("theoddsapi", p_theodds), ("apifootball", p_rapid)]:
-        df = read_if_exists(p)
-        if not df.empty:
-            df["provider"] = name
-            df_list.append(df)
+def fetch_odds_for_match(apikey, sport_key, home, away, regions, markets, debug=False):
+    # TheOddsAPI trabalha por sport_key, e retorna lista de jogos com "home_team"/"away_team".
+    params = {
+        "apiKey": apikey,
+        "regions": regions,
+        "markets": markets,
+        "oddsFormat": "decimal",
+        "dateFormat": "iso"
+    }
+    url = f"{API_BASE}/sports/{sport_key}/odds"
+    r = requests.get(url, params=params, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"TheOddsAPI error {r.status_code}: {r.text}")
+    data = r.json()
+    # match exato por nome (case-insensitive), normalizando
+    def norm(x): return x.strip().lower()
+    H, A = norm(home), norm(away)
+    rows = []
+    for ev in data:
+        if norm(ev.get("home_team","")) == H and norm(ev.get("away_team","")) == A:
+            # extrai h2h
+            for bk in ev.get("bookmakers", []):
+                for mk in bk.get("markets", []):
+                    if mk.get("key") != "h2h": 
+                        continue
+                    outcomes = mk.get("outcomes", [])
+                    rec = {"bookmaker": bk.get("title",""), "last_update": mk.get("last_update","")}
+                    # outcomes podem vir como [home,draw,away] variando
+                    for out in outcomes:
+                        k = out.get("name","").strip().lower()
+                        if k == norm(home):
+                            rec["home_price"] = out.get("price")
+                        elif k == "draw":
+                            rec["draw_price"] = out.get("price")
+                        elif k == norm(away):
+                            rec["away_price"] = out.get("price")
+                    rows.append(rec)
+    return rows
 
-    if not df_list:
-        print("[consensus] ERRO: nenhum provedor retornou odds. Aborte.", flush=True)
-        sys.exit(1)
+def main():
+    args = parse_args()
+    rodada = args.rodada
+    outdir = f"data/out/{rodada}"
+    os.makedirs(outdir, exist_ok=True)
+    apikey = os.getenv("THEODDS_API_KEY", "").strip()
+    if not apikey:
+        print("[theoddsapi] ERRO: THEODDS_API_KEY não definido.", file=sys.stderr)
+        sys.exit(2)
 
-    df_all = pd.concat(df_list, ignore_index=True)
-    consensus = simple_consensus(df_all)
+    dfm = load_matches(rodada)
+    all_rows = []
+    for _, m in dfm.iterrows():
+        mid = m["match_id"]
+        home = m["home_team"]
+        away = m["away_team"]
+        sport_key = m["sport_key_theoddsapi"]
+        try:
+            rows = fetch_odds_for_match(apikey, sport_key, home, away, args.regions, args.markets, args.debug)
+            for r in rows:
+                r["match_id"] = mid
+                r["home_team"] = home
+                r["away_team"] = away
+                r["sport_key"] = sport_key
+                all_rows.append(r)
+            if args.debug:
+                print(f"[theoddsapi] {mid}: {len(rows)} linhas")
+        except Exception as e:
+            print(f"[theoddsapi] AVISO {mid}: {e}", file=sys.stderr)
 
-    out_path = os.path.join(base, "odds.csv")
-    consensus.to_csv(out_path, index=False)
-    print(f"[consensus] odds de consenso -> {out_path} (n={len(consensus)})", flush=True)
-
-    # Telemetria resumida
-    used = ", ".join(sorted(set(df_all["provider"].unique())))
-    print(f"[audit] Odds usadas: {used}", flush=True)
+    out_path = f"{outdir}/odds_theoddsapi.csv"
+    if not all_rows:
+        # grava vazio mas sinaliza “sem odds”
+        pd.DataFrame(columns=["match_id","home_team","away_team","sport_key","bookmaker","last_update","home_price","draw_price","away_price"]).to_csv(out_path, index=False)
+        print(f"[theoddsapi] OK -> {out_path} (0 linhas)")
+        sys.exit(3)  # para o safe acusar “sem odds”
+    pd.DataFrame(all_rows).to_csv(out_path, index=False)
+    print(f"[theoddsapi] OK -> {out_path} ({len(all_rows)} linhas)")
 
 if __name__ == "__main__":
     main()
