@@ -125,10 +125,10 @@ def _ensure_match_id(df_probs: pd.DataFrame, matches_path: str) -> pd.DataFrame:
     need_away = "away" not in df_probs.columns
     if need_home or need_away:
         teams_from_self = _norm_teams(df_probs)
-        if need_home:
-            df_probs["home"] = teams_from_self["home"] if "home" in teams_from_self else ""
-        if need_away:
-            df_probs["away"] = teams_from_self["away"] if "away" in teams_from_self else ""
+        if need_home and "home" in teams_from_self:
+            df_probs["home"] = teams_from_self["home"]
+        if need_away and "away" in teams_from_self:
+            df_probs["away"] = teams_from_self["away"]
 
     if "match_id" in df_probs.columns:
         return df_probs
@@ -137,12 +137,15 @@ def _ensure_match_id(df_probs: pd.DataFrame, matches_path: str) -> pd.DataFrame:
     df_matches = _safe_read_csv(matches_path)
     if not df_matches.empty:
         teams_m = _norm_teams(df_matches)
-        df_m = pd.concat([df_matches.reset_index(drop=True), teams_m.reset_index(drop=True)], axis=1)
-        id_col = _pick(df_m, ["match_id", "id", "fixture_id"])
-        if id_col is None:
-            df_m["match_id"] = df_m["home"].astype(str) + "__" + df_m["away"].astype(str)
+        df_m = pd.DataFrame({
+            "home": teams_m.get("home", pd.Series([], dtype=str)),
+            "away": teams_m.get("away", pd.Series([], dtype=str)),
+        })
+        id_col = _pick(df_matches, ["match_id", "id", "fixture_id"])
+        if id_col is not None:
+            df_m["match_id"] = df_matches[id_col]
         else:
-            df_m["match_id"] = df_m[id_col]
+            df_m["match_id"] = df_m["home"].astype(str) + "__" + df_m["away"].astype(str)
         tmp = df_probs.merge(df_m[["home", "away", "match_id"]], on=["home", "away"], how="left")
         df_probs["match_id"] = tmp["match_id"]
 
@@ -154,15 +157,26 @@ def _ensure_match_id(df_probs: pd.DataFrame, matches_path: str) -> pd.DataFrame:
 
 def _norm_odds(df_odds: pd.DataFrame) -> pd.DataFrame:
     """
-    Normaliza para: ['match_id','home','away','k1','kx','k2'].
+    Normaliza para: ['match_id','home','away','k1','kx','k2'] sem criar colunas duplicadas.
     """
     if df_odds.empty:
         return pd.DataFrame(columns=["match_id", "home", "away", "k1", "kx", "k2"])
 
-    teams = _norm_teams(df_odds)
-    out = pd.concat([df_odds.reset_index(drop=True), teams.reset_index(drop=True)], axis=1)
+    # Identifica colunas já existentes de times (sem concatenar nada)
+    existing_h = _pick(df_odds, ["home", "mandante", "time_home", "team_home"])
+    existing_a = _pick(df_odds, ["away", "visitante", "time_away", "team_away"])
 
-    id_col = _pick(df_odds, ["match_id", "id", "fixture_id"])
+    if existing_h is not None and existing_a is not None:
+        home_series = df_odds[existing_h].astype(str).fillna("").str.strip()
+        away_series = df_odds[existing_a].astype(str).fillna("").str.strip()
+    else:
+        teams = _norm_teams(df_odds)
+        home_series = teams.get("home", pd.Series([], dtype=str))
+        away_series = teams.get("away", pd.Series([], dtype=str))
+
+    out = pd.DataFrame({"home": home_series, "away": away_series})
+
+    # Odds
     c_h = _pick(df_odds, ["k1", "home_odds", "odds_home", "o_home", "home_k", "khome", "kh"])
     c_x = _pick(df_odds, ["kx", "draw_odds", "odds_draw", "o_draw", "draw_k", "kdraw"])
     c_a = _pick(df_odds, ["k2", "away_odds", "odds_away", "o_away", "away_k", "kaway"])
@@ -171,11 +185,14 @@ def _norm_odds(df_odds: pd.DataFrame) -> pd.DataFrame:
     out["kx"] = pd.to_numeric(df_odds[c_x], errors="coerce") if c_x else np.nan
     out["k2"] = pd.to_numeric(df_odds[c_a], errors="coerce") if c_a else np.nan
 
+    # match_id
+    id_col = _pick(df_odds, ["match_id", "id", "fixture_id"])
     if id_col:
         out["match_id"] = df_odds[id_col]
     else:
         out["match_id"] = out["home"].astype(str) + "__" + out["away"].astype(str)
 
+    # Apenas as colunas padronizadas — sem duplicatas
     return out[["match_id", "home", "away", "k1", "kx", "k2"]]
 
 
@@ -253,7 +270,7 @@ def main() -> None:
     # Garante match_id sem duplicar colunas
     probs = _ensure_match_id(probs, matches_path)
 
-    # Odds normalizadas
+    # Odds normalizadas (sem duplicatas)
     odds = _norm_odds(odds_raw)
 
     # Merge
