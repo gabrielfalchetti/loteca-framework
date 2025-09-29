@@ -1,5 +1,5 @@
-match_id,home_team,away_team,country,league_name,league_id_apifootball,sport_key_theoddsapi,season,kickoff_utc,notes
-BR-1,São Paulo,Ceará,Brazil,Copa do Brasil,128,soccer_brazil_cup,2025,2025-10-05T19:00:00Z,Knockout
-BR-2,Amazonas,Chapecoense,Brazil,Série B,72,soccer_brazil_serie_b,2025,2025-10-05T20:00:00Z,League
-BR-3,América Mineiro,Volta Redonda,Brazil,Copa do Brasil,128,soccer_brazil_cup,2025,2025-10-05T21:00:00Z,Knockout
-BR-4,Avaí,Coritiba,Brazil,Série B,72,soccer_brazil_serie_b,2025,2025-10-05T22:00:00Z,League
+match_id,home,away,league,country,sport_key
+BR-1,São Paulo,Ceará,Copa do Brasil,Brazil,soccer_brazil_cup
+BR-2,Amazonas,Chapecoense,Série B,Brazil,soccer_brazil_serie_b
+BR-3,América Mineiro,Volta Redonda,Série B,Brazil,soccer_brazil_serie_b
+BR-4,Avaí,Coritiba,Série B,Brazil,soccer_brazil_serie_b
