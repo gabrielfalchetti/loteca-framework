@@ -1,5 +1,5 @@
-match_id,home,away,league,country,sport_key
-BR-1,São Paulo,Ceará,Copa do Brasil,Brazil,soccer_brazil_cup
-BR-2,Amazonas,Chapecoense,Série B,Brazil,soccer_brazil_serie_b
-BR-3,América Mineiro,Volta Redonda,Série B,Brazil,soccer_brazil_serie_b
-BR-4,Avaí,Coritiba,Série B,Brazil,soccer_brazil_serie_b
+match_id,date,league,sport_key,home,away
+BR-1,2025-10-05, Copa do Brasil, soccer_brazil_cup, São Paulo, Ceará
+BR-2,2025-10-05, Série B, soccer_brazil_serie_b, Amazonas, Chapecoense
+BR-3,2025-10-05, Série B, soccer_brazil_serie_b, América Mineiro, Volta Redonda
+BR-4,2025-10-05, Série B, soccer_brazil_serie_b, Avaí, Coritiba
