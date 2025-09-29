@@ -1,109 +1,107 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Wrapper 'à prova de falhas' para o ingest do TheOddsAPI.
-- Remove kwargs desconhecidos do wandb.init (ex.: finish_previous, start_method)
-- Invoca o script original via runpy, repassando os mesmos argumentos
-- Em erro, cria CSV vazio com header e um debug.json com detalhes
+Wrapper seguro para TheOddsAPI.
+- Repassa os args ao scripts/ingest_odds_theoddsapi.py original.
+- Se o script original falhar (exit != 0 ou exceção), cria um CSV vazio
+  com header em data/out/<RODADA>/odds_theoddsapi.csv para não quebrar o fluxo.
+
+Uso:
+  python scripts/ingest_odds_theoddsapi_safe.py --rodada "2025-09-27_1213" --regions "uk,eu,us,au" --debug
 """
 
 import argparse
 import csv
-import json
 import os
-import runpy
+import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 
-THEODDS_CSV_COLUMNS = [
-    "home", "away", "book", "odd_home", "odd_draw", "odd_away",
-    "event_id", "provider"
+DEFAULT_HEADER = [
+    # header genérico e estável; consumidores podem ignorar colunas extras
+    "match_id",
+    "home_team",
+    "away_team",
+    "bookmaker",
+    "market",
+    "selection",
+    "price",
+    "source",
+    "last_update",
 ]
 
-def ensure_dir_for(path: str) -> None:
+def ensure_dirs(path: str) -> None:
     d = os.path.dirname(path)
-    if d and not os.path.isdir(d):
+    if d and not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
 
-def write_empty_csv(csv_path: str) -> None:
-    ensure_dir_for(csv_path)
+def write_empty_csv(csv_path: str, header=DEFAULT_HEADER) -> None:
+    ensure_dirs(csv_path)
+    # cria um CSV válido com apenas o header
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(THEODDS_CSV_COLUMNS)
+        writer.writerow(header)
 
-def write_debug(debug_path: str, payload: dict) -> None:
-    ensure_dir_for(debug_path)
-    with open(debug_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rodada", required=True, help="Identificador da rodada (ex: 2025-09-27_1213)")
+    parser.add_argument("--regions", default="uk,eu,us,au", help="Regiões TheOddsAPI")
+    parser.add_argument("--debug", action="store_true", help="Modo debug")
+    args, unknown = parser.parse_known_args()
 
-# ---- args mínimos (para sabermos a RODADA) ----------------------------------
-parser = argparse.ArgumentParser(add_help=False)
-parser.add_argument("--rodada", default=os.environ.get("RODADA", "").strip())
-parser.add_argument("--regions", default="uk,eu,us,au")
-parser.add_argument("--debug", action="store_true")
-known, unknown = parser.parse_known_args()
+    rodada = args.rodada
+    regions = args.regions
+    debug = args.debug
 
-rodada = known.rodada or ""
-regions = known.regions
-debug_flag = known.debug
+    out_csv = os.path.join("data", "out", rodada, "odds_theoddsapi.csv")
 
-out_dir = os.path.join("data", "out", rodada) if rodada else os.path.join("data", "out", "")
-csv_path = os.path.join(out_dir, "odds_theoddsapi.csv")
-dbg_path = os.path.join(out_dir, "theoddsapi_wrapper_debug.json")
+    # Comando para chamar o script original (mantém compatibilidade com o repo atual)
+    cmd = [
+        sys.executable,
+        os.path.join("scripts", "ingest_odds_theoddsapi.py"),
+        "--rodada", rodada,
+        "--regions", regions,
+    ]
+    if debug:
+        cmd.append("--debug")
+    # repassa quaisquer args desconhecidos (mantém forwards-compat)
+    cmd += unknown
 
-# ---- monkey-patch no wandb.init ---------------------------------------------
-try:
-    import wandb  # noqa
-    _orig_init = wandb.init
-    def _safe_init(*args, **kwargs):
-        kwargs.pop("finish_previous", None)
-        kwargs.pop("start_method", None)
-        return _orig_init(*args, **kwargs)
-    wandb.init = _safe_init  # type: ignore
-except Exception:
-    pass  # sem wandb ou falha no import → segue sem tracking
+    if debug:
+        print(f"[theoddsapi-safe] Executando: {' '.join(cmd)}")
 
-# ---- prepara chamada do script original -------------------------------------
-orig_script = os.path.join("scripts", "ingest_odds_theoddsapi.py")
-forward_argv = [orig_script]
-if rodada:
-    forward_argv += ["--rodada", rodada]
-if regions:
-    forward_argv += ["--regions", regions]
-if debug_flag:
-    forward_argv += ["--debug"]
-forward_argv += unknown
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if debug:
+            print("[theoddsapi-safe] STDOUT do original:\n" + (proc.stdout or ""))
+            print("[theoddsapi-safe] STDERR do original:\n" + (proc.stderr or ""))
 
-# ---- executa blindado -------------------------------------------------------
-ensure_dir_for(csv_path)
-_old_argv = sys.argv
-try:
-    sys.argv = [orig_script] + forward_argv[1:]
-    runpy.run_path(orig_script, run_name="__main__")
-except SystemExit as e:
-    if getattr(e, "code", 0) not in (0, None):
-        write_empty_csv(csv_path)
-        if debug_flag:
-            write_debug(dbg_path, {
-                "when": datetime.now(timezone.utc).isoformat(),
-                "rodada": rodada,
-                "regions": regions,
-                "error": "SystemExit",
-                "exit_code": getattr(e, "code", None),
-                "note": "CSV vazio gerado pelo wrapper devido a SystemExit != 0."
-            })
-        sys.exit(0)
-    sys.exit(0)
-except Exception as ex:
-    write_empty_csv(csv_path)
-    if debug_flag:
-        write_debug(dbg_path, {
-            "when": datetime.now(timezone.utc).isoformat(),
-            "rodada": rodada,
-            "regions": regions,
-            "error": repr(ex),
-            "note": "CSV vazio gerado pelo wrapper devido a exceção."
-        })
-    sys.exit(0)
-finally:
-    sys.argv = _old_argv
+        if proc.returncode != 0:
+            # Falhou → garante CSV vazio
+            if debug:
+                print(f"[theoddsapi-safe] Processo retornou código {proc.returncode}. "
+                      f"Criando CSV vazio em {out_csv}")
+            write_empty_csv(out_csv)
+            # Não propaga erro para não quebrar o job
+            return 0
+
+        # Sucesso do original → ainda assim garante existência do arquivo (por segurança)
+        if not os.path.exists(out_csv):
+            if debug:
+                print(f"[theoddsapi-safe] Script original terminou OK, mas {out_csv} não foi gerado. "
+                      "Criando CSV vazio com header.")
+            write_empty_csv(out_csv)
+
+        if debug:
+            print(f"[theoddsapi-safe] OK. Arquivo garantido em {out_csv}")
+        return 0
+
+    except Exception as e:
+        # Qualquer exceção inesperada → garante CSV e segue
+        if debug:
+            print(f"[theoddsapi-safe] Exceção: {e!r}. Criando CSV vazio em {out_csv}")
+        write_empty_csv(out_csv)
+        return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
