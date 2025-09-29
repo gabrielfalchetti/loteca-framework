@@ -1,16 +1,16 @@
 {
   "teams": {
-    "São Paulo": ["Sao Paulo", "Sao Paulo FC", "São Paulo FC", "SPFC"],
-    "Ceará": ["Ceara", "Ceara SC", "Ceará SC"],
-    "Amazonas": ["Amazonas FC", "Amazonas Futebol Clube"],
+    "Sao Paulo": ["São Paulo", "Sao Paulo FC", "SPFC"],
+    "Ceara": ["Ceará", "Ceara SC"],
+    "Amazonas": ["Amazonas FC"],
     "Chapecoense": ["Chapecoense-SC", "A Chapecoense"],
-    "América Mineiro": ["America-MG", "América-MG", "America Mineiro", "America FC MG"],
-    "Volta Redonda": ["Volta Redonda FC"],
-    "Avaí": ["Avai", "Avai FC", "Avaí FC"],
-    "Coritiba": ["Coritiba PR", "Coritiba Foot Ball Club", "CFC"]
+    "America Mineiro": ["América Mineiro", "America-MG", "America MG", "América-MG"],
+    "Volta Redonda": ["Volta Redonda FC", "Volta Redonda-RJ"],
+    "Avai": ["Avaí", "Avai SC", "Avaí-SC"],
+    "Coritiba": ["Coritiba PR", "Coritiba-PR"]
   },
   "leagues": {
-    "Série B": ["Serie B", "Brazil Serie B", "Brasileirao B", "Brasil Serie B"],
-    "Copa do Brasil": ["Brazil Cup", "Copa Brasil", "Brazilian Cup"]
+    "Copa do Brasil": ["Copa do Brasil", "Brazil Cup", "Copa Brasil"],
+    "Série B": ["Serie B", "Brasileirao B", "Serie B Brazil", "Campeonato Brasileiro Serie B"]
   }
 }
