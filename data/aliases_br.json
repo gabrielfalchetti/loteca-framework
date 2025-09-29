@@ -10,7 +10,8 @@
     "America Mineiro": "América Mineiro",
     "America-MG": "América Mineiro",
     "América-MG": "América Mineiro",
-    "América Mg": "América Mineiro",
+    "America Mg": "América Mineiro",
+    "America/MG": "América Mineiro",
 
     "Avai": "Avaí",
     "AVAI": "Avaí",
@@ -20,12 +21,14 @@
 
     "Amazonas FC": "Amazonas",
     "Amazonas Futebol Clube": "Amazonas",
+    "Amazonas/AM": "Amazonas",
 
     "Chapecoense-SC": "Chapecoense",
     "Chapecoense SC": "Chapecoense",
     "Chape": "Chapecoense",
 
     "Volta Redonda FC": "Volta Redonda",
-    "Voltaço": "Volta Redonda"
+    "Volta Redonda-RJ": "Volta Redonda",
+    "Volta\u00e7o": "Volta Redonda"
   }
 }
