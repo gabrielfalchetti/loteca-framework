@@ -12,16 +12,16 @@ jobs:
   end2end:
     runs-on: ubuntu-latest
     env:
-      # como só rodamos por workflow_dispatch, o input sempre existe
       RODADA: ${{ github.event.inputs.rodada }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -30,28 +30,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Hotfix merges
+      - name: Hotfix merges (tolerante)
         run: python scripts/patch_merge_hotfix.py || true
 
       - name: Validate input
         run: echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
 
       - name: W&B login (opcional)
-        if: ${{ env.WANDB_API_KEY != '' }}
-        run: python -m wandb login "${WANDB_API_KEY}" --relogin || true
+        run: |
+          if [ -n "$WANDB_API_KEY" ]; then
+            python -m wandb login "$WANDB_API_KEY" --relogin || true
+          fi
 
-      # ==== ODDS (sempre reais, fail-fast) ====
+      # ==== ODDS REAIS (FAIL-FAST se nenhum provedor entregar) ====
       - name: Ingest TheOddsAPI (SAFE)
-        env:
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: python scripts/ingest_odds_theoddsapi_safe.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug
 
       - name: Ingest API-Football RapidAPI (SAFE)
-        env:
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         run: python scripts/ingest_odds_apifootball_rapidapi_safe.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug
 
-      - name: Consenso de odds (fail se nenhum provedor)
+      - name: Consenso de odds (erro se nenhum provedor)
         run: python scripts/ingest_odds.py --rodada "$RODADA"
 
       # ==== FEATURES / MODEL ====
@@ -64,16 +62,16 @@ jobs:
       - name: Build probabilities
         run: python scripts/build_probs.py --rodada "$RODADA"
 
-      - name: Blend probabilities
+      - name: Blend probabilities (tolerante)
         run: python scripts/blend_probs.py --rodada "$RODADA" --alpha 0.75 || true
 
-      - name: Calibrate probabilities
+      - name: Calibrate probabilities (tolerante)
         run: python scripts/calibrate_probs.py --rodada "$RODADA" || true
 
-      - name: Evaluate risk (robusto)
+      - name: Evaluate risk
         run: python scripts/evaluate_risk.py --rodada "$RODADA"
 
-      - name: Loteca picker
+      - name: Loteca picker (tolerante)
         run: python scripts/loteca_picker.py --rodada "$RODADA" --duplos 4 --triplos 2 || true
 
       - name: News (opcional)
