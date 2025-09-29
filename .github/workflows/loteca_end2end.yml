@@ -42,20 +42,25 @@ jobs:
           echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
           test -f "data/in/${RODADA}/matches_source.csv"
 
-      # ✅ Checa se as secrets foram definidas (sem vazar valores)
-      - name: Check required secrets
+      # ✅ Agora exige pelo menos 1 secret (TheOddsAPI OU RapidAPI)
+      - name: Check provider secrets (at least one)
         run: |
           set -e
-          missing=0
-          for v in THEODDS_API_KEY RAPIDAPI_KEY; do
-            if [ -z "${!v}" ]; then
-              echo "::error title=Missing secret::$v não está definido em Settings > Secrets and variables > Actions."
-              missing=1
-            else
-              echo "$v: OK"
-            fi
-          done
-          if [ "$missing" -eq 1 ]; then
+          has_any=0
+          if [ -n "${THEODDS_API_KEY}" ]; then
+            echo "THEODDS_API_KEY: OK"
+            has_any=1
+          else
+            echo "THEODDS_API_KEY: (não definido) — TheOddsAPI será pulado."
+          fi
+          if [ -n "${RAPIDAPI_KEY}" ]; then
+            echo "RAPIDAPI_KEY: OK"
+            has_any=1
+          else
+            echo "RAPIDAPI_KEY: (não definido) — API-Football/RapidAPI será pulado."
+          fi
+          if [ "$has_any" -eq 0 ]; then
+            echo "::error title=Nenhum provedor habilitado::Defina ao menos uma secret: THEODDS_API_KEY ou RAPIDAPI_KEY."
             exit 1
           fi
 
@@ -64,17 +69,27 @@ jobs:
           python -m wandb login "${WANDB_API_KEY}" --relogin || true
           echo "[wandb] login executado"
 
-      # 🔒 TheOddsAPI: wrapper que falha se não houver chave ou retorno vazio
-      - name: Ingest TheOddsAPI (SAFE)
+      # 🔒 TheOddsAPI: roda SOMENTE se houver chave; senão, pula
+      - name: Ingest TheOddsAPI (SAFE, conditional)
         run: |
-          python scripts/ingest_odds_theoddsapi_safe.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug
+          set -e
+          if [ -n "${THEODDS_API_KEY}" ]; then
+            python scripts/ingest_odds_theoddsapi_safe.py --rodada "$RODADA" --regions "uk,eu,us,au" --debug
+          else
+            echo "[theoddsapi-safe] SKIP: THEODDS_API_KEY ausente."
+          fi
 
-      # API-Football (RapidAPI) – odds reais
-      - name: Ingest RapidAPI (API-Football)
+      # API-Football (RapidAPI) – odds reais. Só roda se tiver RAPIDAPI_KEY
+      - name: Ingest RapidAPI (API-Football, conditional)
         run: |
-          python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug || true
+          set -e
+          if [ -n "${RAPIDAPI_KEY}" ]; then
+            python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA" --season 2025 --window 14 --fuzzy 0.9 --aliases "data/aliases_br.json" --debug || true
+          else
+            echo "[rapidapi] SKIP: RAPIDAPI_KEY ausente."
+          fi
 
-      # Consolida odds (sem simulação). Se nenhum provedor trouxe odds, falha.
+      # Consolida odds (sem simulação). Falha se nenhum provedor entregou odds.
       - name: Build consensus odds
         run: |
           set -e
@@ -82,9 +97,8 @@ jobs:
           OUT="data/out/$RODADA/odds.csv"
           echo "[consensus] Verificando odds em $OUT"
           test -f "$OUT"
-          # Precisa ter pelo menos 1 linha de dados além do cabeçalho
           if [ "$(tail -n +2 "$OUT" | wc -l)" -lt 1 ]; then
-            echo "::error title=Sem odds reais::Nenhuma odd encontrada nos provedores (TheOddsAPI/RapidAPI)."
+            echo "::error title=Sem odds reais::Nenhuma odd encontrada nos provedores disponíveis."
             exit 1
           fi
 
@@ -98,7 +112,6 @@ jobs:
 
       - name: Build probabilities (bivar)
         run: |
-          # Se existir preds_bivar.csv, usa; se não, gera automaticamente
           if [ -f "data/out/$RODADA/preds_bivar.csv" ]; then
             echo "[build_probs] usando preds_bivar existente"
           fi
