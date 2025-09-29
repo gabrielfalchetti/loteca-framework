@@ -25,16 +25,31 @@ def mean(xs: List[float]) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
+    ap.add_argument("--allow-empty", action="store_true",
+                    help="Se nenhum provedor tiver odds, não aborta; grava arquivo vazio e sai com código 0.")
     args = ap.parse_args()
 
     base_out = Path("data/out") / args.rodada
+    base_out.mkdir(parents=True, exist_ok=True)
+
     the = read_csv(base_out / "odds_theoddsapi.csv")
     api = read_csv(base_out / "odds_apifootball.csv")
 
     rows = the + api
+    out_csv = base_out / "odds_consensus.csv"
+
     if not rows:
-        print("[consensus] ERRO: nenhum provedor retornou odds. Aborte.")
-        raise SystemExit(1)
+        # Gera arquivo vazio (com cabeçalho) para manter pipeline vivo se assim desejado
+        with out_csv.open("w", newline="", encoding="utf-8") as f:
+            wr = csv.DictWriter(f, fieldnames=["match_id","home","away","market","selection","price_consensus","num_feeds"])
+            wr.writeheader()
+        msg = "[consensus] AVISO: nenhum provedor retornou odds. Arquivo vazio gerado."
+        if args.allow-empty:
+            print(msg)
+            raise SystemExit(0)
+        else:
+            print(msg + " (use --allow-empty para não abortar)")
+            raise SystemExit(1)
 
     # Consenso simples: média por (match_id, market, selection)
     grouped: Dict[tuple, List[float]] = defaultdict(list)
@@ -59,7 +74,6 @@ def main():
             "num_feeds": str(len(prices))
         })
 
-    out_csv = base_out / "odds_consensus.csv"
     with out_csv.open("w", newline="", encoding="utf-8") as f:
         wr = csv.DictWriter(f, fieldnames=["match_id","home","away","market","selection","price_consensus","num_feeds"])
         wr.writeheader(); wr.writerows(consensus_rows)
