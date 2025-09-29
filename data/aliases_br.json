@@ -1,34 +1,16 @@
 {
-  "atletico mineiro": ["atlético mg", "atlético-mg", "atletico mg", "clube atletico mineiro", "atlético mineiro", "atletico-mg"],
-  "mirassol": ["mirassol fc", "mirassol futebol clube"],
-  "palmeiras": ["se palmeiras", "sociedade esportiva palmeiras", "palestra italia"],
-  "corinthians": ["sc corinthians paulista", "sport club corinthians paulista", "corinthians paulista"],
-  "sao paulo": ["são paulo", "são paulo fc", "sao paulo fc"],
-  "santos": ["santos fc"],
-  "flamengo": ["cr flamengo", "clube de regatas do flamengo"],
-  "fluminense": ["fluminense fc"],
-  "botafogo": ["botafogo fr", "botafogo rj"],
-  "vasco da gama": ["vasco", "cr vasco da gama"],
-  "gremio": ["grêmio", "gremio fbpa", "grêmio fbpa"],
-  "internacional": ["sc internacional", "sport club internacional"],
-  "bahia": ["bahia ec", "ec bahia", "esporte clube bahia"],
-  "fortaleza": ["fortaleza ec", "esporte clube fortaleza"],
-  "ceara": ["ceará", "ceara sc"],
-  "america mg": ["américa mg", "america mineiro", "america futebol clube", "américa futebol clube"],
-  "cruzeiro": ["cruzeiro ec", "esporte clube cruzeiro"],
-  "cuiaba": ["cuiabá", "cuiaba ec"],
-  "bragantino": ["red bull bragantino", "rb bragantino"],
-  "athletico pr": ["athletico paranaense", "atletico pr", "atlético pr"],
-  "goias": ["goiás", "goias ec"],
-  "avai": ["avaí", "avai fc"],
-  "chapecoense": ["chapecoense af", "a chapecoense"],
-  "ponte preta": ["aa ponte preta"],
-  "juventude": ["ec juventude"],
-  "crb": ["clube de regatas brasil"],
-  "vitoria": ["esporte clube vitoria", "vitória"],
-  "sport recife": ["sport club do recife", "sport"],
-  "nautico": ["náutico", "clube nautico capibaribe"],
-  "sampaio correa": ["sampaio corrêa", "sampaio correia"],
-  "botafogo sp": ["botafogo ribeirão preto", "botafogo rp"],
-  "ituano": ["ituano fc"]
+  "teams": {
+    "São Paulo": ["Sao Paulo", "Sao Paulo FC", "São Paulo FC", "SPFC"],
+    "Ceará": ["Ceara", "Ceara SC", "Ceará SC"],
+    "Amazonas": ["Amazonas FC", "Amazonas Futebol Clube"],
+    "Chapecoense": ["Chapecoense-SC", "A Chapecoense"],
+    "América Mineiro": ["America-MG", "América-MG", "America Mineiro", "America FC MG"],
+    "Volta Redonda": ["Volta Redonda FC"],
+    "Avaí": ["Avai", "Avai FC", "Avaí FC"],
+    "Coritiba": ["Coritiba PR", "Coritiba Foot Ball Club", "CFC"]
+  },
+  "leagues": {
+    "Série B": ["Serie B", "Brazil Serie B", "Brasileirao B", "Brasil Serie B"],
+    "Copa do Brasil": ["Brazil Cup", "Copa Brasil", "Brazilian Cup"]
+  }
 }
