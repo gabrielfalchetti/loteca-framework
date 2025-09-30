@@ -58,7 +58,6 @@ def main():
     ap.add_argument("--aliases", type=str, default=None, help="Caminho para JSON com aliases extras.")
     args = ap.parse_args()
 
-    # Aliases extras (opcional)
     if args.aliases:
         p = Path(args.aliases)
         if p.exists():
@@ -120,14 +119,13 @@ def main():
                 unmatched.append({"match_id": m["match_id"], "home": m["home"], "away": m["away"], "date": date_iso, "motivo": "sem_odds_no_fixture"})
                 continue
 
-            # match rows para este jogo (com fuzzy ajustável)
             mh, ma = canonical(m["home"]), canonical(m["away"])
             for r in flat:
                 ph, pa = canonical(r["prov_home"] or ""), canonical(r["prov_away"] or "")
                 ok = (mh == ph and ma == pa)
                 if not ok and args.fuzzy < 1.0:
-                    # tenta fuzzy simétrico
-                    if fuzzy_match(m["home"], [ph], threshold=args.fuzzy) and fuzzy_match(m["away"], [pa], threshold=args.fuzzy):
+                    from utils.match_normalize import fuzzy_match as _f
+                    if _f(m["home"], [ph], threshold=args.fuzzy) and _f(m["away"], [pa], threshold=args.fuzzy):
                         ok = True
                 if ok:
                     collected.append({
