@@ -13,6 +13,8 @@ ALIASES: Dict[str, List[str]] = {
     "amazonas": ["amazonas fc","amazonas futebol clube"],
     "atletico mineiro": ["atletico mg","clube atletico mineiro","cam","atletico-mg"],
     "atletico paranaense": ["athletico pr","athletico paranaense","cap","athletico-pr","atletico-pr"],
+    "goias": ["goias ec","goias esporte clube"],
+    "atletico goianiense": ["atletico go","atletico goianiense go","dragao","acg"]
 }
 
 def extend_aliases(extra: Dict[str, List[str]]) -> None:
