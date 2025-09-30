@@ -5,7 +5,15 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 API_HOST = "api-football-v1.p.rapidapi.com"
-API_KEY  = os.environ.get("RAPIDAPI_KEY", "").strip()
+
+def _get_env(*names: str) -> str:
+    for n in names:
+        v = os.environ.get(n)
+        if v and v.strip():
+            return v.strip()
+    return ""
+
+API_KEY  = _get_env("RAPIDAPI_KEY", "RAPID_API_KEY")
 
 class ApiFootballError(RuntimeError):
     pass
@@ -13,12 +21,12 @@ class ApiFootballError(RuntimeError):
 def _normalize(s: str) -> str:
     s2 = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
     s2 = re.sub(r"[^a-zA-Z0-9 ]+"," ", s2).lower()
-    s2 = re.sub(r"\b(ec|fc|afc|sc|ac|esporte clube|futebol clube)\b","", s2)
+    s2 = re.sub(r"\b(ec|fc|afc|sc|ac|esporte clube|futebol clube)\b", "", s2)
     return " ".join(s2.split())
 
 def _get(path: str, params: Dict[str, Any]) -> Any:
     if not API_KEY:
-        raise ApiFootballError("RAPIDAPI_KEY ausente no ambiente.")
+        raise ApiFootballError("RAPIDAPI_KEY/RAPID_API_KEY ausente no ambiente.")
     url = f"https://{API_HOST}/v3{path}"
     headers = {"X-RapidAPI-Key": API_KEY, "X-RapidAPI-Host": API_HOST}
     r = requests.get(url, headers=headers, params=params, timeout=30)
@@ -30,7 +38,7 @@ def _get(path: str, params: Dict[str, Any]) -> Any:
         raise ApiFootballError(f"API-Football error: {payload['errors']}")
     return payload.get("response", [])
 
-def resolve_league_id(country="Brazil", league_name="Serie A") -> int:
+def resolve_league_id(country: str = "Brazil", league_name: str = "Serie A") -> int:
     leagues = _get("/leagues", {"country": country})
     target = _normalize(league_name)
     for item in leagues:
@@ -53,9 +61,9 @@ def resolve_current_season(league_id: int) -> int:
             return int(s["year"])
     return int(seasons[-1]["year"])
 
-def find_fixture_id(date_iso: str, home: str, away: str, league_id: int, season: int) -> Optional[int]:
+def find_fixture_id(date_iso: str, home: str, away: str, league_id: int, season: int, window: int = 1) -> Optional[int]:
     dt = datetime.fromisoformat(date_iso).date()
-    for delta in (0, -1, 1):
+    for delta in range(-abs(window), abs(window)+1):
         d = (dt + timedelta(days=delta)).isoformat()
         fixtures = _get("/fixtures", {"date": d, "league": league_id, "season": season})
         hkey = _normalize(home); akey = _normalize(away)
