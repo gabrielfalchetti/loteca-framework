@@ -19,7 +19,7 @@ def main():
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--regions", default="uk,eu,us,au")
     ap.add_argument("--debug", action="store_true")
-    ap.add_argument("--consensus-allow-empty", action="store_true", help="Não aborta se não houver odds.")
+    # flags mantidas para compat, mas o consenso já é tolerante por padrão
     ap.add_argument("--season", type=int, default=None)
     ap.add_argument("--window", type=int, default=14)
     ap.add_argument("--fuzzy", type=float, default=0.90)
@@ -48,10 +48,8 @@ def main():
     if rc2 != 0:
         print("[end2end] AVISO: API-Football falhou (segue).")
 
-    # 3) Consenso
+    # 3) Consenso — agora tolerante por padrão (não precisa de flag)
     cmd3 = [sys.executable, "-m", "scripts.consensus_odds", "--rodada", args.rodada]
-    if args.consensus_allow_empty or args.debug:
-        cmd3.append("--allow-empty")
     rc3 = run(cmd3)
     if rc3 != 0:
         print("[end2end] ERRO: nenhum provedor retornou odds (consenso).")
