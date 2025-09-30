@@ -1,85 +1,70 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Wrapper SAFE para TheOddsAPI.
- - imprime marcador exigido pelo workflow
- - chama o módulo real com params default
- - contabiliza linhas e nunca falha o job
-"""
-
+from __future__ import annotations
+import argparse
 import json
 import os
 import shlex
 import subprocess
-import sys
 from pathlib import Path
+from typing import Dict
 
-def main():
-    import argparse
-    p = argparse.ArgumentParser()
+from scripts.csv_utils import count_csv_rows
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Wrapper SAFE para TheOddsAPI")
     p.add_argument("--rodada", required=True)
-    p.add_argument("--regions", default=os.environ.get("REGIONS", "uk,eu,us,au"))
-    p.add_argument("--window", default="3")
-    p.add_argument("--fuzzy", default="93")
-    p.add_argument("--aliases", default="data/aliases_br.json")
-    p.add_argument("--debug", action="store_true", default=os.environ.get("DEBUG", "false") == "true")
-    args = p.parse_args()
+    p.add_argument("--regions", default=os.getenv("REGIONS", "uk,eu,us,au"))
+    p.add_argument("--window", default=os.getenv("THEODDS_WINDOW", "3"))
+    p.add_argument("--fuzzy", default=os.getenv("THEODDS_FUZZY", "93"))
+    p.add_argument("--aliases", default=os.getenv("ALIASES_FILE", "data/aliases_br.json"))
+    p.add_argument("--debug", action="store_true", default=(os.getenv("DEBUG", "false").lower() == "true"))
+    return p.parse_args()
 
-    rodada = args.rodada
-    regions = args.regions
-    window = str(args.window)
-    fuzzy = str(args.fuzzy)
-    aliases = args.aliases
-    debug = args.debug
+def main() -> int:
+    ns = parse_args()
+    rodada = ns.rodada
 
-    out_dir = Path(f"data/out/{rodada}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    odds_csv = out_dir / "odds_theoddsapi.csv"
-    unmatched_csv = out_dir / "unmatched_theoddsapi.csv"
+    base = Path(f"data/out/{rodada}")
+    theodds_csv = base / "odds_theoddsapi.csv"
+    unmatched_csv = base / "unmatched_theoddsapi.csv"
+    base.mkdir(parents=True, exist_ok=True)
 
-    # Marcador que o workflow procura (via grep)
+    # Marcador que seu grep procura:
     print('9:Marcador requerido pelo workflow: "theoddsapi-safe"')
 
-    py = sys.executable
     cmd = [
-        py, "-m", "scripts.ingest_odds_theoddsapi",
-        "--rodada", rodada,
-        "--regions", regions,
-        "--window", window,
-        "--fuzzy", fuzzy,
-        "--aliases", aliases
+        "python", "-m", "scripts.ingest_odds_theoddsapi",
+        "--rodada", f"{rodada}",
+        "--regions", f"{ns.regions}",
+        "--window", f"{ns.window}",
+        "--fuzzy", f"{ns.fuzzy}",
+        "--aliases", f"{ns.aliases}",
     ]
-    if debug:
+    if ns.debug:
         cmd.append("--debug")
 
+    hard_timeout = int(os.getenv("THEODDS_HARD_TIMEOUT_SEC", "300"))
+
     print(f"[theoddsapi-safe] Executando: {' '.join(shlex.quote(c) for c in cmd)}")
-
-    # garante arquivos
-    for path in (odds_csv, unmatched_csv):
-        if not path.exists():
-            path.write_text("", encoding="utf-8")
-
     try:
-        subprocess.run(cmd, check=False)
+        subprocess.run(
+            cmd,
+            check=False,
+            timeout=hard_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[theoddsapi-safe] TIMEOUT após {hard_timeout}s — seguindo com contagens (SAFE).")
     except Exception as e:
         print(f"[theoddsapi-safe] ERRO ao executar módulo interno: {e}")
 
-    def count_csv_lines(path: Path) -> int:
-        if not path.exists():
-            return 0
-        text = path.read_text(encoding="utf-8", errors="ignore").strip()
-        if not text:
-            return 0
-        lines = [ln for ln in text.splitlines() if ln.strip()]
-        return max(0, len(lines))
-
-    counts = {
-        "odds_theoddsapi.csv": count_csv_lines(odds_csv),
-        "unmatched_theoddsapi.csv": count_csv_lines(unmatched_csv)
+    counts: Dict[str, int] = {
+        "odds_theoddsapi.csv": count_csv_rows(str(theodds_csv)),
+        "unmatched_theoddsapi.csv": count_csv_rows(str(unmatched_csv)),
     }
     print(f"[theoddsapi-safe] linhas -> {json.dumps(counts)}")
-    sys.exit(0)
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
