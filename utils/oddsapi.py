@@ -1,104 +1,117 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
+# utils/oddsapi.py
 from __future__ import annotations
+
 import os
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
-THEODDS_V4_BASE = "https://api.the-odds-api.com/v4"
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+class OddsApiError(RuntimeError):
+    """Erro de alto nível ao falar com a The Odds API."""
 
-def _get_timeout() -> float:
-    try:
-        return float(os.getenv("ODDS_HTTP_TIMEOUT", "20"))
-    except Exception:
-        return 20.0
 
-def _sleep_backoff(attempt: int) -> None:
-    # exponencial leve: 1s, 2s, 4s, 8s…
-    time.sleep(min(8, 2 ** max(0, attempt - 1)))
+_API_BASE = "https://api.the-odds-api.com/v4"
 
-def _get(
+
+def _get_api_key() -> str:
+    key = os.environ.get("THEODDS_API_KEY") or os.environ.get("THEODDSAPI_KEY")
+    if not key:
+        raise OddsApiError("THEODDS_API_KEY não definido no ambiente.")
+    return key
+
+
+def _req(
     path: str,
-    params: Dict[str, Any],
-    timeout: Optional[float] = None,
-    max_retries: int = 3,
-) -> Optional[requests.Response]:
-    url = f"{THEODDS_V4_BASE.rstrip('/')}/{path.lstrip('/')}"
-    timeout = timeout or _get_timeout()
-    for attempt in range(1, max_retries + 1):
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    timeout: int = 20,
+    retry: int = 1,
+) -> requests.Response:
+    """
+    Requisição básica com pequenos retries para status transitórios (>=500).
+    Propaga 401/403/429 de imediato para o chamador lidar.
+    """
+    url = f"{_API_BASE}/{path.lstrip('/')}"
+    params = dict(params or {})
+    params["apiKey"] = _get_api_key()
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(retry + 1):
         try:
             r = requests.get(url, params=params, timeout=timeout)
-            # 2xx
-            if 200 <= r.status_code < 300:
-                return r
-            # 401 → chave inválida/expirada — não adianta retry
-            if r.status_code == 401:
-                if _env_bool("DEBUG", False):
-                    print(f"[theoddsapi] 401 Unauthorized em {url} — verifique THEODDS_API_KEY/quota.")
-                return None
-            # 429 → retry com backoff
-            if r.status_code == 429:
-                if _env_bool("DEBUG", False):
-                    print(f"[theoddsapi] 429 Too Many Requests (tentativa {attempt}/{max_retries})")
-                _sleep_backoff(attempt)
+            if r.status_code in (401, 403, 429):
+                # credencial inválida, não adianta retentar aqui
+                r.raise_for_status()
+            if r.status_code >= 500 and attempt < retry:
+                time.sleep(1.0 + attempt * 0.5)
                 continue
-            # Demais 4xx/5xx — tenta novamente até estourar tentativas
-            if _env_bool("DEBUG", False):
-                print(f"[theoddsapi] HTTP {r.status_code} em {url} (tentativa {attempt}/{max_retries})")
-            _sleep_backoff(attempt)
-        except requests.Timeout:
-            if _env_bool("DEBUG", False):
-                print(f"[theoddsapi] timeout após {timeout}s (tentativa {attempt}/{max_retries})")
-            _sleep_backoff(attempt)
-        except requests.RequestException as e:
-            if _env_bool("DEBUG", False):
-                print(f"[theoddsapi] erro de rede: {e} (tentativa {attempt}/{max_retries})")
-            _sleep_backoff(attempt)
-    return None
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last_exc = e
+            if attempt >= retry:
+                if isinstance(e, requests.HTTPError):
+                    # Empacota num erro de domínio para o caller
+                    raise OddsApiError(f"HTTP {r.status_code} em {url}") from e
+                raise OddsApiError(f"Falha de rede ao acessar {url}") from e
+    # não deve chegar aqui
+    assert last_exc is not None
+    raise OddsApiError(str(last_exc))
+
+
+# -------------------- API de alto nível usada pelos scripts --------------------
+
+
+def resolve_brazil_soccer_sport_keys() -> List[str]:
+    """
+    Retorna os sport_keys relevantes para futebol no Brasil na The Odds API.
+    Implementação 'defensiva': tenta consultar /sports; caso falhe (quota, 401, etc.),
+    cai em uma lista estática suficiente para o pipeline.
+    """
+    try:
+        r = _req("sports")
+        data = r.json()
+        keys = [item["key"] for item in data if isinstance(item, dict) and "brazil" in (item.get("title") or "").lower()]
+        # Garante os dois padrões conhecidos se não vier vazio
+        base = {"soccer_brazil_campeonato", "soccer_brazil_serie_b"}
+        keys = list(sorted(set(keys) | base))
+        return keys or ["soccer_brazil_campeonato", "soccer_brazil_serie_b"]
+    except OddsApiError:
+        # fallback estático
+        return ["soccer_brazil_campeonato", "soccer_brazil_serie_b"]
+
 
 def fetch_odds_for_sport(
     sport_key: str,
-    regions: Sequence[str] = ("uk", "eu", "us", "au"),
-    markets: Sequence[str] = ("h2h", "totals"),
+    *,
+    regions: List[str] | str = "uk,eu,us,au",
+    markets: List[str] | str = ("h2h", "totals"),
     odds_format: str = "decimal",
 ) -> List[Dict[str, Any]]:
     """
-    Wrapper resiliente para TheOddsAPI v4 /odds
-    Retorna [] em caso de erro/401/429/timeout para que o pipeline SAFE prossiga.
+    Busca eventos/odds para um sport_key.
+    Retorna a lista JSON de eventos (cada item é um dict).
+    Levanta OddsApiError em problemas irrecuperáveis.
     """
-    api_key = os.getenv("THEODDS_API_KEY", "").strip()
-    if not api_key:
-        if _env_bool("DEBUG", False):
-            print("[theoddsapi] THEODDS_API_KEY ausente — retornando vazio.")
-        return []
+    if isinstance(regions, list):
+        regions = ",".join(regions)
+    if isinstance(markets, (list, tuple)):
+        markets = ",".join(markets)
 
-    params = {
-        "apiKey": api_key,
-        "regions": ",".join(regions),
-        "markets": ",".join(markets),
-        "oddsFormat": odds_format,
-    }
-
-    resp = _get(f"sports/{sport_key}/odds", params=params)
-    if resp is None:
-        return []
-
+    r = _req(
+        f"sports/{sport_key}/odds",
+        params={
+            "regions": regions,
+            "markets": markets,
+            "oddsFormat": odds_format,
+        },
+    )
     try:
-        data = resp.json()
-        # TheOddsAPI retorna lista de eventos; garantimos lista
-        if isinstance(data, list):
-            return data  # type: ignore[return-value]
-        return []
-    except ValueError:
-        if _env_bool("DEBUG", False):
-            print("[theoddsapi] falha ao decodificar JSON — retornando vazio.")
-        return []
+        data = r.json()
+        if not isinstance(data, list):
+            raise OddsApiError(f"Resposta inesperada para {sport_key}: tipo {type(data)}")
+        return data
+    except ValueError as e:
+        raise OddsApiError("Falha ao decodificar JSON de odds") from e
