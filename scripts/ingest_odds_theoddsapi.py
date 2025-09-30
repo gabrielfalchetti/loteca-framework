@@ -27,20 +27,17 @@ def read_matches(path: Path) -> List[Dict[str, str]]:
         return list(reader)
 
 def parse_time(iso_s: str) -> dt.datetime | None:
-    # TheOddsAPI → field "commence_time" em ISO UTC
     try:
         return dt.datetime.fromisoformat(iso_s.replace("Z","+00:00")).astimezone(dt.timezone.utc)
     except Exception:
         return None
 
 def match_score(a: str, b: str) -> int:
-    # robusto a ordem dos tokens e variações
     return fuzz.token_set_ratio(a, b)
 
 def flatten_odds(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     flat = []
     for ev in events:
-        # compat: alguns retornam "home_team"/"away_team"; outros usam "teams": {"home","away"}
         home = ev.get("home_team") or ev.get("teams", {}).get("home")
         away = ev.get("away_team") or ev.get("teams", {}).get("away")
         ctime = ev.get("commence_time")
@@ -65,13 +62,8 @@ def match_provider_events(
     window_days: int,
     fuzzy_thr: int
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Casa por (home,away) com fuzzy (rapidfuzz) e por data (±window_days).
-    Também tenta casamento com home/away invertido se falhar.
-    """
     out, unmatched = [], []
 
-    # index por data (dia UTC) para reduzir busca
     by_day: Dict[str, List[Dict[str,Any]]] = {}
     for r in prov_rows:
         t = parse_time(r.get("commence_time") or "")
@@ -86,18 +78,16 @@ def match_provider_events(
         return rows
 
     for m in matches:
-        # data do match (se não tiver, usamos somente nomes)
+        mdate = None
         if m.get("date"):
             try:
                 mdate = dt.date.fromisoformat(m["date"][:10])
             except Exception:
                 mdate = None
-        else:
-            mdate = None
 
         candidates = prov_rows if mdate is None else rows_in_window(mdate)
         if not candidates and mdate is not None:
-            candidates = prov_rows  # fallback sem filtro de data
+            candidates = prov_rows
 
         mh_raw, ma_raw = m["home"], m["away"]
         mh, ma = canonical(mh_raw), canonical(ma_raw)
@@ -109,9 +99,7 @@ def match_provider_events(
             ph_raw, pa_raw = r["prov_home"], r["prov_away"]
             ph, pa = canonical(ph_raw), canonical(pa_raw)
 
-            # score direto
             s1 = min(match_score(mh, ph), match_score(ma, pa))
-            # score invertido (caso o provedor tenha invertido mandante)
             s2 = min(match_score(mh, pa), match_score(ma, ph))
             s = max(s1, s2)
 
@@ -146,7 +134,6 @@ def main():
     ap.add_argument("--aliases", type=str, default=None, help="JSON com aliases extras (opcional).")
     args = ap.parse_args()
 
-    # aliases extras (se fornecido)
     if args.aliases:
         p = Path(args.aliases)
         if p.exists():
@@ -179,7 +166,6 @@ def main():
         per_key_counts[k] = len(ev)
         if ev: all_events.extend(ev)
 
-    # salvar amostra de eventos p/ depurar
     (base_dbg / "theoddsapi_counts.json").write_text(
         json.dumps({"counts": per_key_counts}, ensure_ascii=False, indent=2), encoding="utf-8"
     )
