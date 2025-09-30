@@ -9,23 +9,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import argparse, csv, datetime as dt
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from utils.apifootball import resolve_league_id, resolve_current_season, find_fixture_id, fetch_odds_by_fixture, ApiFootballError
-from utils.match_normalize import canonical
+from utils.match_normalize import canonical, extend_aliases, fuzzy_match
 
 LEAGUES = ["Serie A","Serie B","Serie C","Serie D"]
 
 def read_matches(path: Path) -> List[Dict[str, str]]:
     if not path.exists():
         print(f"[ERRO] Arquivo não encontrado: {path}"); raise SystemExit(2)
-    rows = []
     with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         needed = {"match_id","home","away"}
         if not needed.issubset(reader.fieldnames or []):
             print("Error: matches_source.csv precisa de colunas: match_id,home,away[,date]."); raise SystemExit(2)
-        rows.extend(reader)
-    return rows
+        return list(reader)
 
 def infer_date_iso(m: Dict[str,str]) -> str:
     from datetime import datetime
@@ -54,7 +52,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--season", type=int, default=None, help="Força o ano da season (ex.: 2025).")
+    ap.add_argument("--window", type=int, default=1, help="Tolerância de datas ±N dias no mapeamento de fixture.")
+    ap.add_argument("--fuzzy", type=float, default=0.92, help="Limiar de fuzzy match para nomes (0-1).")
+    ap.add_argument("--aliases", type=str, default=None, help="Caminho para JSON com aliases extras.")
     args = ap.parse_args()
+
+    # Aliases extras (opcional)
+    if args.aliases:
+        p = Path(args.aliases)
+        if p.exists():
+            try:
+                extra = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(extra, dict):
+                    extend_aliases(extra)
+                    print(f"[apifootball] Aliases extras carregados: {len(extra)} chaves")
+            except Exception as e:
+                print(f"[apifootball] AVISO: falha ao ler aliases {p}: {e}")
 
     ts = dt.datetime.utcnow().isoformat()
     base_in = Path("data/in") / args.rodada
@@ -68,9 +82,10 @@ def main():
         try:
             lid = resolve_league_id(country="Brazil", league_name=lname)
             leagues[lname] = lid
-            seasons[lname] = resolve_current_season(lid)
+            seasons[lname] = args.season if args.season else resolve_current_season(lid)
         except Exception as e:
             print(f"[apifootball] AVISO: não consegui resolver {lname}: {e}")
+
     if args.debug:
         (base_dbg / "apifootball_leagues_seasons.json").write_text(
             json.dumps({"leagues": leagues, "seasons": seasons, "ts": ts}, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -81,17 +96,18 @@ def main():
 
     for m in matches:
         date_iso = infer_date_iso(m)
-        fixture_id = None
+        fixture_id: Optional[int] = None
         for lname, lid in leagues.items():
-            season = seasons.get(lname); 
+            season = seasons.get(lname)
             if not season: continue
             try:
-                fixture_id = find_fixture_id(date_iso, m["home"], m["away"], lid, season)
+                fixture_id = find_fixture_id(date_iso, m["home"], m["away"], lid, season, window=args.window)
                 if fixture_id:
                     fixture_map[m["match_id"]] = fixture_id
                     break
             except ApiFootballError as e:
                 print(f"[apifootball] AVISO find_fixture_id {lname}: {e}")
+
         if not fixture_id:
             unmatched.append({"match_id": m["match_id"], "home": m["home"], "away": m["away"], "date": date_iso, "motivo": "fixture_nao_encontrado"})
             continue
@@ -103,10 +119,17 @@ def main():
                 print(f"[apifootball] sem odds p/ {m['match_id']} '{m['home']}' vs '{m['away']}'")
                 unmatched.append({"match_id": m["match_id"], "home": m["home"], "away": m["away"], "date": date_iso, "motivo": "sem_odds_no_fixture"})
                 continue
+
+            # match rows para este jogo (com fuzzy ajustável)
             mh, ma = canonical(m["home"]), canonical(m["away"])
             for r in flat:
                 ph, pa = canonical(r["prov_home"] or ""), canonical(r["prov_away"] or "")
-                if (mh == ph and ma == pa):
+                ok = (mh == ph and ma == pa)
+                if not ok and args.fuzzy < 1.0:
+                    # tenta fuzzy simétrico
+                    if fuzzy_match(m["home"], [ph], threshold=args.fuzzy) and fuzzy_match(m["away"], [pa], threshold=args.fuzzy):
+                        ok = True
+                if ok:
                     collected.append({
                         "match_id": m["match_id"], "home": m["home"], "away": m["away"],
                         "bookmaker": r["bookmaker"], "market": r["market"],
