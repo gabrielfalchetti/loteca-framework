@@ -33,7 +33,6 @@ def parse_time(iso_s: str) -> Optional[dt.datetime]:
         return None
 
 def score_pair(h1: str, h2: str, a1: str, a2: str) -> Tuple[int,int,int]:
-    # retorna (score_min, score_home, score_away)
     sh = fuzz.token_set_ratio(h1, h2)
     sa = fuzz.token_set_ratio(a1, a2)
     return min(sh, sa), sh, sa
@@ -59,15 +58,9 @@ def flatten_odds(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     })
     return flat
 
-def match_provider_events(
-    matches: List[Dict[str,str]],
-    prov_rows: List[Dict[str, Any]],
-    window_days: int,
-    fuzzy_thr: int
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def match_provider_events(matches: List[Dict[str,str]], prov_rows: List[Dict[str, Any]], window_days: int, fuzzy_thr: int):
     out, unmatched = [], []
 
-    # Index por dia UTC
     by_day: Dict[str, List[Dict[str,Any]]] = {}
     for r in prov_rows:
         t = parse_time(r.get("commence_time") or "")
@@ -83,29 +76,25 @@ def match_provider_events(
     for m in matches:
         mdate = None
         if m.get("date"):
-            try:
-                mdate = dt.date.fromisoformat(m["date"][:10])
-            except Exception:
-                mdate = None
+            try: mdate = dt.date.fromisoformat(m["date"][:10])
+            except: mdate = None
 
         candidates = prov_rows if mdate is None else rows_in_window(mdate)
         if not candidates and mdate is not None:
-            candidates = prov_rows  # fallback sem filtro de data
+            candidates = prov_rows
 
         mh_raw, ma_raw = m["home"], m["away"]
         mh, ma = canonical(mh_raw), canonical(ma_raw)
 
         best: Optional[Tuple[int,Dict[str,Any],str,int,int]] = None
-        # best = (score_min, row, orientacao, score_home, score_away), orientacao ∈ {"dir","inv"}
+        # (score_min, row, orientacao, score_home, score_away)
 
         for r in candidates:
             ph_raw, pa_raw = r["prov_home"], r["prov_away"]
             ph, pa = canonical(ph_raw), canonical(pa_raw)
+            s_dir, sh_dir, sa_dir = score_pair(mh, ph, ma, pa)
+            s_inv, sh_inv, sa_inv = score_pair(mh, pa, ma, ph)
 
-            s_dir, sh_dir, sa_dir = score_pair(mh, ph, ma, pa)   # direto
-            s_inv, sh_inv, sa_inv = score_pair(mh, pa, ma, ph)   # invertido
-
-            # escolhe a melhor orientação, mas exige que **ambos** os placares individuais >= fuzzy_thr
             cand = None
             if s_dir >= s_inv and sh_dir >= fuzzy_thr and sa_dir >= fuzzy_thr:
                 cand = (s_dir, r, "dir", sh_dir, sa_dir)
@@ -116,12 +105,12 @@ def match_provider_events(
                 best = cand
 
         if best:
-            _, r, orient, sh, sa = best
-            # dedup por (bookmaker, market, selection) — 1 linha por combinação
+            _, r, _, _, _ = best
+            # 1 linha por combinação bookmaker/market/selection
             seen = set()
-            bkey = (r["bookmaker"] or "", r["market"] or "", r["selection"] or "")
-            if bkey not in seen:
-                seen.add(bkey)
+            key = (r["bookmaker"], r["market"], r["selection"])
+            if key not in seen:
+                seen.add(key)
                 out.append({
                     "match_id": m["match_id"], "home": mh_raw, "away": ma_raw,
                     "bookmaker": r["bookmaker"], "market": r["market"],
@@ -140,9 +129,9 @@ def main():
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--regions", default="uk,eu,us,au")
     ap.add_argument("--debug", action="store_true")
-    ap.add_argument("--window", type=int, default=3, help="Tolerância de datas (±N dias) p/ casar TheOddsAPI.")
-    ap.add_argument("--fuzzy", type=int, default=93, help="Limiar fuzzy (0-100) token_set_ratio. Recomendado 90–95.")
-    ap.add_argument("--aliases", type=str, default=None, help="JSON com aliases extras (opcional).")
+    ap.add_argument("--window", type=int, default=3, help="Tolerância de datas (±N dias).")
+    ap.add_argument("--fuzzy", type=int, default=93, help="Limiar fuzzy (0-100). Recomendado 90–95.")
+    ap.add_argument("--aliases", type=str, default=None, help="JSON com aliases extras.")
     args = ap.parse_args()
 
     if args.aliases:
