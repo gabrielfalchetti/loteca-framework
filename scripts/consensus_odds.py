@@ -12,8 +12,6 @@ import argparse, csv
 from typing import Dict, List
 from collections import defaultdict
 
-FIELDS = ["match_id","home","away","bookmaker","market","selection","price"]
-
 def read_csv(path: Path) -> List[Dict[str,str]]:
     if not path.exists(): return []
     with path.open("r", encoding="utf-8") as f:
@@ -34,24 +32,19 @@ def main():
 
     the = read_csv(base_out / "odds_theoddsapi.csv")
     api = read_csv(base_out / "odds_apifootball.csv")
-
     rows = the + api
     out_csv = base_out / "odds_consensus.csv"
 
     if not rows:
-        # Gera arquivo vazio (com cabeçalho) para manter pipeline vivo se assim desejado
         with out_csv.open("w", newline="", encoding="utf-8") as f:
             wr = csv.DictWriter(f, fieldnames=["match_id","home","away","market","selection","price_consensus","num_feeds"])
             wr.writeheader()
         msg = "[consensus] AVISO: nenhum provedor retornou odds. Arquivo vazio gerado."
-        if args.allow-empty:
-            print(msg)
-            raise SystemExit(0)
+        if args.allow_empty:
+            print(msg); raise SystemExit(0)
         else:
-            print(msg + " (use --allow-empty para não abortar)")
-            raise SystemExit(1)
+            print(msg + " (use --allow-empty para não abortar)"); raise SystemExit(1)
 
-    # Consenso simples: média por (match_id, market, selection)
     grouped: Dict[tuple, List[float]] = defaultdict(list)
     meta: Dict[tuple, Dict[str,str]] = {}
     for r in rows:
