@@ -15,9 +15,19 @@ ALIASES: Dict[str, List[str]] = {
     "atletico paranaense": ["athletico pr","athletico paranaense","cap","athletico-pr","atletico-pr"],
 }
 
+def extend_aliases(extra: Dict[str, List[str]]) -> None:
+    # mescla/normaliza chaves para lowercase sem acento
+    for k, vals in (extra or {}).items():
+        can = canonical(k)
+        ALIASES.setdefault(can, [])
+        for v in vals or []:
+            vv = canonical(v)
+            if vv != can and vv not in ALIASES[can]:
+                ALIASES[can].append(vv)
+
 def canonical(name: str) -> str:
     n = unicodedata.normalize("NFKD", name).encode("ascii","ignore").decode("ascii").lower()
-    n = re.sub(r"[^a-z0-9 ]+"," ", n)
+    n = re.sub(r"[^a-z0-9 ]+", " ", n)
     n = re.sub(r"\b(ec|fc|afc|sc|ac|esporte clube|futebol clube)\b","", n)
     n = " ".join(n.split())
     for can, alts in ALIASES.items():
@@ -26,7 +36,6 @@ def canonical(name: str) -> str:
     return n
 
 def fuzzy_match(target: str, candidates: List[str], threshold: float = 0.92) -> str | None:
-    import difflib
     t = canonical(target)
     cands = list({canonical(c) for c in candidates})
     best, score = None, -1.0
