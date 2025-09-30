@@ -16,7 +16,6 @@ ALIASES: Dict[str, List[str]] = {
 }
 
 def extend_aliases(extra: Dict[str, List[str]]) -> None:
-    # mescla/normaliza chaves para lowercase sem acento
     for k, vals in (extra or {}).items():
         can = canonical(k)
         ALIASES.setdefault(can, [])
@@ -27,7 +26,7 @@ def extend_aliases(extra: Dict[str, List[str]]) -> None:
 
 def canonical(name: str) -> str:
     n = unicodedata.normalize("NFKD", name).encode("ascii","ignore").decode("ascii").lower()
-    n = re.sub(r"[^a-z0-9 ]+", " ", n)
+    n = re.sub(r"[^a-z0-9 ]+"," ", n)
     n = re.sub(r"\b(ec|fc|afc|sc|ac|esporte clube|futebol clube)\b","", n)
     n = " ".join(n.split())
     for can, alts in ALIASES.items():
