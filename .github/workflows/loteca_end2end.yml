@@ -1,4 +1,4 @@
-name: end2end
+name: loteca_end2end
 
 on:
   workflow_dispatch:
@@ -8,15 +8,15 @@ on:
         required: true
         default: "2025-10-05_1214"
       SEASON:
-        description: "Ano da temporada (opcional, ex.: 2025)"
+        description: "Ano da temporada (ex.: 2025)"
         required: false
         default: "2025"
       REGIONS:
-        description: "Regiões do TheOddsAPI"
+        description: "Regiões do TheOddsAPI (ex.: uk,eu,us,au)"
         required: false
         default: "uk,eu,us,au"
       DEBUG:
-        description: "Ativar logs de debug? true/false"
+        description: "Ativar logs de debug? (true/false)"
         required: false
         default: "true"
 
@@ -58,14 +58,17 @@ jobs:
       - name: Sanity check de entrada
         run: |
           set -e
-          test -f "data/in/${RODADA}/matches_source.csv" || (echo "ERRO: data/in/${RODADA}/matches_source.csv não encontrado" && exit 2)
+          if [ ! -f "data/in/${RODADA}/matches_source.csv" ]; then
+            echo "ERRO: data/in/${RODADA}/matches_source.csv não encontrado"
+            exit 2
+          fi
           echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
 
       - name: Checar secrets presentes
         run: |
           set -e
-          [ -n "${THEODDS_API_KEY}" ] && echo "THEODDS_API_KEY: OK" || (echo "FALTANDO THEODDS_API_KEY" && exit 3)
-          [ -n "${RAPIDAPI_KEY}" ] && echo "RAPIDAPI_KEY: OK" || (echo "FALTANDO RAPIDAPI_KEY" && exit 3)
+          if [ -z "${THEODDS_API_KEY}" ]; then echo "FALTANDO THEODDS_API_KEY"; exit 3; else echo "THEODDS_API_KEY: OK"; fi
+          if [ -z "${RAPIDAPI_KEY}" ]; then echo "FALTANDO RAPIDAPI_KEY"; exit 3; else echo "RAPIDAPI_KEY: OK"; fi
 
       - name: W&B Login
         run: |
@@ -78,35 +81,43 @@ jobs:
           set -e
           grep -n "consensus-safe" scripts/consensus_odds_safe.py || (echo "CONSENSUS_SAFE_NOT_FOUND"; exit 4)
           grep -n "theoddsapi-safe" scripts/ingest_odds_theoddsapi_safe.py || (echo "SAFE_NOT_FOUND"; exit 4)
-          python - <<'PY'
-from importlib import util
-print("[check] consensus_safe exists:", bool(util.find_spec("scripts.consensus_odds_safe")))
-PY
+          python -c "import importlib.util; import sys; ok=bool(importlib.util.find_spec('scripts.consensus_odds_safe')); print('[check] consensus_safe exists:', ok); sys.exit(0 if ok else 5)"
 
       # ===== TheOddsAPI SAFE (parâmetros estritos, casamento confiável) =====
       - name: Ingest TheOddsAPI (SAFE)
+        env:
+          RODADA: ${{ env.RODADA }}
+          REGIONS: ${{ env.REGIONS }}
+          DEBUG: ${{ env.DEBUG }}
         run: |
           set -e
           if [ -n "${THEODDS_API_KEY}" ]; then
+            EXTRA=""
+            if [ "${DEBUG}" = "true" ]; then EXTRA="--debug"; fi
             python scripts/ingest_odds_theoddsapi_safe.py \
               --rodada "${RODADA}" \
               --regions "${REGIONS}" \
-              $( [ "${DEBUG}" = "true" ] && echo "--debug" )
+              ${EXTRA}
           else
             echo "[theoddsapi-safe] SKIP: THEODDS_API_KEY ausente."
           fi
 
       # ===== API-Football (RapidAPI) SAFE (opcional, tolerante a falhas) =====
       - name: Ingest API-Football (SAFE)
+        env:
+          RODADA: ${{ env.RODADA }}
+          SEASON: ${{ env.SEASON }}
+          DEBUG: ${{ env.DEBUG }}
         run: |
           set -e
           if [ -n "${RAPIDAPI_KEY}" ]; then
-            # se tiver o script SAFE, ele é chamado; se não, caímos no módulo "normal" com flags equivalentes
+            EXTRA=""
+            if [ "${DEBUG}" = "true" ]; then EXTRA="--debug"; fi
             if [ -f "scripts/ingest_odds_apifootball_rapidapi_safe.py" ]; then
               python scripts/ingest_odds_apifootball_rapidapi_safe.py \
                 --rodada "${RODADA}" \
                 --season "${SEASON}" \
-                $( [ "${DEBUG}" = "true" ] && echo "--debug" ) || true
+                ${EXTRA} || true
             else
               python -m scripts.ingest_odds_apifootball_rapidapi \
                 --rodada "${RODADA}" \
@@ -114,7 +125,7 @@ PY
                 --window 1 \
                 --fuzzy 0.92 \
                 --aliases data/aliases_br.json \
-                $( [ "${DEBUG}" = "true" ] && echo "--debug" ) || true
+                ${EXTRA} || true
             fi
           else
             echo "[apifootball-safe] SKIP: RAPIDAPI_KEY ausente."
@@ -122,6 +133,8 @@ PY
 
       # ===== Consenso SAFE (NÃO aborta quando vazio) =====
       - name: Consenso (SAFE)
+        env:
+          RODADA: ${{ env.RODADA }}
         run: |
           set -e
           python -m scripts.consensus_odds_safe --rodada "${RODADA}"
