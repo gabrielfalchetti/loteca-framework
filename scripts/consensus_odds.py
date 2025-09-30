@@ -27,7 +27,6 @@ def mean(xs: List[float]) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    # Se quiser comportamento antigo (falhar quando vazio), use --strict-empty
     ap.add_argument("--strict-empty", action="store_true",
                     help="Se nenhum provedor tiver odds, aborta com código 1 (comportamento antigo).")
     args = ap.parse_args()
