@@ -1,68 +1,295 @@
 {
-  "normalize": {
-    "strip_accents": true,
-    "casefold": true,
-    "collapse_spaces": true,
-    "drop_punctuation": true,
-    "map": {
-      "&": "and",
-      "fc": "",
-      "ec": ""
-    }
-  },
-  "teams": {
-    "Atletico Mineiro": [
-      "Atlético Mineiro",
-      "Atletico-MG",
-      "Atlético-MG",
-      "Atlético MG",
-      "Atletico MG",
-      "Clube Atletico Mineiro",
-      "Clube Atlético Mineiro",
-      "Galo"
-    ],
-    "Juventude": [
-      "EC Juventude",
-      "E.C. Juventude",
-      "Juventude RS"
-    ],
-    "Goias": [
-      "Goiás",
-      "Goias EC",
-      "Goiás EC",
-      "Goias Esporte Clube",
-      "Goiás Esporte Clube"
-    ],
-    "Atletico Goianiense": [
-      "Atlético Goianiense",
-      "Atletico Goianiense GO",
-      "Atlético-GO",
-      "Atletico-GO",
-      "Atlético GO",
-      "Atletico GO",
-      "Atletico Clube Goianiense",
-      "Atlético Clube Goianiense",
-      "Dragao",
-      "Dragão"
+  "_meta": {
+    "descricao": "Aliases para times BR — padroniza nomes entre matches_source e provedores",
+    "versao": "2025-09-27_1213",
+    "comentarios": [
+      "Evite duplicar chaves. Sempre padronize para o mesmo canonical_name.",
+      "Inclua variações com e sem acento, abreviações e sufixos com cidade/UF."
     ]
   },
-  "leagues": {
-    "BR-A": [
-      "Serie A",
-      "Série A",
-      "Brasileirao",
-      "Brasileirão",
-      "Brazil Serie A",
-      "Brazil - Serie A",
-      "Campeonato Brasileiro",
-      "Campeonato Brasileiro Serie A"
-    ],
-    "BR-B": [
-      "Serie B",
-      "Série B",
-      "Brasileirao B",
-      "Brazil Serie B",
-      "Campeonato Brasileiro Serie B"
+
+  "Atletico Mineiro": {
+    "canonical_name": "Atlético Mineiro",
+    "aliases": [
+      "Atletico MG",
+      "Atlético MG",
+      "Atlético-MG",
+      "Atletico-MG",
+      "Atlético Mineiro (MG)",
+      "Atlético",
+      "Atletico Mineiro Belo Horizonte",
+      "Atletico Mineiro BRA",
+      "Atl Mineiro",
+      "Galo"
+    ]
+  },
+
+  "Juventude": {
+    "canonical_name": "Juventude",
+    "aliases": [
+      "EC Juventude",
+      "Juventude RS",
+      "Juventude (RS)",
+      "Juv",
+      "Juventude Caxias",
+      "Juventude BRA"
+    ]
+  },
+
+  "Goias": {
+    "canonical_name": "Goiás",
+    "aliases": [
+      "Goias EC",
+      "Goiás EC",
+      "Goias GO",
+      "Goiás (GO)",
+      "Goiás Esporte Clube",
+      "Goias Esporte Clube",
+      "Goias BRA"
+    ]
+  },
+
+  "Atletico Goianiense": {
+    "canonical_name": "Atlético Goianiense",
+    "aliases": [
+      "Atletico GO",
+      "Atlético GO",
+      "Atlético-GO",
+      "Atletico-GO",
+      "Atletico Go",
+      "Dragao",
+      "Atlético Goianiense (GO)",
+      "Atletico Goianiense GO",
+      "Atletico Goianiense BRA"
+    ]
+  },
+
+  "Flamengo": {
+    "canonical_name": "Flamengo",
+    "aliases": [
+      "CR Flamengo",
+      "Flamengo RJ",
+      "Flamengo (RJ)",
+      "Flamengo BRA",
+      "Mengao",
+      "Mengo",
+      "Fla"
+    ]
+  },
+
+  "Fluminense": {
+    "canonical_name": "Fluminense",
+    "aliases": [
+      "Fluminense RJ",
+      "Fluminense (RJ)",
+      "Fluminense BRA",
+      "Flu",
+      "Fluzao"
+    ]
+  },
+
+  "Palmeiras": {
+    "canonical_name": "Palmeiras",
+    "aliases": [
+      "SE Palmeiras",
+      "Palmeiras SP",
+      "Palmeiras (SP)",
+      "Palmeiras BRA",
+      "Verdão",
+      "Verdao"
+    ]
+  },
+
+  "Sao Paulo": {
+    "canonical_name": "São Paulo",
+    "aliases": [
+      "Sao Paulo FC",
+      "São Paulo FC",
+      "Sao Paulo (SP)",
+      "São Paulo (SP)",
+      "SPFC",
+      "Sao Paulo BRA",
+      "Tricolor Paulista"
+    ]
+  },
+
+  "Corinthians": {
+    "canonical_name": "Corinthians",
+    "aliases": [
+      "SC Corinthians",
+      "Corinthians SP",
+      "Corinthians (SP)",
+      "Corinthians BRA",
+      "SCCP",
+      "Timao",
+      "Timão"
+    ]
+  },
+
+  "Gremio": {
+    "canonical_name": "Grêmio",
+    "aliases": [
+      "Gremio FBPA",
+      "Grêmio FBPA",
+      "Gremio RS",
+      "Grêmio RS",
+      "Gremio (RS)",
+      "Grêmio (RS)",
+      "Gremio BRA",
+      "Imortal"
+    ]
+  },
+
+  "Internacional": {
+    "canonical_name": "Internacional",
+    "aliases": [
+      "SC Internacional",
+      "Internacional RS",
+      "Internacional (RS)",
+      "Internacional BRA",
+      "Inter",
+      "Colorado"
+    ]
+  },
+
+  "Botafogo": {
+    "canonical_name": "Botafogo",
+    "aliases": [
+      "Botafogo RJ",
+      "Botafogo (RJ)",
+      "Botafogo FR",
+      "Botafogo BRA",
+      "Fogao",
+      "Fogo"
+    ]
+  },
+
+  "Vasco": {
+    "canonical_name": "Vasco da Gama",
+    "aliases": [
+      "CR Vasco da Gama",
+      "Vasco RJ",
+      "Vasco (RJ)",
+      "Vasco BRA",
+      "Vasco"
+    ]
+  },
+
+  "Bahia": {
+    "canonical_name": "Bahia",
+    "aliases": [
+      "EC Bahia",
+      "Bahia BA",
+      "Bahia (BA)",
+      "Bahia BRA",
+      "ECB"
+    ]
+  },
+
+  "Athletico Paranaense": {
+    "canonical_name": "Athletico Paranaense",
+    "aliases": [
+      "Athletico-PR",
+      "Atletico Paranaense",
+      "Atlético Paranaense",
+      "Athletico PR",
+      "CAP",
+      "Furacao",
+      "Furação",
+      "Athletico BRA"
+    ]
+  },
+
+  "Coritiba": {
+    "canonical_name": "Coritiba",
+    "aliases": [
+      "Coritiba PR",
+      "Coritiba (PR)",
+      "CFC",
+      "Coritiba BRA",
+      "Coxa"
+    ]
+  },
+
+  "Ceara": {
+    "canonical_name": "Ceará",
+    "aliases": [
+      "Ceara SC",
+      "Ceará SC",
+      "Ceara CE",
+      "Ceará (CE)",
+      "Ceara BRA",
+      "Vozão",
+      "Vozao"
+    ]
+  },
+
+  "Fortaleza": {
+    "canonical_name": "Fortaleza",
+    "aliases": [
+      "Fortaleza CE",
+      "Fortaleza (CE)",
+      "Fortaleza BRA",
+      "Leao do Pici",
+      "Leão do Pici",
+      "FEC"
+    ]
+  },
+
+  "Cruzeiro": {
+    "canonical_name": "Cruzeiro",
+    "aliases": [
+      "Cruzeiro MG",
+      "Cruzeiro (MG)",
+      "Cruzeiro BRA",
+      "Raposa"
+    ]
+  },
+
+  "America Mineiro": {
+    "canonical_name": "América Mineiro",
+    "aliases": [
+      "America MG",
+      "América MG",
+      "America-MG",
+      "América-MG",
+      "América Mineiro (MG)",
+      "Coelho",
+      "America BRA"
+    ]
+  },
+
+  "Sport Recife": {
+    "canonical_name": "Sport",
+    "aliases": [
+      "Sport Club do Recife",
+      "Sport PE",
+      "Sport (PE)",
+      "Sport Recife BRA",
+      "Leao",
+      "Leão"
+    ]
+  },
+
+  "Avai": {
+    "canonical_name": "Avaí",
+    "aliases": [
+      "Avai SC",
+      "Avaí SC",
+      "Avai (SC)",
+      "Avaí (SC)",
+      "Avai BRA"
+    ]
+  },
+
+  "Atletico Go": {
+    "canonical_name": "Atlético Goianiense",
+    "aliases": [
+      "Atl Goianiense",
+      "Atletico GO",
+      "Atlético GO",
+      "Atlético-GO",
+      "Atletico-GO"
     ]
   }
 }
