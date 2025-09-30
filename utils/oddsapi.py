@@ -12,6 +12,7 @@ def _get_env(*names: str) -> str:
             return v.strip()
     return ""
 
+# Aceita THEODDSAPI_KEY ou THEODDS_API_KEY
 ODDSAPI_KEY = _get_env("THEODDSAPI_KEY", "THEODDS_API_KEY")
 
 class OddsApiError(RuntimeError):
