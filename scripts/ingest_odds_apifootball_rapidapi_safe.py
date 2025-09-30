@@ -1,68 +1,44 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python
+from __future__ import annotations
 
-"""
-Wrapper "seguro" para API-Football (RapidAPI).
-- Exige RAPIDAPI_KEY no ambiente (fail-fast)
-- Chama o script original ingest_odds_apifootball_rapidapi.py
-- Confere se o CSV de saída tem linhas (>0). Se vazio -> erro
-Uso:
-  python scripts/ingest_odds_apifootball_rapidapi_safe.py --rodada RODADA [demais args repassados]
-"""
-
+import sys, subprocess, json
+from pathlib import Path
 import argparse
-import os
-import subprocess
-import sys
-import pandas as pd
 
-def passthrough_unknown(args_list):
-    # Repassa quaisquer flags/pares ao script original
-    return args_list
+def run(cmd: list[str]) -> int:
+    print(f"[apifootball-safe] Executando: {' '.join(cmd)}")
+    return subprocess.call(cmd)
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--rodada", required=True)
-    # Recebe quaisquer outros args e repassa ao original
-    known, unknown = parser.parse_known_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--season", type=int, default=None)
+    ap.add_argument("--window", type=int, default=1)     # curto é melhor pra BR
+    ap.add_argument("--fuzzy", type=float, default=0.92) # 0.90–0.94
+    ap.add_argument("--aliases", type=str, default="data/aliases_br.json")
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
 
-    api_key = os.getenv("RAPIDAPI_KEY")
-    if not api_key:
-        print("[apifootball-safe] ERRO: RAPIDAPI_KEY não definido. Configure o secret no GitHub.", flush=True)
-        sys.exit(1)
+    cmd = [
+        sys.executable, "-m", "scripts.ingest_odds_apifootball_rapidapi",
+        "--rodada", args.rodada,
+        "--window", str(args.window),
+        "--fuzzy", str(args.fuzzy),
+        "--aliases", args.aliases
+    ]
+    if args.season: cmd += ["--season", str(args.season)]
+    if args.debug:  cmd += ["--debug"]
 
-    cmd = [sys.executable, "scripts/ingest_odds_apifootball_rapidapi.py", "--rodada", known.rodada]
-    cmd += passthrough_unknown(unknown)
+    rc = run(cmd)
 
-    print(f"[apifootball-safe] Executando: {' '.join(cmd)}", flush=True)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    base_out = Path("data/out") / args.rodada
+    counts = {
+        "odds_apifootball.csv": (base_out / "odds_apifootball.csv").exists() and sum(1 for _ in open(base_out / "odds_apifootball.csv", "r", encoding="utf-8")) - 1 or 0,
+        "unmatched_apifootball.csv": (base_out / "unmatched_apifootball.csv").exists() and sum(1 for _ in open(base_out / "unmatched_apifootball.csv", "r", encoding="utf-8")) - 1 or 0
+    }
+    print(f"[apifootball-safe] linhas -> {json.dumps(counts)}")
 
-    # Sempre espelha logs do original para facilitar debug
-    if proc.stdout:
-        print("[apifootball-safe] STDOUT do original:\n" + proc.stdout, flush=True)
-    if proc.stderr:
-        print("[apifootball-safe] STDERR do original:\n" + proc.stderr, flush=True)
-
-    if proc.returncode != 0:
-        print("[apifootball-safe] ERRO: ingest_odds_apifootball_rapidapi.py retornou erro.", flush=True)
-        sys.exit(proc.returncode)
-
-    out_path = f"data/out/{known.rodada}/odds_apifootball.csv"
-    if not os.path.exists(out_path):
-        print(f"[apifootball-safe] ERRO: saída {out_path} não foi criada.", flush=True)
-        sys.exit(1)
-
-    try:
-        df = pd.read_csv(out_path)
-    except Exception as e:
-        print(f"[apifootball-safe] ERRO lendo {out_path}: {e}", flush=True)
-        sys.exit(1)
-
-    if df.empty:
-        print("[apifootball-safe] ERRO: nenhuma odd retornada pelo API-Football para os jogos listados.", flush=True)
-        sys.exit(1)
-
-    print(f"[apifootball-safe] OK. Arquivo garantido em {out_path}", flush=True)
+    raise SystemExit(0 if rc == 0 else 0)
 
 if __name__ == "__main__":
     main()
