@@ -8,5 +8,7 @@
   "Avaí": ["Avai", "Avai FC", "Avai SC", "Avai- SC"],
   "Coritiba": ["Coritiba PR", "Coxa"],
   "Athletico Paranaense": ["Athletico-PR", "Atletico PR", "CAP", "Atletico Paranaense"],
-  "Atlético Mineiro": ["Atletico-MG", "Atletico MG", "CAM", "Clube Atletico Mineiro"]
+  "Atlético Mineiro": ["Atletico-MG", "Atletico MG", "CAM", "Clube Atletico Mineiro"],
+  "Goiás": ["Goias", "Goias EC", "Goias Esporte Clube"],
+  "Atlético Goianiense": ["Atletico Goianiense", "Atletico GO", "ACG", "Dragao"]
 }
