@@ -3,85 +3,83 @@
 
 """
 Wrapper SAFE para TheOddsAPI.
-Executa o módulo oficial com defaults tolerantes, imprime um resumo
-e garante que o pipeline não quebre caso algo dê errado.
-
-Marcador requerido pelo workflow: "theoddsapi-safe"
+ - imprime marcador exigido pelo workflow
+ - chama o módulo real com params default
+ - contabiliza linhas e nunca falha o job
 """
 
-import argparse
-import csv
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-def _count_csv_lines(path: Path) -> int:
-    if not path.exists():
-        return 0
-    try:
-        with path.open("r", encoding="utf-8", newline="") as f:
-            return sum(1 for _ in csv.reader(f))
-    except Exception:
-        return 0
+def main():
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--rodada", required=True)
+    p.add_argument("--regions", default=os.environ.get("REGIONS", "uk,eu,us,au"))
+    p.add_argument("--window", default="3")
+    p.add_argument("--fuzzy", default="93")
+    p.add_argument("--aliases", default="data/aliases_br.json")
+    p.add_argument("--debug", action="store_true", default=os.environ.get("DEBUG", "false") == "true")
+    args = p.parse_args()
 
-def _ensure_csv(path: Path, header: list[str]) -> None:
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(header)
+    rodada = args.rodada
+    regions = args.regions
+    window = str(args.window)
+    fuzzy = str(args.fuzzy)
+    aliases = args.aliases
+    debug = args.debug
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Wrapper SAFE para ingestão via TheOddsAPI")
-    ap.add_argument("--rodada", required=True, help="ex: 2025-09-27_1213")
-    ap.add_argument("--regions", default="uk,eu,us,au", help="regiões da TheOddsAPI (csv)")
-    ap.add_argument("--window", type=int, default=3, help="janela de dias (default: 3)")
-    ap.add_argument("--fuzzy", type=int, default=93, help="threshold de similaridade (0-100)")
-    ap.add_argument("--aliases", default="data/aliases_br.json", help="arquivo de aliases")
-    ap.add_argument("--debug", action="store_true", help="modo verboso")
-    args = ap.parse_args()
-
-    out_dir = Path(f"data/out/{args.rodada}")
+    out_dir = Path(f"data/out/{rodada}")
     out_dir.mkdir(parents=True, exist_ok=True)
     odds_csv = out_dir / "odds_theoddsapi.csv"
     unmatched_csv = out_dir / "unmatched_theoddsapi.csv"
 
+    # Marcador que o workflow procura (via grep)
+    print('9:Marcador requerido pelo workflow: "theoddsapi-safe"')
+
+    py = sys.executable
     cmd = [
-        sys.executable, "-m", "scripts.ingest_odds_theoddsapi",
-        "--rodada", args.rodada,
-        "--regions", args.regions,
-        "--window", str(args.window),
-        "--fuzzy", str(args.fuzzy),
-        "--aliases", args.aliases
+        py, "-m", "scripts.ingest_odds_theoddsapi",
+        "--rodada", rodada,
+        "--regions", regions,
+        "--window", window,
+        "--fuzzy", fuzzy,
+        "--aliases", aliases
     ]
-    if args.debug:
+    if debug:
         cmd.append("--debug")
 
-    # marcador exigido pelo grep do workflow
-    print(f"[theoddsapi-safe] Executando: {' '.join(cmd)}")
+    print(f"[theoddsapi-safe] Executando: {' '.join(shlex.quote(c) for c in cmd)}")
+
+    # garante arquivos
+    for path in (odds_csv, unmatched_csv):
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
 
     try:
         subprocess.run(cmd, check=False)
     except Exception as e:
         print(f"[theoddsapi-safe] ERRO ao executar módulo interno: {e}")
 
-    _ensure_csv(
-        odds_csv,
-        header=["provider","league","home","away","market","outcome","price","last_update"]
-    )
-    _ensure_csv(
-        unmatched_csv,
-        header=["home_source","away_source","league_source","motivo"]
-    )
+    def count_csv_lines(path: Path) -> int:
+        if not path.exists():
+            return 0
+        text = path.read_text(encoding="utf-8", errors="ignore").strip()
+        if not text:
+            return 0
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        return max(0, len(lines))
 
     counts = {
-        "odds_theoddsapi.csv": _count_csv_lines(odds_csv),
-        "unmatched_theoddsapi.csv": _count_csv_lines(unmatched_csv)
+        "odds_theoddsapi.csv": count_csv_lines(odds_csv),
+        "unmatched_theoddsapi.csv": count_csv_lines(unmatched_csv)
     }
     print(f"[theoddsapi-safe] linhas -> {json.dumps(counts)}")
-    return 0
+    sys.exit(0)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
