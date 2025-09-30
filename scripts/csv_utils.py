@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Iterable, List, Dict, Optional, Union
+from typing import Iterable, List, Dict, Optional, Union, Any
 
 PathLike = Union[str, Path]
 
@@ -30,7 +30,7 @@ def read_csv_rows(path: PathLike, *, encoding: str = "utf-8") -> List[Dict[str, 
 
 def write_csv_rows(
     path: PathLike,
-    rows: Iterable[Dict[str, object]],
+    rows: Iterable[Dict[str, Any]],
     fieldnames: Optional[Iterable[str]] = None,
     *,
     encoding: str = "utf-8",
@@ -76,3 +76,17 @@ def count_csv_rows(path: PathLike, *, encoding: str = "utf-8") -> int:
         except StopIteration:
             return 0
         return sum(1 for _ in it)
+
+
+def lower_all(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Retorna uma cópia do dicionário com TODOS os valores string em minúsculas/strip.
+    Útil para normalização antes de merges ou comparações.
+    """
+    out: Dict[str, Any] = {}
+    for k, v in row.items():
+        if isinstance(v, str):
+            out[k] = v.strip().lower()
+        else:
+            out[k] = v
+    return out
