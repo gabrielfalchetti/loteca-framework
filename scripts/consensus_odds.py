@@ -13,9 +13,13 @@ from typing import Dict, List
 from collections import defaultdict
 
 def read_csv(path: Path) -> List[Dict[str,str]]:
-    if not path.exists(): return []
+    if not path.exists():
+        print(f"[consensus] AVISO: arquivo não encontrado: {path}")
+        return []
     with path.open("r", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    print(f"[consensus] lido {path} -> {len(rows)} linhas")
+    return rows
 
 def mean(xs: List[float]) -> float:
     return sum(xs)/len(xs) if xs else float("nan")
@@ -23,7 +27,6 @@ def mean(xs: List[float]) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    # Agora o padrão é **NÃO** abortar quando vazio; a flag abaixo permite comportamento antigo.
     ap.add_argument("--strict-empty", action="store_true",
                     help="Se nenhum provedor tiver odds, aborta com código 1 (comportamento antigo).")
     args = ap.parse_args()
@@ -40,11 +43,10 @@ def main():
         with out_csv.open("w", newline="", encoding="utf-8") as f:
             wr = csv.DictWriter(f, fieldnames=["match_id","home","away","market","selection","price_consensus","num_feeds"])
             wr.writeheader()
-        msg = "[consensus] AVISO: nenhum provedor retornou odds. Arquivo vazio gerado."
+        msg = "[consensus] AVISO: nenhum provedor retornou odds. CSV vazio gerado."
         print(msg)
-        if args.strict-empty:
+        if args.strict_empty:
             raise SystemExit(1)
-        # padrão: não aborta
         raise SystemExit(0)
 
     grouped: Dict[tuple, List[float]] = defaultdict(list)
