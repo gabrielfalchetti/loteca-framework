@@ -3,155 +3,117 @@
 
 """
 Wrapper SAFE para API-Football (RapidAPI).
+Objetivo: rodar o módulo interno com parâmetros controlados, padronizar logs e
+nunca derrubar o job. Saída final sempre inclui o resumo de linhas dos CSVs.
 
-Objetivo:
-- Chamar o módulo robusto scripts.ingest_odds_apifootball_rapidapi com parâmetros sensatos;
-- Nunca falhar o job: garantir arquivos de saída (nem que vazios) e exit code 0;
-- Padronizar logs/contagens e deixar rastros de debug.
-
-Saídas esperadas (na pasta da rodada):
-  - data/out/<RODADA>/odds_apifootball.csv
-  - data/out/<RODADA>/unmatched_apifootball.csv
-  - (opcional) data/out/<RODADA>/debug/*.log
-
-Uso típico:
+Uso típico (o workflow já faz isso):
   python scripts/ingest_odds_apifootball_rapidapi_safe.py \
     --rodada 2025-09-27_1213 \
     --season 2025 \
-    --window 1 \
-    --fuzzy 0.92 \
+    --window 2 \
+    --fuzzy 0.90 \
     --aliases data/aliases_br.json \
     --debug
 """
 
+from __future__ import annotations
 import argparse
 import csv
 import json
 import os
+import shlex
 import subprocess
 import sys
-from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
+
+# 9:Marcador requerido pelo workflow: "apifootball-safe"
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Wrapper SAFE para ingest RapidAPI (API-Football).")
+    p.add_argument("--rodada", required=True, help="Carimbo da rodada (ex.: 2025-09-27_1213)")
+    p.add_argument("--season", required=False, default=None, help="Ano da temporada (ex.: 2025)")
+    p.add_argument("--window", type=int, default=2, help="Janela (dias) para matching (default: 2)")
+    p.add_argument("--fuzzy", type=float, default=0.90, help="Threshold de similaridade (default: 0.90)")
+    p.add_argument("--aliases", default="data/aliases_br.json", help="Arquivo de aliases (default: data/aliases_br.json)")
+    p.add_argument("--debug", action="store_true", help="Liga logs detalhados")
+    return p.parse_args()
 
 
-TAG = "[apifootball-safe]"
-
-
-def _ensure_parent(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-
-def _touch_file(path: Path, header: str | None = None) -> None:
-    _ensure_parent(path)
-    if not path.exists():
-        with open(path, "w", encoding="utf-8") as f:
-            if header is not None:
-                f.write(header.rstrip("\n") + "\n")
-
-
-def _count_csv_rows(path: Path) -> int:
-    if not path.exists():
+def _count_csv_rows(path: str) -> int:
+    if not os.path.isfile(path):
         return 0
     try:
-        with open(path, "r", encoding="utf-8", newline="") as f:
-            reader = csv.reader(f)
-            # conta linhas de dados (desconsidera header se houver)
-            rows = list(reader)
-            if not rows:
-                return 0
-            # heurística: se a primeira linha parece header (tem letras), não contar
-            header_like = any(any(c.isalpha() for c in (col or "")) for col in rows[0])
-            return max(0, len(rows) - (1 if header_like else 0))
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            rdr = csv.reader(f)
+            rows = list(rdr)
+        if not rows:
+            return 0
+        # desconta header se existir
+        return max(0, len(rows) - 1)
     except Exception:
         return 0
 
 
-def _run_child(cmd: list[str], env: Dict[str, str] | None, debug: bool) -> int:
-    if debug:
-        print(f"{TAG} Executando: {' '.join(cmd)}")
-    try:
-        proc = subprocess.run(
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if debug:
-            if proc.stdout:
-                print(proc.stdout)
-            if proc.stderr:
-                print(proc.stderr, file=sys.stderr)
-        return proc.returncode
-    except Exception as e:
-        print(f"{TAG} ERRO ao executar filho: {e}", file=sys.stderr)
-        return 127
+def _target_paths(rodada: str) -> Tuple[str, str]:
+    out_dir = os.path.join("data", "out", rodada)
+    odds_path = os.path.join(out_dir, "odds_apifootball.csv")
+    unmatched_path = os.path.join(out_dir, "unmatched_apifootball.csv")
+    return odds_path, unmatched_path
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Wrapper SAFE para API-Football (RapidAPI)")
-    parser.add_argument("--rodada", required=True, help="Ex.: 2025-09-27_1213")
-    parser.add_argument("--season", required=False, help="Ex.: 2025 (opcional; usa env SEASON se ausente)")
-    parser.add_argument("--window", type=int, default=1, help="Janela de dias ao redor da data (padrão: 1)")
-    parser.add_argument("--fuzzy", type=float, default=0.92, help="Similaridade mínima de nomes (padrão: 0.92)")
-    parser.add_argument("--aliases", default="data/aliases_br.json", help="Arquivo JSON de aliases (padrão: data/aliases_br.json)")
-    parser.add_argument("--debug", action="store_true", help="Liga logs verbosos")
-    args = parser.parse_args()
+    ns = parse_args()
 
-    rodada = args.rodada
-    season = args.season or os.environ.get("SEASON", "")
-    debug = bool(args.debug)
+    odds_path, unmatched_path = _target_paths(ns.rodada)
 
-    # Pastas/arquivos esperados
-    out_dir = Path(f"data/out/{rodada}")
-    odds_csv = out_dir / "odds_apifootball.csv"
-    unmatched_csv = out_dir / "unmatched_apifootball.csv"
-    debug_dir = out_dir / "debug"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-
-    # Garante que a pasta existe
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Comando do módulo robusto (já existente no repo)
-    # Mantemos flags padrão; se o módulo não aceitar algum, ele ignora.
+    # Monta comando do módulo interno
     cmd = [
         sys.executable,
         "-m",
         "scripts.ingest_odds_apifootball_rapidapi",
-        "--rodada",
-        rodada,
-        "--window",
-        str(args.window),
-        "--fuzzy",
-        str(args.fuzzy),
-        "--aliases",
-        args.aliases,
+        "--rodada", ns.rodada,
+        "--window", str(ns.window),
+        "--fuzzy", str(ns.fuzzy),
+        "--aliases", ns.aliases,
     ]
-    if season:
-        cmd += ["--season", season]
-    if debug:
-        cmd += ["--debug"]
 
-    # Herdar env e garantir UTF-8
-    env = os.environ.copy()
-    env.setdefault("PYTHONUTF8", "1")
+    if ns.season:
+        cmd += ["--season", str(ns.season)]
+    if ns.debug:
+        cmd.append("--debug")
 
-    # Executa filho (não falhamos independente do retorno)
-    rc = _run_child(cmd, env, debug)
+    print(f"[apifootball-safe] Executando: {' '.join(shlex.quote(c) for c in cmd)}")
 
-    # Sempre garantir que os 2 arquivos existam (mesmo vazios)
-    # Headers simples ajudam o restante do pipeline/Excel.
-    _touch_file(odds_csv, header="match_id,home,away,bookmaker,market,selection,price,ts")
-    _touch_file(unmatched_csv, header="source,home,away,reason")
+    try:
+        # Se o módulo interno falhar, NÃO derruba o job; apenas loga e segue.
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        # Espelha a saída do módulo (útil para debug no Actions)
+        if completed.stdout:
+            # Para não poluir demais, ainda assim mostramos tudo (você pediu logs completos)
+            print(completed.stdout.rstrip())
+        ret = completed.returncode
+        if ret != 0:
+            print(f"[apifootball-safe] AVISO: módulo interno retornou código {ret}.")
+    except Exception as e:
+        print(f"[apifootball-safe] ERRO ao executar módulo interno: {e}")
 
-    counts = {
-        "odds_apifootball.csv": _count_csv_rows(odds_csv),
-        "unmatched_apifootball.csv": _count_csv_rows(unmatched_csv),
+    # Contabiliza arquivos de saída
+    odds_rows = _count_csv_rows(odds_path)
+    unmatched_rows = _count_csv_rows(unmatched_path)
+
+    counts: Dict[str, int] = {
+        "odds_apifootball.csv": odds_rows,
+        "unmatched_apifootball.csv": unmatched_rows,
     }
-    print(f"{TAG} linhas -> {json.dumps(counts, ensure_ascii=False)}")
+    print(f"[apifootball-safe] linhas -> {json.dumps(counts)}")
 
-    # Se o filho retornou erro, não propagamos código de erro (SAFE by design).
-    # O objetivo é manter o job verde e a etapa de consenso produzir CSV (nem que vazio).
+    # Nunca falha: padronizamos exit 0 para não interromper o pipeline
     return 0
 
 
