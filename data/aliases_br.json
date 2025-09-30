@@ -1,14 +1,57 @@
 {
-  "São Paulo": ["Sao Paulo", "Sao Paulo FC", "SPFC"],
-  "Ceará": ["Ceara", "Ceara SC", "Ceara Sporting Club"],
-  "Amazonas": ["Amazonas FC", "Amazonas Futebol Clube"],
-  "Chapecoense": ["Chapecoense SC", "Associacao Chapecoense de Futebol", "Chapeco"],
-  "América Mineiro": ["America-MG", "America MG", "America Futebol Clube MG", "America Mineiro"],
-  "Volta Redonda": ["Volta Redonda RJ", "Volta Redonda FC", "Volta Redonda Futebol Clube"],
-  "Avaí": ["Avai", "Avai FC", "Avai SC", "Avai- SC"],
-  "Coritiba": ["Coritiba PR", "Coxa"],
-  "Athletico Paranaense": ["Athletico-PR", "Atletico PR", "CAP", "Atletico Paranaense"],
-  "Atlético Mineiro": ["Atletico-MG", "Atletico MG", "CAM", "Clube Atletico Mineiro"],
-  "Goiás": ["Goias", "Goias EC", "Goias Esporte Clube"],
-  "Atlético Goianiense": ["Atletico Goianiense", "Atletico GO", "ACG", "Dragao"]
+  "normalize": {
+    "strip_accents": true,
+    "casefold": true,
+    "collapse_spaces": true,
+    "drop_punctuation": true
+  },
+  "teams": {
+    "Atletico Mineiro": [
+      "Atlético Mineiro",
+      "Atlético-MG",
+      "Atletico-MG",
+      "Atlético MG",
+      "Atletico MG",
+      "Galo",
+      "Clube Atlético Mineiro"
+    ],
+    "Juventude": [
+      "EC Juventude",
+      "E.C. Juventude"
+    ],
+    "Goias": [
+      "Goiás",
+      "Goias EC",
+      "Goiás EC",
+      "Goiás Esporte Clube"
+    ],
+    "Atletico Goianiense": [
+      "Atlético Goianiense",
+      "Atlético-GO",
+      "Atletico-GO",
+      "Atlético GO",
+      "Atletico GO",
+      "Dragão",
+      "Atlético Clube Goianiense"
+    ]
+  },
+  "leagues": {
+    "BR-A": [
+      "Serie A",
+      "Série A",
+      "Brasileirão",
+      "Brazil Serie A",
+      "Brazil - Serie A",
+      "Campeonato Brasileiro",
+      "Campeonato Brasileiro Serie A",
+      "Brasileirao"
+    ],
+    "BR-B": [
+      "Serie B",
+      "Série B",
+      "Brazil Serie B",
+      "Campeonato Brasileiro Serie B",
+      "Brasileirao B"
+    ]
+  }
 }
