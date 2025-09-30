@@ -26,7 +26,7 @@ def main():
     ap.add_argument("--aliases", type=str, default="data/aliases_br.json")
     args = ap.parse_args()
 
-    # 1) TheOddsAPI (usar mesmos parâmetros de matching)
+    # 1) TheOddsAPI
     rc1 = run([sys.executable, "-m", "scripts.ingest_odds_theoddsapi",
                "--rodada", args.rodada,
                "--regions", args.regions,
@@ -48,7 +48,7 @@ def main():
     if rc2 != 0:
         print("[end2end] AVISO: API-Football falhou (segue).")
 
-    # 3) Consenso (sempre com allow-empty quando pedido ou em debug)
+    # 3) Consenso
     cmd3 = [sys.executable, "-m", "scripts.consensus_odds", "--rodada", args.rodada]
     if args.consensus_allow_empty or args.debug:
         cmd3.append("--allow-empty")
