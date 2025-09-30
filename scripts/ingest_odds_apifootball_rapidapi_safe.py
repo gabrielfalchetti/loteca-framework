@@ -25,7 +25,15 @@ import sys
 from pathlib import Path
 from typing import Dict
 
-from scripts.csv_utils import count_csv_rows
+# --- import resiliente para quando o arquivo é executado via caminho (não -m) ---
+try:
+    from scripts.csv_utils import count_csv_rows  # type: ignore
+except Exception:
+    # adiciona o diretório raiz do repo ao sys.path
+    REPO_ROOT = Path(__file__).resolve().parents[1]
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from scripts.csv_utils import count_csv_rows  # type: ignore
 
 
 def build_cmd(
