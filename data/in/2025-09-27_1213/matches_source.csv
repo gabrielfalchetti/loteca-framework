@@ -1,5 +1,3 @@
-match_id,home,away,date,league,sport_key
-BR-1,São Paulo,Ceará,2025-10-05,Copa do Brasil,
-BR-2,Amazonas,Chapecoense,2025-10-05,Série B,soccer_brazil_serie_b
-BR-3,América Mineiro,Volta Redonda,2025-10-05,Série B,soccer_brazil_serie_b
-BR-4,Avaí,Coritiba,2025-10-05,Série B,soccer_brazil_serie_b
+match_id,home,away,date
+BR-1,Atletico Mineiro,Juventude,2025-10-05
+BR-2,Goias,Atletico Goianiense,2025-10-05
