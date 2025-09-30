@@ -1,56 +1,50 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
+# scripts/csv_utils.py
 from __future__ import annotations
 import csv
-import os
-from typing import Dict, Iterable, List, Sequence
+from pathlib import Path
+from typing import Iterable, List, Dict, Optional
 
-def read_csv_rows(path: str) -> List[Dict[str, str]]:
-    """Lê CSV para lista de dicts. Retorna [] se não existir ou em erro."""
-    if not os.path.isfile(path):
-        return []
-    try:
-        with open(path, "r", newline="", encoding="utf-8") as f:
-            rdr = csv.DictReader(f)
-            rows = [{(k or "").strip(): (v or "").strip() for k, v in row.items()} for row in rdr]
-        return rows
-    except Exception:
-        return []
+def ensure_dir(p: Path | str) -> None:
+    Path(p).parent.mkdir(parents=True, exist_ok=True)
 
-def write_csv_rows(path: str, rows: Sequence[Dict[str, str]]) -> int:
-    """Escreve CSV garantindo cabeçalho por união de chaves. Retorna nº de linhas."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if not rows:
-        # escreve cabeçalho mínimo
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["source"])
+def read_csv_rows(path: str | Path, *, encoding: str = "utf-8") -> List[Dict[str, str]]:
+    p = Path(path)
+    if not p.exists():
+        return []
+    with p.open("r", newline="", encoding=encoding) as f:
+        reader = csv.DictReader(f)
+        return list(reader)
+
+def write_csv_rows(path: str | Path, rows: Iterable[Dict[str, object]], fieldnames: Optional[Iterable[str]] = None, *, encoding: str = "utf-8") -> int:
+    p = Path(path)
+    ensure_dir(p)
+    rows = list(rows)
+    if not rows and not fieldnames:
+        # nada a escrever e sem header explícito
+        ensure_dir(p)  # garante diretório
+        # cria um CSV vazio com header inexistente? mantém vazio.
+        p.touch(exist_ok=True)
         return 0
-
-    # União ordenada das chaves
-    keys: List[str] = []
-    seen = set()
-    for r in rows:
-        for k in r.keys():
-            if k not in seen:
-                seen.add(k)
-                keys.append(k)
-
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+    if fieldnames is None:
+        # pega header pela união das chaves (ordem estável por primeira linha)
+        first = rows[0] if rows else {}
+        fieldnames = list(first.keys())
+    with p.open("w", newline="", encoding=encoding) as f:
+        w = csv.DictWriter(f, fieldnames=list(fieldnames))
         w.writeheader()
         for r in rows:
             w.writerow(r)
     return len(rows)
 
-def count_csv_rows(path: str) -> int:
-    """Conta linhas (desconta header)."""
-    rows = read_csv_rows(path)
-    return len(rows)
-
-def lower_keys(row: Dict[str, str]) -> Dict[str, str]:
-    return { (k or "").strip().lower(): v for k, v in row.items() }
-
-def lower_all(rows: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
-    return [lower_keys(r) for r in rows]
+def count_csv_rows(path: str | Path, *, encoding: str = "utf-8") -> int:
+    p = Path(path)
+    if not p.exists():
+        return 0
+    with p.open("r", newline="", encoding=encoding) as f:
+        # conta linhas de dados (ignora header)
+        it = csv.reader(f)
+        try:
+            next(it)  # header
+        except StopIteration:
+            return 0
+        return sum(1 for _ in it)
