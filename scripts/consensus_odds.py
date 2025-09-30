@@ -27,6 +27,7 @@ def mean(xs: List[float]) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
+    # Se quiser comportamento antigo (falhar quando vazio), use --strict-empty
     ap.add_argument("--strict-empty", action="store_true",
                     help="Se nenhum provedor tiver odds, aborta com código 1 (comportamento antigo).")
     args = ap.parse_args()
@@ -41,10 +42,11 @@ def main():
 
     if not rows:
         with out_csv.open("w", newline="", encoding="utf-8") as f:
-            wr = csv.DictWriter(f, fieldnames=["match_id","home","away","market","selection","price_consensus","num_feeds"])
+            wr = csv.DictWriter(f, fieldnames=[
+                "match_id","home","away","market","selection","price_consensus","num_feeds"
+            ])
             wr.writeheader()
-        msg = "[consensus] AVISO: nenhum provedor retornou odds. CSV vazio gerado."
-        print(msg)
+        print("[consensus] AVISO: nenhum provedor retornou odds. CSV vazio gerado.")
         if args.strict_empty:
             raise SystemExit(1)
         raise SystemExit(0)
@@ -73,7 +75,9 @@ def main():
         })
 
     with out_csv.open("w", newline="", encoding="utf-8") as f:
-        wr = csv.DictWriter(f, fieldnames=["match_id","home","away","market","selection","price_consensus","num_feeds"])
+        wr = csv.DictWriter(f, fieldnames=[
+            "match_id","home","away","market","selection","price_consensus","num_feeds"
+        ])
         wr.writeheader(); wr.writerows(consensus_rows)
 
     print(f"[consensus] OK -> {out_csv} ({len(consensus_rows)} linhas)")
