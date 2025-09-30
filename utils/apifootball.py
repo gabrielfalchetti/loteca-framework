@@ -13,6 +13,7 @@ def _get_env(*names: str) -> str:
             return v.strip()
     return ""
 
+# Aceita RAPIDAPI_KEY ou RAPID_API_KEY
 API_KEY  = _get_env("RAPIDAPI_KEY", "RAPID_API_KEY")
 
 class ApiFootballError(RuntimeError):
@@ -62,9 +63,9 @@ def resolve_current_season(league_id: int) -> int:
     return int(seasons[-1]["year"])
 
 def find_fixture_id(date_iso: str, home: str, away: str, league_id: int, season: int, window: int = 1) -> Optional[int]:
-    dt = datetime.fromisoformat(date_iso).date()
+    dt0 = datetime.fromisoformat(date_iso).date()
     for delta in range(-abs(window), abs(window)+1):
-        d = (dt + timedelta(days=delta)).isoformat()
+        d = (dt0 + timedelta(days=delta)).isoformat()
         fixtures = _get("/fixtures", {"date": d, "league": league_id, "season": season})
         hkey = _normalize(home); akey = _normalize(away)
         for f in fixtures:
