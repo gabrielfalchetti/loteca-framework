@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import argparse, csv
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from utils.oddsapi import resolve_brazil_soccer_sport_keys, fetch_odds_for_sport, OddsApiError
 from utils.match_normalize import canonical, extend_aliases
 from rapidfuzz import fuzz
@@ -26,14 +26,17 @@ def read_matches(path: Path) -> List[Dict[str, str]]:
             raise SystemExit(2)
         return list(reader)
 
-def parse_time(iso_s: str) -> dt.datetime | None:
+def parse_time(iso_s: str) -> Optional[dt.datetime]:
     try:
         return dt.datetime.fromisoformat(iso_s.replace("Z","+00:00")).astimezone(dt.timezone.utc)
     except Exception:
         return None
 
-def match_score(a: str, b: str) -> int:
-    return fuzz.token_set_ratio(a, b)
+def score_pair(h1: str, h2: str, a1: str, a2: str) -> Tuple[int,int,int]:
+    # retorna (score_min, score_home, score_away)
+    sh = fuzz.token_set_ratio(h1, h2)
+    sa = fuzz.token_set_ratio(a1, a2)
+    return min(sh, sa), sh, sa
 
 def flatten_odds(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     flat = []
@@ -43,11 +46,11 @@ def flatten_odds(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         ctime = ev.get("commence_time")
         if not home or not away:
             continue
-        for bm in ev.get("bookmakers", []):
+        for bm in ev.get("bookmakers", []) or []:
             bname = bm.get("title")
-            for m in bm.get("markets", []):
+            for m in bm.get("markets", []) or []:
                 mkey = m.get("key")
-                for o in m.get("outcomes", []):
+                for o in m.get("outcomes", []) or []:
                     flat.append({
                         "prov_home": home, "prov_away": away,
                         "commence_time": ctime,
@@ -64,6 +67,7 @@ def match_provider_events(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     out, unmatched = [], []
 
+    # Index por dia UTC
     by_day: Dict[str, List[Dict[str,Any]]] = {}
     for r in prov_rows:
         t = parse_time(r.get("commence_time") or "")
@@ -73,8 +77,7 @@ def match_provider_events(
     def rows_in_window(match_date: dt.date) -> List[Dict[str,Any]]:
         rows = []
         for d in range(-abs(window_days), abs(window_days)+1):
-            day = (match_date + dt.timedelta(days=d)).isoformat()
-            rows.extend(by_day.get(day, []))
+            rows.extend(by_day.get((match_date + dt.timedelta(days=d)).isoformat(), []))
         return rows
 
     for m in matches:
@@ -87,30 +90,38 @@ def match_provider_events(
 
         candidates = prov_rows if mdate is None else rows_in_window(mdate)
         if not candidates and mdate is not None:
-            candidates = prov_rows
+            candidates = prov_rows  # fallback sem filtro de data
 
         mh_raw, ma_raw = m["home"], m["away"]
         mh, ma = canonical(mh_raw), canonical(ma_raw)
 
-        best_rows = []
-        best_score = -1
+        best: Optional[Tuple[int,Dict[str,Any],str,int,int]] = None
+        # best = (score_min, row, orientacao, score_home, score_away), orientacao ∈ {"dir","inv"}
 
         for r in candidates:
             ph_raw, pa_raw = r["prov_home"], r["prov_away"]
             ph, pa = canonical(ph_raw), canonical(pa_raw)
 
-            s1 = min(match_score(mh, ph), match_score(ma, pa))
-            s2 = min(match_score(mh, pa), match_score(ma, ph))
-            s = max(s1, s2)
+            s_dir, sh_dir, sa_dir = score_pair(mh, ph, ma, pa)   # direto
+            s_inv, sh_inv, sa_inv = score_pair(mh, pa, ma, ph)   # invertido
 
-            if s >= fuzzy_thr and s >= best_score:
-                if s > best_score:
-                    best_rows = []
-                best_score = s
-                best_rows.append((s, r))
+            # escolhe a melhor orientação, mas exige que **ambos** os placares individuais >= fuzzy_thr
+            cand = None
+            if s_dir >= s_inv and sh_dir >= fuzzy_thr and sa_dir >= fuzzy_thr:
+                cand = (s_dir, r, "dir", sh_dir, sa_dir)
+            elif s_inv > s_dir and sh_inv >= fuzzy_thr and sa_inv >= fuzzy_thr:
+                cand = (s_inv, r, "inv", sh_inv, sa_inv)
 
-        if best_rows:
-            for _, r in best_rows:
+            if cand and (best is None or cand[0] > best[0]):
+                best = cand
+
+        if best:
+            _, r, orient, sh, sa = best
+            # dedup por (bookmaker, market, selection) — 1 linha por combinação
+            seen = set()
+            bkey = (r["bookmaker"] or "", r["market"] or "", r["selection"] or "")
+            if bkey not in seen:
+                seen.add(bkey)
                 out.append({
                     "match_id": m["match_id"], "home": mh_raw, "away": ma_raw,
                     "bookmaker": r["bookmaker"], "market": r["market"],
@@ -129,8 +140,8 @@ def main():
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--regions", default="uk,eu,us,au")
     ap.add_argument("--debug", action="store_true")
-    ap.add_argument("--window", type=int, default=2, help="Tolerância de datas (±N dias) p/ casar TheOddsAPI.")
-    ap.add_argument("--fuzzy", type=int, default=86, help="Limiar fuzzy (0-100) token_set_ratio.")
+    ap.add_argument("--window", type=int, default=3, help="Tolerância de datas (±N dias) p/ casar TheOddsAPI.")
+    ap.add_argument("--fuzzy", type=int, default=93, help="Limiar fuzzy (0-100) token_set_ratio. Recomendado 90–95.")
     ap.add_argument("--aliases", type=str, default=None, help="JSON com aliases extras (opcional).")
     args = ap.parse_args()
 
