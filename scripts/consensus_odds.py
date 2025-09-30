@@ -23,8 +23,9 @@ def mean(xs: List[float]) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    ap.add_argument("--allow-empty", action="store_true",
-                    help="Se nenhum provedor tiver odds, não aborta; grava arquivo vazio e sai com código 0.")
+    # Agora o padrão é **NÃO** abortar quando vazio; a flag abaixo permite comportamento antigo.
+    ap.add_argument("--strict-empty", action="store_true",
+                    help="Se nenhum provedor tiver odds, aborta com código 1 (comportamento antigo).")
     args = ap.parse_args()
 
     base_out = Path("data/out") / args.rodada
@@ -40,10 +41,11 @@ def main():
             wr = csv.DictWriter(f, fieldnames=["match_id","home","away","market","selection","price_consensus","num_feeds"])
             wr.writeheader()
         msg = "[consensus] AVISO: nenhum provedor retornou odds. Arquivo vazio gerado."
-        if args.allow_empty:
-            print(msg); raise SystemExit(0)
-        else:
-            print(msg + " (use --allow-empty para não abortar)"); raise SystemExit(1)
+        print(msg)
+        if args.strict-empty:
+            raise SystemExit(1)
+        # padrão: não aborta
+        raise SystemExit(0)
 
     grouped: Dict[tuple, List[float]] = defaultdict(list)
     meta: Dict[tuple, Dict[str,str]] = {}
@@ -63,7 +65,8 @@ def main():
         m = meta[key]
         consensus_rows.append({
             "match_id": m["match_id"], "home": m["home"], "away": m["away"],
-            "market": m["market"], "selection": m["selection"], "price_consensus": f"{mean(prices):.6f}",
+            "market": m["market"], "selection": m["selection"],
+            "price_consensus": f"{mean(prices):.6f}",
             "num_feeds": str(len(prices))
         })
 
