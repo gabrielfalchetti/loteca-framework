@@ -22,7 +22,6 @@ def _count_csv_lines(path: Path) -> int:
         return 0
     try:
         with path.open("r", encoding="utf-8", newline="") as f:
-            # conta linhas "csv" (inclui cabeçalho)
             return sum(1 for _ in csv.reader(f))
     except Exception:
         return 0
@@ -39,19 +38,16 @@ def main() -> int:
     ap.add_argument("--rodada", required=True, help="ex: 2025-09-27_1213")
     ap.add_argument("--regions", default="uk,eu,us,au", help="regiões da TheOddsAPI (csv)")
     ap.add_argument("--window", type=int, default=3, help="janela de dias (default: 3)")
-    # o módulo interno aceita fuzzy como inteiro (ex.: 93)
     ap.add_argument("--fuzzy", type=int, default=93, help="threshold de similaridade (0-100)")
     ap.add_argument("--aliases", default="data/aliases_br.json", help="arquivo de aliases")
     ap.add_argument("--debug", action="store_true", help="modo verboso")
     args = ap.parse_args()
 
-    # Saídas esperadas pelo restante do pipeline
     out_dir = Path(f"data/out/{args.rodada}")
     out_dir.mkdir(parents=True, exist_ok=True)
     odds_csv = out_dir / "odds_theoddsapi.csv"
     unmatched_csv = out_dir / "unmatched_theoddsapi.csv"
 
-    # Comando para o módulo oficial
     cmd = [
         sys.executable, "-m", "scripts.ingest_odds_theoddsapi",
         "--rodada", args.rodada,
@@ -63,16 +59,14 @@ def main() -> int:
     if args.debug:
         cmd.append("--debug")
 
-    # >>> marcador procurado pelo grep no seu workflow
+    # marcador exigido pelo grep do workflow
     print(f"[theoddsapi-safe] Executando: {' '.join(cmd)}")
 
     try:
-        # Não derruba o job se o módulo interno retornar código != 0
         subprocess.run(cmd, check=False)
     except Exception as e:
         print(f"[theoddsapi-safe] ERRO ao executar módulo interno: {e}")
 
-    # Garante arquivos e reporta contagem
     _ensure_csv(
         odds_csv,
         header=["provider","league","home","away","market","outcome","price","last_update"]
@@ -87,7 +81,6 @@ def main() -> int:
         "unmatched_theoddsapi.csv": _count_csv_lines(unmatched_csv)
     }
     print(f"[theoddsapi-safe] linhas -> {json.dumps(counts)}")
-
     return 0
 
 if __name__ == "__main__":
