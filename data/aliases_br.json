@@ -1,34 +1,12 @@
 {
-  "teams": {
-    "Sao Paulo": "São Paulo",
-    "S.Paulo": "São Paulo",
-    "SPFC": "São Paulo",
-
-    "Ceara": "Ceará",
-    "CEARA": "Ceará",
-
-    "America Mineiro": "América Mineiro",
-    "America-MG": "América Mineiro",
-    "América-MG": "América Mineiro",
-    "America Mg": "América Mineiro",
-    "America/MG": "América Mineiro",
-
-    "Avai": "Avaí",
-    "AVAI": "Avaí",
-
-    "Coritiba": "Coritiba",
-    "Coxa": "Coritiba",
-
-    "Amazonas FC": "Amazonas",
-    "Amazonas Futebol Clube": "Amazonas",
-    "Amazonas/AM": "Amazonas",
-
-    "Chapecoense-SC": "Chapecoense",
-    "Chapecoense SC": "Chapecoense",
-    "Chape": "Chapecoense",
-
-    "Volta Redonda FC": "Volta Redonda",
-    "Volta Redonda-RJ": "Volta Redonda",
-    "Volta\u00e7o": "Volta Redonda"
-  }
+  "São Paulo": ["Sao Paulo", "Sao Paulo FC", "SPFC"],
+  "Ceará": ["Ceara", "Ceara SC", "Ceara Sporting Club"],
+  "Amazonas": ["Amazonas FC", "Amazonas Futebol Clube"],
+  "Chapecoense": ["Chapecoense SC", "Associacao Chapecoense de Futebol", "Chapeco"],
+  "América Mineiro": ["America-MG", "America MG", "America Futebol Clube MG", "America Mineiro"],
+  "Volta Redonda": ["Volta Redonda RJ", "Volta Redonda FC", "Volta Redonda Futebol Clube"],
+  "Avaí": ["Avai", "Avai FC", "Avai SC", "Avai- SC"],
+  "Coritiba": ["Coritiba PR", "Coxa"],
+  "Athletico Paranaense": ["Athletico-PR", "Atletico PR", "CAP", "Atletico Paranaense"],
+  "Atlético Mineiro": ["Atletico-MG", "Atletico MG", "CAM", "Clube Atletico Mineiro"]
 }
