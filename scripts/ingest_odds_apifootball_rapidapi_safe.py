@@ -2,21 +2,21 @@
 """
 Wrapper SAFE para o ingestor do API-Football via RapidAPI.
 
-Características:
-- Preserva o job mesmo em caso de erro/timeout/401.
-- Imprime contagens de linhas ao final.
-- Compatível com o workflow atual.
+- Executa o módulo real com timeout controlado.
+- Nunca falha o job por exceção do módulo interno.
+- Imprime contagens de linhas geradas ao final.
+- Sem dependências externas (contagem de CSV inline).
 
-Exemplos de prints:
+Exemplos de saída:
   [apifootball-safe] Executando: /usr/bin/python -m scripts.ingest_odds_apifootball_rapidapi ...
   [apifootball-safe] TIMEOUT após 60s — seguindo com contagens (SAFE).
   [apifootball-safe] ERRO ao executar módulo interno: <msg>
   [apifootball-safe] linhas -> {"odds_apifootball.csv": 2, "unmatched_apifootball.csv": 1}
 """
-
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import shlex
@@ -25,18 +25,32 @@ import sys
 from pathlib import Path
 from typing import Dict
 
-# --- import resiliente para quando o arquivo é executado via caminho (não -m) ---
-try:
-    from scripts.csv_utils import count_csv_rows  # type: ignore
-except Exception:
-    # adiciona o diretório raiz do repo ao sys.path
-    REPO_ROOT = Path(__file__).resolve().parents[1]
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
-    from scripts.csv_utils import count_csv_rows  # type: ignore
+
+def _count_csv_rows(path: Path) -> int:
+    if not path.exists() or not path.is_file():
+        return 0
+    try:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            # conta linhas, ignorando header se existir
+            rows = list(reader)
+            if not rows:
+                return 0
+            return max(0, len(rows) - 1)
+    except Exception:
+        # Em SAFE, nunca quebrar por I/O — retornar 0
+        return 0
 
 
-def build_cmd(
+def _collect_counts(out_dir: Path) -> Dict[str, int]:
+    files = {
+        "odds_apifootball.csv": out_dir / "odds_apifootball.csv",
+        "unmatched_apifootball.csv": out_dir / "unmatched_apifootball.csv",
+    }
+    return {name: _count_csv_rows(path) for name, path in files.items()}
+
+
+def _build_cmd(
     rodada: str,
     season: str | int | None,
     *,
@@ -48,31 +62,17 @@ def build_cmd(
 ) -> list[str]:
     py = python_bin or sys.executable
     cmd: list[str] = [
-        py,
-        "-m",
-        "scripts.ingest_odds_apifootball_rapidapi",
-        "--rodada",
-        rodada,
-        "--window",
-        str(window),
-        "--fuzzy",
-        str(fuzzy),
-        "--aliases",
-        aliases_path,
+        py, "-m", "scripts.ingest_odds_apifootball_rapidapi",
+        "--rodada", rodada,
+        "--window", str(window),
+        "--fuzzy", str(fuzzy),
+        "--aliases", aliases_path,
     ]
     if season is not None:
         cmd += ["--season", str(season)]
     if debug:
         cmd.append("--debug")
     return cmd
-
-
-def collect_counts(out_dir: Path) -> Dict[str, int]:
-    files = {
-        "odds_apifootball.csv": out_dir / "odds_apifootball.csv",
-        "unmatched_apifootball.csv": out_dir / "unmatched_apifootball.csv",
-    }
-    return {name: count_csv_rows(path) for name, path in files.items()}
 
 
 def main() -> int:
@@ -83,7 +83,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=60)
     args = parser.parse_args()
 
-    cmd = build_cmd(args.rodada, args.season, debug=args.debug)
+    cmd = _build_cmd(args.rodada, args.season, debug=args.debug)
     print(f"[apifootball-safe] Executando: {' '.join(shlex.quote(c) for c in cmd)}")
 
     try:
@@ -99,7 +99,7 @@ def main() -> int:
         print(f"[apifootball-safe] ERRO ao executar módulo interno: {e}")
 
     out_dir = Path("data/out") / args.rodada
-    counts = collect_counts(out_dir)
+    counts = _collect_counts(out_dir)
     print(f"[apifootball-safe] linhas -> {json.dumps(counts, ensure_ascii=False)}")
     return 0
 
