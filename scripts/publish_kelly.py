@@ -21,12 +21,28 @@ from typing import List, Dict, Optional
 
 import pandas as pd
 
+# === Paths do repo antes de qualquer import relativo ===
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
 OUT_DIR = os.path.join(ROOT, "data", "out")
 
-# Import utilidades Kelly (arquivo entregue junto)
-from scripts.kelly import KellyConfig, stake_from_kelly  # type: ignore
+# === Import Kelly de forma resiliente ===
+try:
+    # caso 'scripts' seja pacote (existe scripts/__init__.py)
+    from scripts.kelly import KellyConfig, stake_from_kelly  # type: ignore
+except ModuleNotFoundError:
+    # fallback: carregar diretamente por caminho do arquivo, sem exigir pacote
+    import importlib.util
+    kelly_path = os.path.join(ROOT, "scripts", "kelly.py")
+    if not os.path.exists(kelly_path):
+        raise
+    spec = importlib.util.spec_from_file_location("kelly", kelly_path)
+    if spec is None or spec.loader is None:
+        raise
+    kelly = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kelly)  # type: ignore
+    KellyConfig = kelly.KellyConfig
+    stake_from_kelly = kelly.stake_from_kelly
 
 def _read_csv_safe(path: str) -> Optional[pd.DataFrame]:
     try:
@@ -78,46 +94,28 @@ def load_odds(rodada: str) -> Optional[pd.DataFrame]:
     return df
 
 def infer_columns_pred(df: pd.DataFrame) -> Dict[str, str]:
-    """
-    Tenta mapear nomes de colunas padrões de probabilidade e chaves do jogo.
-    Suporta variações comuns.
-    """
     cols = {c.lower(): c for c in df.columns}
     keys = {}
-
-    # IDs/chaves
     for k in ["match_id", "game_id", "id", "fixture_id"]:
         if k in cols:
             keys["match_id"] = cols[k]; break
-
-    # times
     for k in ["home", "home_team", "team_home"]:
         if k in cols:
             keys["home"] = cols[k]; break
     for k in ["away", "away_team", "team_away"]:
         if k in cols:
             keys["away"] = cols[k]; break
-
-    # probabilidades
     p_home = next((cols[k] for k in ["prob_home", "p_home", "home_prob", "prob1", "p1"] if k in cols), None)
     p_draw = next((cols[k] for k in ["prob_draw", "p_draw", "draw_prob", "probx", "px"] if k in cols), None)
     p_away = next((cols[k] for k in ["prob_away", "p_away", "away_prob", "prob2", "p2"] if k in cols), None)
-
     if not (p_home and p_draw and p_away):
         raise ValueError("Colunas de probabilidade não encontradas (espera-se prob_home/prob_draw/prob_away ou equivalentes).")
-
-    keys["p_home"] = p_home
-    keys["p_draw"] = p_draw
-    keys["p_away"] = p_away
+    keys["p_home"] = p_home; keys["p_draw"] = p_draw; keys["p_away"] = p_away
     return keys
 
 def infer_columns_odds(df: pd.DataFrame) -> Dict[str, str]:
-    """
-    Tenta mapear nomes de colunas padrões para odds decimais 1X2 e match_id.
-    """
     cols = {c.lower(): c for c in df.columns}
     keys = {}
-
     for k in ["match_id", "game_id", "id", "fixture_id"]:
         if k in cols:
             keys["match_id"] = cols[k]; break
@@ -127,17 +125,12 @@ def infer_columns_odds(df: pd.DataFrame) -> Dict[str, str]:
     for k in ["away", "away_team", "team_away"]:
         if k in cols:
             keys["away"] = cols[k]; break
-
     o_home = next((cols[k] for k in ["home_odds", "odds_home", "o_home", "odd1"] if k in cols), None)
     o_draw = next((cols[k] for k in ["draw_odds", "odds_draw", "o_draw", "odds_x", "oddx"] if k in cols), None)
     o_away = next((cols[k] for k in ["away_odds", "odds_away", "o_away", "odd2"] if k in cols), None)
-
     if not (o_home and o_draw and o_away):
         raise ValueError("Colunas de odds não encontradas (espera-se home_odds/draw_odds/away_odds ou equivalentes).")
-
-    keys["o_home"] = o_home
-    keys["o_draw"] = o_draw
-    keys["o_away"] = o_away
+    keys["o_home"] = o_home; keys["o_draw"] = o_draw; keys["o_away"] = o_away
     return keys
 
 def main():
@@ -154,9 +147,7 @@ def main():
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
-    # max_stake: 0 => None
     max_stake = None if args.max_stake <= 0 else args.max_stake
-
     cfg = KellyConfig(
         bankroll=args.bankroll,
         kelly_fraction=args.kelly_fraction,
@@ -166,18 +157,15 @@ def main():
         round_to=args.round_to,
     )
 
-    # leitura
     preds = load_predictions(args.rodada)
     odds = load_odds(args.rodada)
     if preds is None or odds is None:
         print("[kelly] Nada feito (faltam insumos).")
         sys.exit(0)
 
-    # mapear colunas
     pred_cols = infer_columns_pred(preds)
     odds_cols = infer_columns_odds(odds)
 
-    # join por match_id se houver; senão por (home, away) normalizados
     if "match_id" in pred_cols and "match_id" in odds_cols and pred_cols["match_id"] in preds.columns and odds_cols["match_id"] in odds.columns:
         merged = preds.merge(
             odds,
@@ -187,7 +175,6 @@ def main():
             suffixes=("_pred", "_odds"),
         )
     else:
-        # fallback por nomes de times
         merged = preds.merge(
             odds,
             left_on=[pred_cols.get("home"), pred_cols.get("away")],
@@ -212,19 +199,14 @@ def main():
         oh = _safe_float(r[odds_cols["o_home"]], None)
         ox = _safe_float(r[odds_cols["o_draw"]], None)
         oa = _safe_float(r[odds_cols["o_away"]], None)
-
         if oh is None or ox is None or oa is None:
             continue
 
-        # calcular Kelly para cada mercado 1X2
-        sh = stake_from_kelly(ph, oh, cfg)
-        sx = stake_from_kelly(px, ox, cfg)
-        sa = stake_from_kelly(pa, oa, cfg)
-
+        from math import isfinite
         def pack(side, p, o, sdict):
             return {
                 "match": f"{home} vs {away}",
-                "side": side,                 # H / D / A
+                "side": side,
                 "prob": round(p, 6),
                 "odds": round(o, 4),
                 "kelly_raw": round(sdict["kelly_raw"], 6),
@@ -234,12 +216,14 @@ def main():
                 "roi": round(sdict["roi"], 6),
             }
 
+        sh = stake_from_kelly(ph, oh, cfg)
+        sx = stake_from_kelly(px, ox, cfg)
+        sa = stake_from_kelly(pa, oa, cfg)
         rows.append(pack("H", ph, oh, sh))
         rows.append(pack("D", px, ox, sx))
         rows.append(pack("A", pa, oa, sa))
 
     df_stakes = pd.DataFrame(rows)
-    # ordenar por stake desc, depois EV
     if not df_stakes.empty:
         df_stakes.sort_values(by=["stake", "ev_per_unit"], ascending=[False, False], inplace=True)
 
@@ -249,21 +233,19 @@ def main():
     df_stakes.to_csv(stakes_path, index=False, encoding="utf-8")
     print(f"[kelly] OK -> {stakes_path} ({len(df_stakes)} linhas)")
 
-    # Picks: top-N com stake > 0
     picks = df_stakes[df_stakes["stake"] > 0].head(args.top_n).copy()
     picks_path = os.path.join(out_dir, "picks_final_kelly.csv")
     picks.to_csv(picks_path, index=False, encoding="utf-8")
     print(f"[kelly] OK -> {picks_path} ({len(picks)} linhas)")
 
-    # Relatinho JSON com config usada (útil p/ artifact)
     report = {
-        "bankroll": cfg.bankroll,
-        "kelly_fraction": cfg.kelly_fraction,
-        "kelly_cap": cfg.kelly_cap,
-        "min_stake": cfg.min_stake,
-        "max_stake": cfg.max_stake,
-        "round_to": cfg.round_to,
-        "top_n": args.top_n,
+        "bankroll": float(os.getenv("BANKROLL", "1000")),
+        "kelly_fraction": float(os.getenv("KELLY_FRACTION", "0.5")),
+        "kelly_cap": float(os.getenv("KELLY_CAP", "0.1")),
+        "min_stake": float(os.getenv("MIN_STAKE", "0")),
+        "max_stake": float(os.getenv("MAX_STAKE", "0")),
+        "round_to": float(os.getenv("ROUND_TO", "1")),
+        "top_n": int(os.getenv("KELLY_TOP_N", "14")),
         "input_preds": True,
         "input_odds": True,
     }
