@@ -308,3 +308,18 @@
   "Botafogo": ["Botafogo FR","Botafogo-RJ","Botafogo"],
   "Bahia": ["EC Bahia","Bahia"]
 }
+
+{
+  "palmeiras": ["se palmeiras", "palmeiras-sp"],
+  "vasco da gama": ["vasco", "cr vasco da gama"],
+  "sport": ["sport recife", "sport club do recife"],
+  "fluminense": ["fluminense fc", "fluminense-rj"],
+  "mirassol": ["mirassol fc"],
+  "red bull bragantino": ["rb bragantino", "bragantino"],
+  "internacional": ["sc internacional", "internacional-rs"],
+  "corinthians": ["sc corinthians", "corinthians-sp"],
+  "santos": ["santos fc", "santos-sp"],
+  "grêmio": ["gremio", "grêmio fbpa", "gremio porto alegre"],
+  "botafogo": ["botafogo fr", "botafogo-rj"],
+  "bahia": ["ec bahia", "bahia-ba"]
+}
