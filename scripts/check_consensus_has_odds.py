@@ -13,8 +13,6 @@ def out_dir_for(rodada: str) -> str:
 
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-
-    # Padroniza nomes alternativos comuns
     ren = {
         "home":"odds_home", "1":"odds_home", "home_win":"odds_home", "price_home":"odds_home",
         "draw":"odds_draw", "x":"odds_draw", "tie":"odds_draw", "price_draw":"odds_draw",
@@ -27,7 +25,6 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
             rn[c] = ren[lc]
     if rn:
         out = out.rename(columns=rn)
-
     for c in ODDS:
         if c not in out.columns:
             out[c] = np.nan
@@ -41,7 +38,7 @@ def count_valid_rows(df: pd.DataFrame) -> int:
             v = r.get(c)
             if pd.notna(v) and np.isfinite(v) and v > 1.0:
                 vals.append(v)
-        # Requisito: pelo menos 2 odds > 1.0 (ex.: casa e fora)
+        # Exigimos ao menos DUAS odds > 1.0 (p.ex. casa e fora)
         return len(vals) >= 2
     return int(df.apply(valid, axis=1).sum())
 
@@ -60,7 +57,7 @@ def main():
             print(f"{msg} — falhando.", file=sys.stderr)
             sys.exit(10)
         else:
-            print(f"{msg} — ok (require=off).")
+            print(f"{msg} — ok (no-op).")
             sys.exit(0)
 
     try:
@@ -95,4 +92,4 @@ def main():
     sys.exit(0)
 
 if __name__ == "__main__":
-    main
+    main()
