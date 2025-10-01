@@ -293,3 +293,18 @@
     ]
   }
 }
+
+{
+  "Palmeiras": ["SE Palmeiras","Palmeiras"],
+  "Vasco da Gama": ["Vasco","CR Vasco da Gama","Vasco da Gama"],
+  "Sport": ["Sport Recife","Sport Club do Recife","Sport"],
+  "Fluminense": ["Fluminense FC","Fluminense"],
+  "Mirassol": ["Mirassol-SP","Mirassol Futebol Clube","Mirassol"],
+  "Red Bull Bragantino": ["RB Bragantino","Redbull Bragantino","Red Bull Bragantino","Bragantino"],
+  "Internacional": ["SC Internacional","Internacional","Inter Porto Alegre","Internacional RS"],
+  "Corinthians": ["SC Corinthians","Corinthians SP","Corinthians"],
+  "Santos": ["Santos FC","Santos-SP","Santos"],
+  "Grêmio": ["Gremio","Grêmio FBPA","Gremio FBPA","Grêmio"],
+  "Botafogo": ["Botafogo FR","Botafogo-RJ","Botafogo"],
+  "Bahia": ["EC Bahia","Bahia"]
+}
