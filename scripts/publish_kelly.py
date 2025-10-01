@@ -123,8 +123,8 @@ ODDS_HOME_KEYS = ["odds_home", "home_odds", "home_price", "oddsH", "H_odds", "pr
 ODDS_DRAW_KEYS = ["odds_draw", "draw_odds", "draw_price", "oddsD", "D_odds", "price_draw"]
 ODDS_AWAY_KEYS = ["odds_away", "away_odds", "away_price", "oddsA", "A_odds", "price_away"]
 
-OUTCOME_KEY_CAND = ["outcome", "market_outcome", "pick", "side"]
-PRICE_KEY_CAND   = ["odds", "price", "decimal", "decimal_odds"]
+OUTCOME_KEY_CAND = ["outcome", "market_outcome", "pick", "side", "bet_side"]
+PRICE_KEY_CAND   = ["odds", "price", "decimal", "decimal_odds", "value"]
 PROB_KEY_CAND    = ["prob", "probability", "p"]
 
 OUTCOME_MAP = {
@@ -243,6 +243,53 @@ def unify_odds_column_names(df: pd.DataFrame) -> pd.DataFrame:
 # IO
 # ==========================
 
+def _try_map_price_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    """Tenta mapear aliases comuns de preço para odds_* se ainda estiverem ausentes."""
+    alias_map = {
+        "odds_home": ["home_price", "price_home", "home_decimal", "home", "H"],
+        "odds_draw": ["draw_price", "price_draw", "draw_decimal", "draw", "D", "x"],
+        "odds_away": ["away_price", "price_away", "away_decimal", "away", "A"],
+    }
+    out = df.copy()
+    for base, alts in alias_map.items():
+        if base not in out.columns:
+            for a in alts:
+                if a in out.columns:
+                    out[base] = out[a]
+                    break
+    return out
+
+def load_odds_from_provider(out_dir: str, debug: bool = False) -> Optional[pd.DataFrame]:
+    candidates = ["odds_theoddsapi.csv"]
+    for fn in candidates:
+        p = os.path.join(out_dir, fn)
+        if os.path.exists(p):
+            try:
+                df = pd.read_csv(p)
+                # tenta pivotar se vier em formato longo
+                df = try_pivot_if_needed(df)
+                df = normalize_basic_cols(df)
+                df = _try_map_price_aliases(df)
+
+                # precisamos de pelo menos UMA coluna de odds para fazer sentido
+                available = [c for c in ["odds_home","odds_draw","odds_away"] if c in df.columns]
+                if not available:
+                    if debug:
+                        print(f"[kelly] provider {fn} sem colunas odds_* após normalização; ignorando.")
+                    continue
+
+                keep_base = ["match_key","team_home","team_away"]
+                keep = list({*(c for c in keep_base if c in df.columns), *available})
+                df = df[keep].drop_duplicates()
+                if debug:
+                    print(f"[kelly] odds fallback de: {fn} ({len(df)} linhas) cols={keep}")
+                return df
+            except Exception as e:
+                if debug:
+                    print(f"[kelly] falha ao ler {fn}: {e}")
+                continue
+    return None
+
 def load_consensus(path: str, debug: bool = False) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = try_pivot_if_needed(df)
@@ -262,28 +309,6 @@ def load_consensus(path: str, debug: bool = False) -> pd.DataFrame:
         print("[kelly] mapeamento de colunas final:", json.dumps(mapping, ensure_ascii=False))
     return df
 
-def load_odds_from_provider(out_dir: str, debug: bool = False) -> Optional[pd.DataFrame]:
-    candidates = ["odds_theoddsapi.csv"]
-    for fn in candidates:
-        p = os.path.join(out_dir, fn)
-        if os.path.exists(p):
-            try:
-                df = pd.read_csv(p)
-                df = try_pivot_if_needed(df)
-                df = normalize_basic_cols(df)
-                keep = [c for c in ["match_key","team_home","team_away","odds_home","odds_draw","odds_away"] if c in df.columns]
-                if not keep:
-                    continue
-                df = df[keep].drop_duplicates()
-                if debug:
-                    print(f"[kelly] odds fallback de: {fn} ({len(df)} linhas)")
-                return df
-            except Exception as e:
-                if debug:
-                    print(f"[kelly] falha ao ler {fn}: {e}")
-                continue
-    return None
-
 def load_probs_from_models(out_dir: str, debug: bool = False) -> Optional[pd.DataFrame]:
     candidates = [
         "predictions_stacked.csv",
@@ -298,6 +323,8 @@ def load_probs_from_models(out_dir: str, debug: bool = False) -> Optional[pd.Dat
                 df = pd.read_csv(p)
                 df = normalize_basic_cols(df)
                 keep = [c for c in ["match_key","team_home","team_away","prob_home","prob_draw","prob_away"] if c in df.columns]
+                if not keep:
+                    continue
                 df = df[keep].drop_duplicates()
                 if debug:
                     print(f"[kelly] probabilidades carregadas de: {fn} ({len(df)} linhas)")
@@ -430,20 +457,22 @@ def main():
             # Se match_key não resolver (ou odds ainda ausentes), usa join_key canônica
             def build_with_join_key(df: pd.DataFrame) -> pd.DataFrame:
                 df2 = df.copy()
-                if "team_home" not in df2.columns and "team_away" not in df2.columns:
-                    return make_join_key(df2)  # vira match_key como join_key
                 return make_join_key(df2)
 
-            if merged is None or not any(c in merged.columns for c in ["odds_home","odds_draw","odds_away"]):
+            if merged is None:
                 c_j = build_with_join_key(df_c)
                 p_j = build_with_join_key(df_p)
-                merged = pd.merge(c_j, p_j[["__join_key","odds_home","odds_draw","odds_away"]], on="__join_key", how="left", suffixes=("", "_prov"))
+                provider_cols = [c for c in ["odds_home","odds_draw","odds_away"] if c in p_j.columns]
+                if args.debug:
+                    print(f"[kelly] provider cols disponíveis no join: {provider_cols}")
+                if provider_cols:
+                    merged = pd.merge(c_j, p_j[["__join_key", *provider_cols]], on="__join_key", how="left", suffixes=("", "_prov"))
+                else:
+                    merged = c_j  # não há o que mesclar
 
             merged = unify_odds_column_names(merged)
-            # remove colunas auxiliares se existirem
             if "__join_key" in merged.columns:
                 merged = merged.drop(columns=["__join_key"])
-
             df_c = merged
 
     # 3) Carrega probabilidades (opcionais)
