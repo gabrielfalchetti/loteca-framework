@@ -2,18 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-publish_kelly.py
-----------------
-Calcula stakes via Kelly usando odds (consenso, com fallback para provedor) e probabilidades (se houver),
-gera data/out/<RODADA>/kelly_stakes.csv e não quebra o pipeline se dados faltarem.
-
-- Lê:
-  data/out/<RODADA>/odds_consensus.csv
-  fallback odds: data/out/<RODADA>/odds_theoddsapi.csv
-  (opcional) predictions_*.csv para probabilidades
-
-- Escreve:
-  data/out/<RODADA>/kelly_stakes.csv
+publish_kelly.py (robusto c/ fallback + merge canônico)
+- Lê odds do consenso e, se faltarem, puxa do provedor (TheOddsAPI).
+- Une por match_key; se falhar, usa join_key canônica (times normalizados).
+- Aceita odds/prob em formato longo (pivot automático).
+- Gera data/out/<RODADA>/kelly_stakes.csv.
 """
 
 from __future__ import annotations
@@ -26,9 +19,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+from unidecode import unidecode
 
 # ==========================
-# Config e utilidades
+# Config
 # ==========================
 
 @dataclass
@@ -72,7 +66,7 @@ def safe_round(x: float, step: float) -> float:
     return x
 
 # ==========================
-# Kelly core
+# Kelly
 # ==========================
 
 def kelly_raw(p: float, o: float) -> float:
@@ -96,7 +90,7 @@ def edge_from_p_o(p: float, o: float) -> float:
         return 0.0
 
 def stake_from_kelly(p: float, o: float, cfg: KellyConfig) -> Tuple[float, float, float]:
-    """ SEMPRE retorna (stake, kelly_raw, edge) """
+    """Retorna (stake, kelly_raw, edge). Nunca quebra."""
     kr = kelly_raw(p, o)
     if kr <= 0.0:
         return (0.0, kr, edge_from_p_o(p, o))
@@ -114,7 +108,7 @@ def stake_from_kelly(p: float, o: float, cfg: KellyConfig) -> Tuple[float, float
     return (float(stake), float(kr), edge_from_p_o(p, o))
 
 # ==========================
-# Leitura/padronização de dados
+# Normalização/Pivot helpers
 # ==========================
 
 HOME_KEYS = ["team_home", "home_team", "home", "mandante"]
@@ -181,7 +175,7 @@ def try_pivot_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     if base is None:
         return df
 
-    # garantir nomes canônicos
+    # nomes canônicos mínimos
     if first_col(base, HOME_KEYS) and "team_home" not in base.columns:
         base = base.rename(columns={first_col(base, HOME_KEYS): "team_home"})
     if first_col(base, AWAY_KEYS) and "team_away" not in base.columns:
@@ -213,6 +207,42 @@ def normalize_basic_cols(df: pd.DataFrame) -> pd.DataFrame:
         df = df.rename(columns={first_col(df, PROB_AWAY_KEYS): "prob_away"})
     return df
 
+def canonical_team(s: str) -> str:
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    t = unidecode(str(s)).lower()
+    t = t.replace("&", "and")
+    for sep in [" x ", " vs ", " v ", " – ", " — ", " - ", "—", "–", "/"]:
+        t = t.replace(sep, " ")
+    t = " ".join(t.split())
+    return t
+
+def make_join_key(df: pd.DataFrame) -> pd.DataFrame:
+    if "team_home" in df.columns and "team_away" in df.columns:
+        df = df.copy()
+        df["__join_key"] = df.apply(lambda r: f"{canonical_team(r.get('team_home'))}__{canonical_team(r.get('team_away'))}", axis=1)
+    elif "match_key" in df.columns:
+        df = df.copy()
+        df["__join_key"] = df["match_key"].astype(str)
+    else:
+        df = df.copy()
+        df["__join_key"] = ""
+    return df
+
+def unify_odds_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    # Se odds_* não existem, mas vieram como *_prov, *_x, *_y, copia
+    for base in ["odds_home","odds_draw","odds_away"]:
+        if base not in df.columns:
+            for alt in [f"{base}_prov", f"{base}_x", f"{base}_y"]:
+                if alt in df.columns:
+                    df[base] = df[alt]
+                    break
+    return df
+
+# ==========================
+# IO
+# ==========================
+
 def load_consensus(path: str, debug: bool = False) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = try_pivot_if_needed(df)
@@ -233,10 +263,6 @@ def load_consensus(path: str, debug: bool = False) -> pd.DataFrame:
     return df
 
 def load_odds_from_provider(out_dir: str, debug: bool = False) -> Optional[pd.DataFrame]:
-    """
-    Fallback de odds quando o consenso não trouxe odds_*.
-    Primeiro tenta TheOddsAPI. Se no futuro tiver outros provedores, dá para encadear aqui.
-    """
     candidates = ["odds_theoddsapi.csv"]
     for fn in candidates:
         p = os.path.join(out_dir, fn)
@@ -245,7 +271,6 @@ def load_odds_from_provider(out_dir: str, debug: bool = False) -> Optional[pd.Da
                 df = pd.read_csv(p)
                 df = try_pivot_if_needed(df)
                 df = normalize_basic_cols(df)
-                # mantenha somente chaves e odds
                 keep = [c for c in ["match_key","team_home","team_away","odds_home","odds_draw","odds_away"] if c in df.columns]
                 if not keep:
                     continue
@@ -272,8 +297,6 @@ def load_probs_from_models(out_dir: str, debug: bool = False) -> Optional[pd.Dat
             try:
                 df = pd.read_csv(p)
                 df = normalize_basic_cols(df)
-                # Renomeia probabilidades se preciso
-                df = normalize_basic_cols(df)
                 keep = [c for c in ["match_key","team_home","team_away","prob_home","prob_draw","prob_away"] if c in df.columns]
                 df = df[keep].drop_duplicates()
                 if debug:
@@ -286,7 +309,7 @@ def load_probs_from_models(out_dir: str, debug: bool = False) -> Optional[pd.Dat
     return None
 
 # ==========================
-# Construção de linhas Kelly
+# Kelly rows
 # ==========================
 
 def best_pick_for_row(row: pd.Series) -> Optional[Dict]:
@@ -317,7 +340,6 @@ def best_pick_for_row(row: pd.Series) -> Optional[Dict]:
 def compute_kelly_rows(df: pd.DataFrame, cfg: KellyConfig, debug: bool = False) -> List[Dict]:
     rows: List[Dict] = []
     for _, r in df.iterrows():
-        picks = {}
         for side in ["home","draw","away"]:
             p = r.get(f"prob_{side}", None)
             o = r.get(f"odds_{side}", None)
@@ -325,7 +347,6 @@ def compute_kelly_rows(df: pd.DataFrame, cfg: KellyConfig, debug: bool = False) 
             r[f"stake_{side}"] = stake
             r[f"kelly_raw_{side}"] = kraw
             r[f"edge_{side}"] = edge
-            picks[side] = (stake, kraw, edge)
 
         best = best_pick_for_row(r)
         if best is None:
@@ -383,71 +404,84 @@ def main():
         ]).to_csv(os.path.join(out_dir, "kelly_stakes.csv"), index=False)
         return
 
-    df = load_consensus(consensus_path, debug=args.debug)
+    # 1) Carrega consenso
+    df_c = load_consensus(consensus_path, debug=args.debug)
     print("[kelly] mapeamento de colunas detectado:")
-    print(f"   -  team_home: {'team_home' if 'team_home' in df.columns else None}")
-    print(f"   -  team_away: {'team_away' if 'team_away' in df.columns else None}")
-    print(f"   -  match_key: {'match_key' if 'match_key' in df.columns else None}")
-    print(f"   -  prob_home: {'prob_home' if 'prob_home' in df.columns else None}")
-    print(f"   -  prob_draw: {'prob_draw' if 'prob_draw' in df.columns else None}")
-    print(f"   -  prob_away: {'prob_away' if 'prob_away' in df.columns else None}")
-    print(f"   -  odds_home: {'odds_home' if 'odds_home' in df.columns else None}")
-    print(f"   -  odds_draw: {'odds_draw' if 'odds_draw' in df.columns else None}")
-    print(f"   -  odds_away: {'odds_away' if 'odds_away' in df.columns else None}")
+    print(f"   -  team_home: {'team_home' if 'team_home' in df_c.columns else None}")
+    print(f"   -  team_away: {'team_away' if 'team_away' in df_c.columns else None}")
+    print(f"   -  match_key: {'match_key' if 'match_key' in df_c.columns else None}")
+    print(f"   -  prob_home: {'prob_home' if 'prob_home' in df_c.columns else None}")
+    print(f"   -  prob_draw: {'prob_draw' if 'prob_draw' in df_c.columns else None}")
+    print(f"   -  prob_away: {'prob_away' if 'prob_away' in df_c.columns else None}")
+    print(f"   -  odds_home: {'odds_home' if 'odds_home' in df_c.columns else None}")
+    print(f"   -  odds_draw: {'odds_draw' if 'odds_draw' in df_c.columns else None}")
+    print(f"   -  odds_away: {'odds_away' if 'odds_away' in df_c.columns else None}")
 
-    # Fallback de odds se o consenso não trouxe odds_*
-    has_any_odds = any(c in df.columns for c in ["odds_home","odds_draw","odds_away"])
+    # 2) Se faltar odds, tenta fallback do provedor
+    has_any_odds = any(c in df_c.columns for c in ["odds_home","odds_draw","odds_away"])
     if not has_any_odds:
-        fallback = load_odds_from_provider(out_dir, debug=args.debug)
-        if fallback is not None:
-            # une por match_key se existir, senão por times
-            on_cols = []
-            if "match_key" in df.columns and "match_key" in fallback.columns:
-                on_cols = ["match_key"]
-            else:
-                for k in ["team_home","team_away"]:
-                    if k in df.columns and k in fallback.columns:
-                        on_cols.append(k)
-            if on_cols:
-                df = pd.merge(df, fallback, on=on_cols, how="left", suffixes=("", "_prov"))
-                # normaliza nomes finais
-                for c in ["odds_home","odds_draw","odds_away"]:
-                    if c not in df.columns and f"{c}_prov" in df.columns:
-                        df[c] = df[f"{c}_prov"]
-                drop_cols = [c for c in df.columns if c.endswith("_prov")]
-                if drop_cols:
-                    df = df.drop(columns=drop_cols)
-                has_any_odds = any(c in df.columns for c in ["odds_home","odds_draw","odds_away"])
+        df_p = load_odds_from_provider(out_dir, debug=args.debug)
+        if df_p is not None and not df_p.empty:
+            # Tenta por match_key
+            merged = None
+            if "match_key" in df_c.columns and "match_key" in df_p.columns:
+                merged = pd.merge(df_c, df_p, on="match_key", how="left", suffixes=("", "_prov"))
 
-    if not has_any_odds:
-        print("[kelly] AVISO: odds ausentes após fallback — gerando arquivo vazio.")
-        pd.DataFrame(columns=[
-            "match_key","team_home","team_away","pick","prob","odds","kelly_raw","edge","stake"
-        ]).to_csv(os.path.join(out_dir, "kelly_stakes.csv"), index=False)
-        return
+            # Se match_key não resolver (ou odds ainda ausentes), usa join_key canônica
+            def build_with_join_key(df: pd.DataFrame) -> pd.DataFrame:
+                df2 = df.copy()
+                if "team_home" not in df2.columns and "team_away" not in df2.columns:
+                    return make_join_key(df2)  # vira match_key como join_key
+                return make_join_key(df2)
 
-    # Probabilidades (opcionais)
-    has_all_probs = all(c in df.columns for c in ["prob_home","prob_draw","prob_away"])
+            if merged is None or not any(c in merged.columns for c in ["odds_home","odds_draw","odds_away"]):
+                c_j = build_with_join_key(df_c)
+                p_j = build_with_join_key(df_p)
+                merged = pd.merge(c_j, p_j[["__join_key","odds_home","odds_draw","odds_away"]], on="__join_key", how="left", suffixes=("", "_prov"))
+
+            merged = unify_odds_column_names(merged)
+            # remove colunas auxiliares se existirem
+            if "__join_key" in merged.columns:
+                merged = merged.drop(columns=["__join_key"])
+
+            df_c = merged
+
+    # 3) Carrega probabilidades (opcionais)
+    has_all_probs = all(c in df_c.columns for c in ["prob_home","prob_draw","prob_away"])
     if not has_all_probs:
         probs_df = load_probs_from_models(out_dir, debug=args.debug)
-        if probs_df is not None:
-            on_cols = []
-            if "match_key" in df.columns and "match_key" in probs_df.columns:
-                on_cols = ["match_key"]
+        if probs_df is not None and not probs_df.empty:
+            # tenta por match_key
+            if "match_key" in df_c.columns and "match_key" in probs_df.columns:
+                df_c = pd.merge(df_c, probs_df, on="match_key", how="left", suffixes=("", "_m"))
             else:
-                for k in ["team_home","team_away"]:
-                    if k in df.columns and k in probs_df.columns:
-                        on_cols.append(k)
-            if on_cols:
-                df = pd.merge(df, probs_df, on=on_cols, how="left", suffixes=("", "_m"))
-                for c in ["prob_home","prob_draw","prob_away"]:
-                    if c not in df.columns and f"{c}_m" in df.columns:
-                        df[c] = df[f"{c}_m"]
-                drop_m = [c for c in df.columns if c.endswith("_m")]
-                if drop_m:
-                    df = df.drop(columns=drop_m)
+                # canônico por times
+                c_j = make_join_key(df_c)
+                p_j = make_join_key(probs_df)
+                df_c = pd.merge(c_j, p_j[["__join_key","prob_home","prob_draw","prob_away"]], on="__join_key", how="left", suffixes=("", "_m"))
+                if "__join_key" in df_c.columns:
+                    df_c = df_c.drop(columns=["__join_key"])
 
-    # Filtra linhas com ao menos um par válido (prob, odds)
+            # normaliza nomes finais
+            for c in ["prob_home","prob_draw","prob_away"]:
+                if c not in df_c.columns and f"{c}_m" in df_c.columns:
+                    df_c[c] = df_c[f"{c}_m"]
+            drop_m = [c for c in df_c.columns if str(c).endswith("_m")]
+            if drop_m:
+                df_c = df_c.drop(columns=drop_m)
+
+    # 4) Checa se temos odds
+    df_c = unify_odds_column_names(df_c)
+    has_any_odds = any((c in df_c.columns) and (df_c[c].notna().any()) for c in ["odds_home","odds_draw","odds_away"])
+    if not has_any_odds:
+        print("[kelly] AVISO: odds ausentes após fallback — gerando arquivo vazio.")
+        out_path = os.path.join(out_dir, "kelly_stakes.csv")
+        pd.DataFrame(columns=[
+            "match_key","team_home","team_away","pick","prob","odds","kelly_raw","edge","stake"
+        ]).to_csv(out_path, index=False)
+        return
+
+    # 5) Filtra linhas com ao menos um par (prob, odds) válido
     def has_pair(row):
         for s in ["home","draw","away"]:
             try:
@@ -459,16 +493,19 @@ def main():
                 pass
         return False
 
-    usable = df[df.apply(has_pair, axis=1)].copy()
+    usable = df_c[df_c.apply(has_pair, axis=1)].copy()
     if usable.empty:
         print("[kelly] AVISO: não há pares (prob, odds) válidos — gerando arquivo vazio.")
+        out_path = os.path.join(out_dir, "kelly_stakes.csv")
         pd.DataFrame(columns=[
             "match_key","team_home","team_away","pick","prob","odds","kelly_raw","edge","stake"
-        ]).to_csv(os.path.join(out_dir, "kelly_stakes.csv"), index=False)
+        ]).to_csv(out_path, index=False)
         return
 
+    # 6) Calcula picks
     picks = compute_kelly_rows(usable, cfg, debug=args.debug)
 
+    # 7) Salva
     out_path = os.path.join(out_dir, "kelly_stakes.csv")
     if not picks:
         print("[kelly] AVISO: nenhuma aposta com stake > 0 — gerando arquivo vazio.")
