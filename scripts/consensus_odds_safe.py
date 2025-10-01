@@ -1,192 +1,146 @@
 # scripts/consensus_odds_safe.py
 """
-Gera um CSV de consenso a partir dos provedores disponíveis (TheOddsAPI e API-Football).
+Gera odds_consensus.csv de forma SAFE e de baixo uso de memória.
 
-- NUNCA falha o job (SAFE).
-- Faz logs/prints compatíveis com o workflow existente.
-- Se nenhum provedor tiver linhas, cria um CSV vazio com header mínimo.
+Regra SAFE:
+- Se existir data/out/<rodada>/odds_theoddsapi.csv e/ou odds_apifootball.csv,
+  o script faz um "merge por concatenação" (append) preservando o header do
+  primeiro arquivo encontrado e adicionando uma coluna "source" no final.
+- Se nenhum provedor existir, cria odds_consensus.csv com header "source" e 0 linhas.
+- Sempre imprime mensagens padronizadas e sai com código 0.
 
-Mensagens esperadas (mantidas):
-  [consensus-safe] lido <path> -> N linhas
-  [consensus-safe] AVISO: nenhum provedor retornou odds. CSV vazio gerado.
-  [consensus-safe] OK -> <out_path> (X linhas)
+Objetivo: robustez no CI. A lógica de consenso sofisticada pode rodar no script não-SAFE.
 """
-
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Iterable, Optional, Tuple
 
-from scripts.csv_utils import (
-    ensure_dir,
-    read_csv_rows,
-    write_csv_rows,
-    lower_all,
-)
-
-# -------------------------------------------------------------
-
-def _parse_float(x: Any) -> float | None:
+def _read_header(path: Path) -> Optional[list[str]]:
     try:
-        if x is None:
-            return None
-        s = str(x).strip()
-        if not s:
-            return None
-        return float(s)
+        with path.open("r", encoding="utf-8", newline="") as f:
+            r = csv.reader(f)
+            return next(r, None)
     except Exception:
         return None
 
+def _iter_rows(path: Path) -> Iterable[list[str]]:
+    try:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            r = csv.reader(f)
+            header_skipped = False
+            for row in r:
+                if not header_skipped:
+                    header_skipped = True
+                    continue
+                yield row
+    except Exception:
+        # SAFE: silenciosamente ignora problemas de leitura
+        return
 
-NUM_KEYS_SYNONYMS = [
-    ("home", "h", "odd_home", "home_odds"),
-    ("draw", "d", "odd_draw", "draw_odds", "empate"),
-    ("away", "a", "odd_away", "away_odds", "visitante"),
-]
+def _safe_concat(
+    out_path: Path,
+    providers: Iterable[Tuple[str, Path]],
+) -> int:
+    written = 0
+    chosen_header: Optional[list[str]] = None
 
+    # escolhe header do primeiro arquivo válido
+    for _, p in providers:
+        if p.exists() and p.is_file():
+            h = _read_header(p)
+            if h:
+                chosen_header = h[:]
+                break
 
-def _extract_triplet(row: Dict[str, Any]) -> tuple[float | None, float | None, float | None]:
-    """
-    Tenta extrair (home, draw, away) de uma linha com chaves possivelmente diferentes.
-    """
-    values: Dict[str, float | None] = {"home": None, "draw": None, "away": None}
-    # mapa direto
-    for canonical, *aliases in NUM_KEYS_SYNONYMS:
-        # canonical é 'home'/'draw'/'away'
-        for k in (canonical, *aliases):
-            if k in row:
-                v = _parse_float(row[k])
-                if v is not None:
-                    values[canonical] = v
-                    break  # achou o primeiro válido
+    # fallback de header mínimo
+    if chosen_header is None:
+        chosen_header = ["source"]
 
-    return values["home"], values["draw"], values["away"]
+    # garante coluna "source" no final
+    if "source" not in chosen_header:
+        chosen_header = chosen_header + ["source"]
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8", newline="") as f_out:
+        w = csv.writer(f_out)
+        w.writerow(chosen_header)
 
-def _key_for_match(row: Dict[str, Any]) -> tuple:
-    """
-    Chave de união robusta:
-    - usa match_id se existir; senão, usa (date?, home_team, away_team) em lowercase.
-    """
-    rlow = lower_all(row)
-    if "match_id" in row and str(row["match_id"]).strip():
-        return ("id", str(row["match_id"]).strip())
-    # fallback comum
-    return (
-        "teams",
-        rlow.get("date") or rlow.get("utc_date") or "",
-        rlow.get("home_team") or rlow.get("home") or rlow.get("mandante") or "",
-        rlow.get("away_team") or rlow.get("away") or rlow.get("visitante") or "",
-    )
+        for src, p in providers:
+            if not p.exists() or not p.is_file():
+                print(f"[consensus-safe] AVISO: arquivo não encontrado: {p}")
+                continue
 
+            # mapeia colunas: se provider tiver menos colunas, completa com vazios
+            header = _read_header(p) or []
+            idx_source = len(chosen_header) - 1
 
-def _load_provider(path: Path, provider: str) -> Dict[tuple, Dict[str, Any]]:
-    rows = read_csv_rows(path)
-    print(f"[consensus-safe] lido {path} -> {len(rows)} linhas")
-    out: Dict[tuple, Dict[str, Any]] = {}
-    for r in rows:
-        key = _key_for_match(r)
-        h, d, a = _extract_triplet(r)
-        base = out.get(key, {
-            "match_key": key,
-            "home_team": r.get("home_team") or r.get("home") or "",
-            "away_team": r.get("away_team") or r.get("away") or "",
-            "sources": set(),
-            "home": [],
-            "draw": [],
-            "away": [],
-        })
-        base["sources"].add(provider)
-        if h is not None:
-            base["home"].append(h)
-        if d is not None:
-            base["draw"].append(d)
-        if a is not None:
-            base["away"].append(a)
-        out[key] = base
-    return out
+            col_map = list(range(len(chosen_header)))
+            # constrói um mapa de nomes -> índice para o arquivo atual
+            name_to_idx = {name: i for i, name in enumerate(header)}
+            # para cada coluna (menos a "source"), pega índice correspondente no provider
+            for j, col in enumerate(chosen_header):
+                if col == "source":
+                    col_map[j] = -1
+                else:
+                    col_map[j] = name_to_idx.get(col, -2)  # -2 => coluna inexistente
 
+            for row in _iter_rows(p):
+                out_row = [""] * len(chosen_header)
+                for j, src_idx in enumerate(col_map):
+                    if src_idx == -1:
+                        out_row[j] = src
+                    elif src_idx >= 0 and src_idx < len(row):
+                        out_row[j] = row[src_idx]
+                    else:
+                        out_row[j] = ""
+                w.writerow(out_row)
+                written += 1
 
-def _mean(xs: List[float]) -> float | None:
-    return sum(xs) / len(xs) if xs else None
+    return written
 
+def _read_and_count(path: Path) -> int:
+    n = 0
+    for _ in _iter_rows(path):
+        n += 1
+    print(f"[consensus-safe] lido {path} -> {n} linhas")
+    return n
 
-def build_consensus(rodada: str) -> List[Dict[str, Any]]:
-    out_dir = Path("data/out") / rodada
-    theodds = out_dir / "odds_theoddsapi.csv"
-    apifoot = out_dir / "odds_apifootball.csv"
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True)
+    args = ap.parse_args()
 
-    index: Dict[tuple, Dict[str, Any]] = {}
+    base = Path("data/out") / args.rodada
+    theodds = base / "odds_theoddsapi.csv"
+    apifoot = base / "odds_apifootball.csv"
+    out_path = base / "odds_consensus.csv"
 
+    # logs de leitura (se existirem)
     if theodds.exists():
-        d = _load_provider(theodds, "theoddsapi")
-        index.update({k: v for k, v in d.items()})
+        _read_and_count(theodds)
     else:
         print(f"[consensus-safe] AVISO: arquivo não encontrado: {theodds}")
 
     if apifoot.exists():
-        d = _load_provider(apifoot, "apifootball")
-        for k, v in d.items():
-            if k in index:
-                index[k]["sources"].update(v["sources"])
-                index[k]["home"] += v["home"]
-                index[k]["draw"] += v["draw"]
-                index[k]["away"] += v["away"]
-                # preenche nomes se estiverem vazios
-                if not index[k].get("home_team"):
-                    index[k]["home_team"] = v.get("home_team", "")
-                if not index[k].get("away_team"):
-                    index[k]["away_team"] = v.get("away_team", "")
-            else:
-                index[k] = v
+        _read_and_count(apifoot)
     else:
         print(f"[consensus-safe] AVISO: arquivo não encontrado: {apifoot}")
 
-    # monta linhas finais
-    rows: List[Dict[str, Any]] = []
-    for v in index.values():
-        rows.append({
-            "match_key": str(v["match_key"]),
-            "home_team": v.get("home_team", ""),
-            "away_team": v.get("away_team", ""),
-            "cons_home": _mean(v["home"]),
-            "cons_draw": _mean(v["draw"]),
-            "cons_away": _mean(v["away"]),
-            "sources": ",".join(sorted(v["sources"])) if v.get("sources") else "",
-        })
+    written = _safe_concat(
+        out_path,
+        providers=[
+            ("theoddsapi", theodds),
+            ("apifootball", apifoot),
+        ],
+    )
 
-    return rows
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Gera odds de consenso (SAFE)")
-    parser.add_argument("--rodada", required=True)
-    args = parser.parse_args()
-
-    out_dir = Path("data/out") / args.rodada
-    out_path = out_dir / "odds_consensus.csv"
-    ensure_dir(out_path)
-
-    rows = build_consensus(args.rodada)
-
-    if not rows:
+    if written == 0:
         print("[consensus-safe] AVISO: nenhum provedor retornou odds. CSV vazio gerado.")
-        written = write_csv_rows(
-            out_path,
-            [],
-            fieldnames=["match_key", "home_team", "away_team", "cons_home", "cons_draw", "cons_away", "sources"],
-        )
-        # escrito 0
-        print(f"[consensus-safe] OK -> {out_path} ({written} linhas)")
-        return 0
-
-    written = write_csv_rows(out_path, rows)
-    # há dois prints em algumas execuções; manter compatibilidade:
-    print(f"[consensus-safe] OK -> {out_path} ({written} linhas)")
     print(f"[consensus-safe] OK -> {out_path} ({written} linhas)")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
