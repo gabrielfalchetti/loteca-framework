@@ -1,67 +1,68 @@
 # scripts/ingest_odds_apifootball_rapidapi_safe.py
 from __future__ import annotations
-
-import argparse
-import json
-import shlex
-import subprocess
-import sys
-from typing import Dict
+import os, shlex, subprocess, json, sys
+from pathlib import Path
 
 from scripts.csv_utils import count_csv_rows
 
+def _get_rapidapi_key() -> str:
+    return (os.environ.get("X_RAPIDAPI_KEY")
+            or os.environ.get("RAPIDAPI_KEY")
+            or "").strip()
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="[SAFE] Wrapper para ingest_apifootball via RapidAPI")
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--season", type=int, default=2025)
-    ap.add_argument("--timeout", type=int, default=60)
-    ap.add_argument("--debug", action="store_true")
-    # flags legadas (repasse)
-    ap.add_argument("--window", type=int, default=2)
-    ap.add_argument("--fuzzy", type=float, default=0.90)
-    ap.add_argument("--aliases", default="data/aliases_br.json")
+    rodada = (os.environ.get("RODADA") or "").strip()
+    season = (os.environ.get("SEASON") or "2025").strip()
+    debug = (os.environ.get("DEBUG") or "false").lower() == "true"
 
-    args = ap.parse_args()
+    odds_path = Path(f"data/out/{rodada}/odds_apifootball.csv")
+    unmatched_path = Path(f"data/out/{rodada}/unmatched_apifootball.csv")
 
-    # Comando alvo
-    cmd = [
-        sys.executable,
-        "-m",
-        "scripts.ingest_odds_apifootball_rapidapi",
-        "--rodada",
-        args.rodada,
-        "--season",
-        str(args.season),
-        "--window",
-        str(args.window),
-        "--fuzzy",
-        str(args.fuzzy),
-        "--aliases",
-        args.aliases,
-    ]
-    if args.debug:
-        cmd.append("--debug")
-
-    print(f"[apifootball-safe] Executando: {' '.join(shlex.quote(c) for c in cmd)}")
-
-    counts: Dict[str, int] = {
-        "odds_apifootball.csv": 0,
-        "unmatched_apifootball.csv": 0,
+    counts = {
+        "odds_apifootball.csv": count_csv_rows(odds_path),
+        "unmatched_apifootball.csv": count_csv_rows(unmatched_path),
     }
+
+    # se o módulo "oficial" existir, tentamos rodar
     try:
-        subprocess.run(cmd, check=True, timeout=args.timeout)
+        import importlib.util
+        spec = importlib.util.find_spec("scripts.ingest_odds_apifootball_rapidapi")
+        if spec is not None:
+            cmd = [
+                sys.executable, "-m", "scripts.ingest_odds_apifootball_rapidapi",
+                "--rodada", rodada,
+                "--season", season,
+                "--window", "2",
+                "--fuzzy", "0.90",
+                "--aliases", "data/aliases_br.json",
+            ]
+            if debug:
+                cmd.append("--debug")
+            # Só para garantir que a key correta está no ambiente
+            env = os.environ.copy()
+            if not env.get("RAPIDAPI_KEY") and _get_rapidapi_key():
+                env["RAPIDAPI_KEY"] = _get_rapidapi_key()
+
+            print(f"[apifootball-safe] Executando: {' '.join(shlex.quote(c) for c in cmd)}")
+            proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
+            if debug:
+                # não falha o job: apenas mostra stdout/stderr
+                print(proc.stdout)
+                print(proc.stderr, file=sys.stderr)
+
+            # atualiza contagens após a execução
+            counts["odds_apifootball.csv"] = count_csv_rows(odds_path)
+            counts["unmatched_apifootball.csv"] = count_csv_rows(unmatched_path)
+
+        else:
+            if debug:
+                print("[apifootball-safe] Módulo scripts.ingest_odds_apifootball_rapidapi não encontrado. SAFE: contagens atuais retornadas.")
     except subprocess.TimeoutExpired:
-        print(f"[apifootball-safe] TIMEOUT após {args.timeout}s — seguindo com contagens (SAFE).")
+        print("[apifootball-safe] TIMEOUT após 60s — seguindo com contagens (SAFE).")
     except Exception as e:
         print(f"[apifootball-safe] ERRO ao executar módulo interno: {e}")
 
-    # Contagens (para o step do workflow)
-    base = f"data/out/{args.rodada}"
-    counts["odds_apifootball.csv"] = count_csv_rows(f"{base}/odds_apifootball.csv")
-    counts["unmatched_apifootball.csv"] = count_csv_rows(f"{base}/unmatched_apifootball.csv")
     print(f"[apifootball-safe] linhas -> {json.dumps(counts, ensure_ascii=False)}")
-
 
 if __name__ == "__main__":
     main()
