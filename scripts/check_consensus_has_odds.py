@@ -13,7 +13,8 @@ def out_dir_for(rodada: str) -> str:
 
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    # nomes alternativos comuns -> padroniza
+
+    # Padroniza nomes alternativos comuns
     ren = {
         "home":"odds_home", "1":"odds_home", "home_win":"odds_home", "price_home":"odds_home",
         "draw":"odds_draw", "x":"odds_draw", "tie":"odds_draw", "price_draw":"odds_draw",
@@ -40,7 +41,7 @@ def count_valid_rows(df: pd.DataFrame) -> int:
             v = r.get(c)
             if pd.notna(v) and np.isfinite(v) and v > 1.0:
                 vals.append(v)
-        # ao menos 2 odds > 1.0 (ex.: casa & fora) é um requisito razoável
+        # Requisito: pelo menos 2 odds > 1.0 (ex.: casa e fora)
         return len(vals) >= 2
     return int(df.apply(valid, axis=1).sum())
 
@@ -48,7 +49,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--require", action="store_true",
-                    help="Se não houver odds válidas, sai com código de erro (fail-fast).")
+                    help="Se não houver odds válidas, sai com código 10 (fail-fast).")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
@@ -94,4 +95,4 @@ def main():
     sys.exit(0)
 
 if __name__ == "__main__":
-    main()
+    main
