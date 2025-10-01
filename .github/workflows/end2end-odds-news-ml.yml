@@ -22,9 +22,6 @@ env:
   ROUND_TO: 1
   KELLY_TOP_N: 14
 
-  # ======= Caminhos padrão de saída =======
-  OUTDIR: data/out/${{ env.RODADA }}
-
 jobs:
   end2end:
     runs-on: ubuntu-24.04
@@ -46,8 +43,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Export PYTHONPATH
-        run: |
-          echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
+        run: echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
 
       # ============= Sanidade de entrada =============
       - name: Check matches_source.csv
@@ -90,7 +86,6 @@ jobs:
             echo "[theoddsapi-safe] SKIP: THEODDS_API_KEY ausente."
             exit 0
           fi
-
           if [ -f "scripts/ingest_odds_theoddsapi_safe.py" ]; then
             EXTRA=""
             [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
@@ -112,10 +107,8 @@ jobs:
             echo "[apifootball-safe] SKIP: X_RAPIDAPI_KEY ausente."
             exit 0
           fi
-
           EXTRA=""
           [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
-
           if [ -f "scripts/ingest_odds_apifootball_rapidapi_safe.py" ]; then
             python scripts/ingest_odds_apifootball_rapidapi_safe.py \
               --rodada "${RODADA}" \
@@ -153,7 +146,6 @@ jobs:
             echo "[news-safe] SKIP: NEWSAPI_KEY ausente."
             exit 0
           fi
-
           if [ -f "scripts/news_ingest_safe.py" ]; then
             python scripts/news_ingest_safe.py
           else
@@ -170,7 +162,6 @@ jobs:
             echo "[injuries-safe] SKIP: X_RAPIDAPI_KEY ausente."
             exit 0
           fi
-
           if [ -f "scripts/injuries_apifootball_safe.py" ]; then
             python scripts/injuries_apifootball_safe.py
           else
@@ -179,7 +170,7 @@ jobs:
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
           SEASON: ${{ env.SEASON }}
-          APIFOOT_LEAGUE_ID: "71" # Série A (ajuste se necessário)
+          APIFOOT_LEAGUE_ID: "71"
 
       # ============= ML — XGBoost Univariado =============
       - name: ML — XG Univariado (safe)
