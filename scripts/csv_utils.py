@@ -2,91 +2,60 @@
 from __future__ import annotations
 
 import csv
-from pathlib import Path
-from typing import Iterable, List, Dict, Optional, Union, Any
-
-PathLike = Union[str, Path]
+import os
+from typing import Iterable, Dict, List, Any
 
 
-def ensure_dir(p: PathLike) -> None:
-    """
-    Garante que o diretório pai do caminho exista.
-    """
-    Path(p).parent.mkdir(parents=True, exist_ok=True)
+def ensure_dir(path: str) -> None:
+    """Garante que a pasta do arquivo exista."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
 
-def read_csv_rows(path: PathLike, *, encoding: str = "utf-8") -> List[Dict[str, str]]:
-    """
-    Lê um CSV (com header) e retorna uma lista de dicionários (linhas).
-    Se o arquivo não existir, retorna lista vazia.
-    """
-    p = Path(path)
-    if not p.exists():
-        return []
-    with p.open("r", newline="", encoding=encoding) as f:
-        reader = csv.DictReader(f)
-        return list(reader)
-
-
-def write_csv_rows(
-    path: PathLike,
-    rows: Iterable[Dict[str, Any]],
-    fieldnames: Optional[Iterable[str]] = None,
-    *,
-    encoding: str = "utf-8",
-) -> int:
-    """
-    Escreve linhas (dicionários) em um CSV. Se 'fieldnames' não for passado,
-    usa as chaves da primeira linha. Retorna a quantidade de linhas escritas.
-    Cria diretórios automaticamente.
-    """
-    p = Path(path)
-    ensure_dir(p)
-    rows = list(rows)
-
-    if not rows and not fieldnames:
-        # Sem linhas e sem header explícito -> cria arquivo vazio (touch) e retorna 0
-        p.touch(exist_ok=True)
-        return 0
-
-    if fieldnames is None:
-        first = rows[0] if rows else {}
-        fieldnames = list(first.keys())
-
-    with p.open("w", newline="", encoding=encoding) as f:
-        w = csv.DictWriter(f, fieldnames=list(fieldnames))
+def write_csv_rows(path: str, rows: Iterable[Dict[str, Any]], fieldnames: List[str]) -> int:
+    """Escreve um CSV com cabeçalho; retorna número de linhas escritas (sem contar cabeçalho)."""
+    ensure_dir(path)
+    count = 0
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
         for r in rows:
             w.writerow(r)
+            count += 1
+    return count
 
-    return len(rows)
+
+def read_csv_rows(path: str) -> List[Dict[str, str]]:
+    """Lê um CSV de cabeçalho; retorna lista de dicts. Se não existir, retorna lista vazia."""
+    if not os.path.exists(path):
+        return []
+    out: List[Dict[str, str]] = []
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            out.append(dict(row))
+    return out
 
 
-def count_csv_rows(path: PathLike, *, encoding: str = "utf-8") -> int:
-    """
-    Conta as linhas de dados (ignora o header). Retorna 0 se não existir.
-    """
-    p = Path(path)
-    if not p.exists():
+def count_csv_rows(path: str) -> int:
+    """Conta linhas (sem cabeçalho). Se não existir, retorna 0."""
+    if not os.path.exists(path):
         return 0
-    with p.open("r", newline="", encoding=encoding) as f:
-        it = csv.reader(f)
-        try:
-            next(it)  # header
-        except StopIteration:
-            return 0
-        return sum(1 for _ in it)
+    with open(path, "r", encoding="utf-8") as f:
+        # conta linhas - 1 (header)
+        n = sum(1 for _ in f)
+    return max(0, n - 1)
 
 
-def lower_all(row: Dict[str, Any]) -> Dict[str, Any]:
+def lower_all(d: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Retorna uma cópia do dicionário com TODOS os valores string em minúsculas/strip.
-    Útil para normalização antes de merges ou comparações.
+    Converte chaves e valores str para minúsculas (útil em normalização).
+    Objetos não-str são mantidos.
     """
     out: Dict[str, Any] = {}
-    for k, v in row.items():
+    for k, v in d.items():
+        kk = k.lower() if isinstance(k, str) else k
         if isinstance(v, str):
-            out[k] = v.strip().lower()
+            out[kk] = v.lower()
         else:
-            out[k] = v
+            out[kk] = v
     return out
