@@ -251,13 +251,13 @@ jobs:
             echo "[kelly] AVISO: scripts/publish_kelly.py não encontrado — pulando Kelly."
           fi
         env:
-          BANKROLL:      ${{ env.BANKROLL }}
-          KELLY_FRACTION:${{ env.KELLY_FRACTION }}
-          KELLY_CAP:     ${{ env.KELLY_CAP }}
-          MIN_STAKE:     ${{ env.MIN_STAKE }}
-          MAX_STAKE:     ${{ env.MAX_STAKE }}
-          ROUND_TO:      ${{ env.ROUND_TO }}
-          KELLY_TOP_N:   ${{ env.KELLY_TOP_N }}
+          BANKROLL:       ${{ env.BANKROLL }}
+          KELLY_FRACTION: ${{ env.KELLY_FRACTION }}
+          KELLY_CAP:      ${{ env.KELLY_CAP }}
+          MIN_STAKE:      ${{ env.MIN_STAKE }}
+          MAX_STAKE:      ${{ env.MAX_STAKE }}
+          ROUND_TO:       ${{ env.ROUND_TO }}
+          KELLY_TOP_N:    ${{ env.KELLY_TOP_N }}
 
       # ============= Upload de artifacts principais =============
       - name: Upload — artifacts integrados
