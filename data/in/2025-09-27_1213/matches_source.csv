@@ -1,3 +1,7 @@
-match_id,date,home,away,league,country,season,kickoff_utc
-BR-1,2025-09-27,Atletico Mineiro,Juventude,BR-A,Brazil,2025,2025-09-28T00:30:00Z
-BR-2,2025-09-27,Goias,Atletico Goianiense,BR-A,Brazil,2025,2025-09-28T00:30:00Z
+match_id,home,away,country,league,season,kickoff_date
+BR001,Palmeiras,Vasco da Gama,Brazil,Serie A,2025,2025-09-27
+BR002,Sport,Fluminense,Brazil,Serie A,2025,2025-09-27
+BR003,Mirassol,Red Bull Bragantino,Brazil,Serie A,2025,2025-09-27
+BR004,Internacional,Corinthians,Brazil,Serie A,2025,2025-09-27
+BR005,Santos,Grêmio,Brazil,Serie A,2025,2025-09-27
+BR006,Botafogo,Bahia,Brazil,Serie A,2025,2025-09-27
