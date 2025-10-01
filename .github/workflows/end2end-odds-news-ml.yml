@@ -1,0 +1,288 @@
+name: end2end-odds-news-ml
+
+on:
+  schedule:
+    - cron: "13 12 * * SAT"
+  push:
+    branches: [ main ]
+    paths:
+      - "data/in/**"
+      - ".github/workflows/end2end-odds-news-ml.yml"
+      - "scripts/**"
+  workflow_dispatch:
+    inputs:
+      rodada:
+        description: "RODADA (ex.: 2025-09-27_1213)"
+        required: true
+      season:
+        description: "Temporada (ex.: 2025)"
+        required: false
+      regions:
+        description: "Regiões odds (ex.: uk,eu,us,au)"
+        required: false
+        default: "uk,eu,us,au"
+      debug:
+        description: "Logs extras"
+        required: false
+        default: "true"
+
+jobs:
+  end2end:
+    runs-on: ubuntu-24.04
+
+    env:
+      RODADA: ${{ github.event.inputs.rodada != '' && github.event.inputs.rodada || '2025-09-27_1213' }}
+      SEASON: ${{ github.event.inputs.season != '' && github.event.inputs.season || '2025' }}
+      REGIONS: ${{ github.event.inputs.regions != '' && github.event.inputs.regions || 'uk,eu,us,au' }}
+      DEBUG: ${{ github.event.inputs.debug != '' && github.event.inputs.debug || 'true' }}
+
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+
+      # ====== Kelly (ajuste à vontade; não quebra nada se mantiver defaults) ======
+      BANKROLL: ${{ secrets.BANKROLL || '1000' }}      # pode colocar como secret; senão usa 1000
+      KELLY_FRACTION: ${{ secrets.KELLY_FRACTION || '0.5' }}
+      KELLY_CAP: ${{ secrets.KELLY_CAP || '0.1' }}     # cap por aposta (10% do bankroll)
+      MIN_STAKE: ${{ secrets.MIN_STAKE || '0' }}
+      MAX_STAKE: ${{ secrets.MAX_STAKE || '0' }}       # 0 = sem teto absoluto
+      ROUND_TO: ${{ secrets.ROUND_TO || '1' }}         # arredondamento p/ múltiplos (ex.: 1)
+
+      KELLY_TOP_N: ${{ secrets.KELLY_TOP_N || '14' }}  # quantidade de picks priorizados
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (repo) + extras de ML sem tocar requirements.txt
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install xgboost==2.1.1
+          pip install matplotlib==3.9.2
+
+      - name: Hotfix opcional (não-fatal)
+        run: |
+          python scripts/patch_merge_hotfix.py || true
+
+      - name: Sanity de entrada (matches_source.csv)
+        run: |
+          set -e
+          if [ ! -f "data/in/${RODADA}/matches_source.csv" ]; then
+            echo "ERRO: data/in/${RODADA}/matches_source.csv não encontrado"
+            exit 2
+          fi
+          echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
+
+      - name: Checagem de chaves (log amigável)
+        run: |
+          set -e
+          [ -z "${THEODDS_API_KEY}" ] && echo "AVISO: THEODDS_API_KEY ausente" || echo "THEODDS_API_KEY: OK"
+          [ -z "${RAPIDAPI_KEY}" ] && echo "AVISO: RAPIDAPI_KEY ausente" || echo "RAPIDAPI_KEY: OK"
+          [ -z "${NEWSAPI_KEY}" ] && echo "AVISO: NEWSAPI_KEY ausente (News gerará CSV vazio)" || echo "NEWSAPI_KEY: OK"
+
+      - name: W&B login (não-fatal)
+        run: |
+          python -m wandb login "${WANDB_API_KEY}" --relogin || true
+          echo "[wandb] login executado"
+
+      # ---------------- NEWS ----------------
+      - name: Ingest News (NewsAPI)
+        run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -f "scripts/news_ingest_newsapi.py" ]; then
+            python scripts/news_ingest_newsapi.py --rodada "${RODADA}" ${EXTRA}
+          else
+            echo "[news] AVISO: scripts/news_ingest_newsapi.py não encontrado — pulando ingest."
+          fi
+
+      - name: Build News Features
+        run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -f "scripts/features_news.py" ]; then
+            python scripts/features_news.py --rodada "${RODADA}" ${EXTRA}
+          else
+            echo "[news] AVISO: scripts/features_news.py não encontrado — pulando features de news."
+          fi
+
+      # ---------------- ODDS (SAFE) ----------------
+      - name: Verificações de scripts SAFE
+        run: |
+          set -e
+          grep -n "theoddsapi-safe" scripts/ingest_odds_theoddsapi_safe.py || (echo "SAFE_NOT_FOUND"; exit 4)
+          grep -n "consensus-safe" scripts/consensus_odds_safe.py || (echo "CONSENSUS_SAFE_NOT_FOUND"; exit 4)
+          python -c "import importlib.util,sys; ok=bool(importlib.util.find_spec('scripts.consensus_odds_safe')); print('[check] consensus_safe exists:', ok); sys.exit(0 if ok else 5)"
+
+      - name: Ingest TheOddsAPI (SAFE wrapper)
+        run: |
+          set -e
+          if [ -n "${THEODDS_API_KEY}" ]; then
+            EXTRA=""
+            [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+            python scripts/ingest_odds_theoddsapi_safe.py \
+              --rodada "${RODADA}" \
+              --regions "${REGIONS}" \
+              ${EXTRA}
+          else
+            echo "[theoddsapi-safe] SKIP: THEODDS_API_KEY ausente."
+          fi
+
+      - name: Ingest API-Football via RapidAPI (SAFE quando disponível)
+        run: |
+          set -e
+          if [ -n "${RAPIDAPI_KEY}" ]; then
+            EXTRA=""
+            [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+            if [ -f "scripts/ingest_odds_apifootball_rapidapi_safe.py" ]; then
+              python scripts/ingest_odds_apifootball_rapidapi_safe.py \
+                --rodada "${RODADA}" \
+                --season "${SEASON}" \
+                ${EXTRA} || true
+            else
+              python -m scripts.ingest_odds_apifootball_rapidapi \
+                --rodada "${RODADA}" \
+                --season "${SEASON}" \
+                --window 2 \
+                --fuzzy 0.90 \
+                --aliases data/aliases_br.json \
+                ${EXTRA} || true
+            fi
+          else
+            echo "[apifootball-safe] SKIP: RAPIDAPI_KEY ausente."
+          fi
+
+      - name: Consensus (SAFE)
+        run: |
+          set -e
+          python -m scripts.consensus_odds_safe --rodada "${RODADA}"
+
+      # ---------------- FEATURES TABULARES ----------------
+      - name: Build Base Features (tabular)
+        run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -f "scripts/features_build_base.py" ]; then
+            python scripts/features_build_base.py --rodada "${RODADA}" ${EXTRA}
+          else
+            echo "[features] AVISO: scripts/features_build_base.py não encontrado — pulando features base."
+          fi
+
+      # ---------------- MODELOS ----------------
+      - name: XG Univariado
+        run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -f "scripts/ml_xg_uni.py" ]; then
+            python scripts/ml_xg_uni.py --rodada "${RODADA}" ${EXTRA} || true
+          else
+            echo "[ml] AVISO: scripts/ml_xg_uni.py não encontrado — pulando XG univariado."
+          fi
+
+      - name: XG Bivariado
+        run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -f "scripts/ml_xg_bi.py" ]; then
+            python scripts/ml_xg_bi.py --rodada "${RODADA}" ${EXTRA} || true
+          else
+            echo "[ml] AVISO: scripts/ml_xg_bi.py não encontrado — pulando XG bivariado."
+          fi
+
+      - name: Calibração Isotônica (pós-modelo)
+        run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -f "scripts/ml_calibrate_isotonic.py" ]; then
+            python scripts/ml_calibrate_isotonic.py --rodada "${RODADA}" ${EXTRA} || true
+          else
+            echo "[ml] AVISO: scripts/ml_calibrate_isotonic.py não encontrado — pulando calibração."
+          fi
+
+      - name: Stacking Bivariado (meta-model)
+        run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -f "scripts/ml_stack_bi.py" ]; then
+            python scripts/ml_stack_bi.py --rodada "${RODADA}" ${EXTRA} || true
+          else
+            echo "[ml] AVISO: scripts/ml_stack_bi.py não encontrado — pulando stacking."
+          fi
+
+      - name: Publicar Predições (merge final + picks)
+        run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -f "scripts/publish_predictions.py" ]; then
+            python scripts/publish_predictions.py --rodada "${RODADA}" ${EXTRA}
+          else
+            echo "[publish] AVISO: scripts/publish_predictions.py não encontrado — pulando publicação."
+          fi
+
+      # ---------------- KELLY (NOVO, INTEGRADO) ----------------
+      - name: Kelly — stakes e picks
+        run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -f "scripts/publish_kelly.py" ]; then
+            python scripts/publish_kelly.py \
+              --rodada "${RODADA}" \
+              ${EXTRA}
+          else
+            echo "[kelly] AVISO: scripts/publish_kelly.py não encontrado — pulando Kelly."
+          fi
+
+      # ---------------- ARTIFACTS ----------------
+      - name: Upload artifacts (completo)
+        uses: actions/upload-artifact@v4
+        with:
+          name: loteca_full_${{ env.RODADA }}
+          path: |
+            data/out/${{ env.RODADA }}/odds_theoddsapi.csv
+            data/out/${{ env.RODADA }}/unmatched_theoddsapi.csv
+            data/out/${{ env.RODADA }}/odds_apifootball.csv
+            data/out/${{ env.RODADA }}/unmatched_apifootball.csv
+            data/out/${{ env.RODADA }}/odds_consensus.csv
+            data/out/${{ env.RODADA }}/news_raw.csv
+            data/out/${{ env.RODADA }}/news_flags.csv
+            data/out/${{ env.RODADA }}/features_base.csv
+            data/out/${{ env.RODADA }}/features_news.csv
+            data/out/${{ env.RODADA }}/xg_uni_model.json
+            data/out/${{ env.RODADA }}/xg_uni_metrics.json
+            data/out/${{ env.RODADA }}/xg_bi_model.json
+            data/out/${{ env.RODADA }}/xg_bi_metrics.json
+            data/out/${{ env.RODADA }}/calibration_isotonic.pkl
+            data/out/${{ env.RODADA }}/calibration_report.json
+            data/out/${{ env.RODADA }}/stack_bi_model.pkl
+            data/out/${{ env.RODADA }}/stack_bi_metrics.json
+            data/out/${{ env.RODADA }}/predictions_raw.csv
+            data/out/${{ env.RODADA }}/predictions_calibrated.csv
+            data/out/${{ env.RODADA }}/picks_final.csv
+            data/out/${{ env.RODADA }}/stakes_kelly.csv
+            data/out/${{ env.RODADA }}/picks_final_kelly.csv
+            data/out/${{ env.RODADA }}/kelly_report.json
+            data/out/${{ env.RODADA }}/plots/**
+            data/out/${{ env.RODADA }}/debug/**
+          if-no-files-found: warn
+          compression-level: 6
+          overwrite: false
+          include-hidden-files: false
