@@ -1,189 +1,235 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gera odds de consenso a partir dos CSVs em data/out/<RODADA>/.
+scripts/consensus_odds_safe.py
 
-- Aceita 1 ou 2 provedores:
-    data/out/<RODADA>/odds_theoddsapi.csv
-    data/out/<RODADA>/odds_apifootball.csv
-- Se existir só um com linhas válidas, é pass-through.
-- Se existirem dois, usa a MAIOR odd por mercado (home/draw/away) linha a linha.
-
-Critério de validade da linha: pelo menos 2 odds > 1.0.
-
-Saída: data/out/<RODADA>/odds_consensus.csv com:
-  team_home, team_away, match_key, odds_home, odds_draw, odds_away
+- Procura odds em data/out/<RODADA>/ e, se não houver, em data/in/<RODADA>/ (e copia p/ out).
+- Aceita 1 ou 2 provedores (theoddsapi / apifootball). NÃO exige ambos.
+- Normaliza cabeçalhos e numéricos (decimal e american).
+- Suporta CSV “longo” (uma seleção por linha) e CSV “por colunas”.
+- ***NOVO***: no modo “colunas”, agrega por match_key e pega o MAX de cada odds_*.
+- Gera data/out/<RODADA>/odds_consensus.csv com (team_home, team_away, match_key, odds_home, odds_draw, odds_away).
+- Sai com exit 10 se não houver jogos com >= 2 odds > 1.0.
 """
-
-import argparse
-import os
-import sys
-from typing import Tuple, Dict, List
+import argparse, os, sys, re, shutil
+from typing import List, Tuple, Dict
 import pandas as pd
-import re
 
-# --------------------------
-# Helpers
-# --------------------------
+# -------------------- utils de path --------------------
+def _ensure_out_dir(rodada: str) -> str:
+    out_dir = os.path.join("data", "out", rodada)
+    os.makedirs(out_dir, exist_ok=True)
+    return out_dir
 
+def _probe(provider_fname: str, rodada: str) -> str:
+    """Prefere /out; cai para /in e copia para /out se possível."""
+    p_out = os.path.join("data", "out", rodada, provider_fname)
+    if os.path.isfile(p_out):
+        return p_out
+    p_in = os.path.join("data", "in", rodada, provider_fname)
+    if os.path.isfile(p_in):
+        out_dir = _ensure_out_dir(rodada)
+        dst = os.path.join(out_dir, provider_fname)
+        try:
+            shutil.copy2(p_in, dst)
+            print(f"[consensus-safe] INFO: {provider_fname} encontrado em /in -> copiado para /out.")
+            return dst
+        except Exception as e:
+            print(f"[consensus-safe] AVISO: falha ao copiar de /in para /out ({e}). Usarei direto de /in.")
+            return p_in
+    return ""  # não encontrado
+
+# -------------------- limpeza / cabeçalhos --------------------
 def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # normaliza cabeçalhos: lower, strip, troca separadores por "_"
     def norm(c: str) -> str:
         c = str(c).strip().lower()
         c = re.sub(r"[ \t\.\-/]+", "_", c)
         c = re.sub(r"[\(\)\[\]\{\}]+", "", c)
         return c
-    df = df.copy()
-    df.columns = [norm(c) for c in df.columns]
-    return df
+    out = df.copy()
+    out.columns = [norm(c) for c in out.columns]
+    return out
 
-def _to_num_series(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(
-        s.astype("object").astype(str).str.replace(",", ".", regex=False),
-        errors="coerce"
-    )
+# -------------------- parsing numérico --------------------
+def _is_american_token(s: str) -> bool:
+    s = s.strip()
+    # +150  -120  (+150.0)  etc.
+    return bool(re.fullmatch(r"[+\-]\d+(\.\d+)?", s))
 
-def _pick_col_contains(df: pd.DataFrame, candidates: List[str]) -> str:
-    for c in candidates:
-        if c in df.columns:
-            return c
-    # fallback de substring
-    for want in candidates:
+def _american_to_decimal_token(tok: str) -> float:
+    v = float(tok)
+    if v > 0:
+        return 1.0 + (v / 100.0)
+    else:
+        return 1.0 + (100.0 / abs(v))
+
+def _to_number(series: pd.Series) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype="float64")
+    raw = series.astype("object").astype(str).str.strip()
+    # detecta american
+    is_am = raw.map(_is_american_token)
+    # troca vírgula decimal por ponto
+    dec = pd.to_numeric(raw.str.replace(",", ".", regex=False), errors="coerce")
+    dec.loc[is_am] = raw[is_am].map(_american_to_decimal_token)
+    # trata zeros/negativos como nulos (não são odds válidas)
+    dec = dec.mask(dec <= 1.0)
+    return pd.to_numeric(dec, errors="coerce")
+
+# -------------------- aliases --------------------
+THOME = ["team_home","home_team","mandante","time_casa","time_home","equipa_casa"]
+TAWAY = ["team_away","away_team","visitante","time_fora","time_away","equipa_fora"]
+MKEY  = ["match_key","game_key","fixture_key","key","match","partida","id_partida"]
+
+HOME  = ["odds_home","home_odds","price_home","home_price","home_decimal","price1",
+         "h2h_home","m1","selection_home","market_home","h"]
+DRAW  = ["odds_draw","draw_odds","price_draw","draw_price","pricex","draw_decimal",
+         "h2h_draw","mx","selection_draw","market_draw","x","tie"]
+AWAY  = ["odds_away","away_odds","price_away","away_price","away_decimal","price2",
+         "h2h_away","m2","selection_away","market_away","a"]
+
+SEL_NAME = ["selection","outcome","side","result","pick","market","bet"]
+PRICE    = ["odds","price","decimal","price_decimal","odds_decimal","h2h_price","value"]
+
+def _pick(df: pd.DataFrame, cands: List[str]) -> str:
+    for c in cands:
+        if c in df.columns: return c
+    # fallback: contém substring
+    for want in cands:
         for col in df.columns:
             if want in col:
                 return col
     return ""
 
-def _pick_numeric_fallback(df: pd.DataFrame, keywords: List[str]) -> str:
-    # procura qualquer coluna numérica cujo nome contenha um dos keywords
-    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(_to_num_series(df[c]))]
-    for kw in keywords:
-        for c in numeric_cols:
-            if kw in c:
-                return c
-    return ""
+def _build_match_key(df: pd.DataFrame, th: str, ta: str) -> pd.Series:
+    return (
+        df[th].astype(str).str.strip().str.lower() + "__vs__" +
+        df[ta].astype(str).str.strip().str.lower()
+    )
 
-# Aliases bem amplos
-HOME_CANDS = [
-    "odds_home","home_odds","h2h_home","price_home","home","home_price",
-    "price1","book_home","h","team_home_odds","home_decimal","home_odds_decimal",
-    "h2h_0","m1","outcome_home","market_home","selection_home"
-]
-DRAW_CANDS = [
-    "odds_draw","draw_odds","h2h_draw","price_draw","draw","draw_price",
-    "pricex","book_draw","d","empate_odds","x","tie","h2h_1","mx",
-    "outcome_draw","market_draw","selection_draw"
-]
-AWAY_CANDS = [
-    "odds_away","away_odds","h2h_away","price_away","away","away_price",
-    "price2","book_away","a","team_away_odds","away_decimal","away_odds_decimal",
-    "h2h_2","m2","outcome_away","market_away","selection_away"
-]
+def _valid_row(r) -> bool:
+    vals = [r.get("odds_home"), r.get("odds_draw"), r.get("odds_away")]
+    vals = [float(x) for x in vals if pd.notna(x)]
+    return sum(v > 1.0 for v in vals) >= 2
 
-THOME_CANDS = ["team_home","home_team","mandante","time_casa","equipa_casa","time_home"]
-TAWAY_CANDS = ["team_away","away_team","visitante","time_fora","equipa_fora","time_away"]
-KEY_CANDS   = ["match_key","game_key","fixture_key","key","match","partida"]
+# -------------------- normalização por provedor --------------------
+def _normalize_provider(raw: pd.DataFrame, tag: str) -> Tuple[pd.DataFrame, Dict[str,int]]:
+    reasons = {"menos_de_duas_odds": 0}
+    if raw is None or raw.empty:
+        cols = ["team_home","team_away","match_key","odds_home","odds_draw","odds_away"]
+        return pd.DataFrame(columns=cols), reasons
 
-def _normalize(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
-    dbg = {}  # mapeamentos escolhidos
-    if df is None or df.empty:
-        cols = ["team_home","team_away","match_key","odds_home","odds_draw","odds_away","__valid"]
-        return pd.DataFrame(columns=cols), dbg
+    df = _clean_columns(raw)
+    th = _pick(df, THOME) or "team_home"
+    ta = _pick(df, TAWAY) or "team_away"
+    mk = _pick(df, MKEY)
 
-    df = _clean_columns(df)
+    sel_col   = _pick(df, SEL_NAME)
+    price_col = _pick(df, PRICE)
 
-    th = _pick_col_contains(df, THOME_CANDS) or "team_home"
-    ta = _pick_col_contains(df, TAWAY_CANDS) or "team_away"
-    mk = _pick_col_contains(df, KEY_CANDS)
+    has_spread = (sel_col != "") and (price_col != "")
+    has_direct = any(c in df.columns for c in HOME + DRAW + AWAY)
 
-    out = pd.DataFrame({
-        "team_home": df.get(th, df.get("team_home")),
-        "team_away": df.get(ta, df.get("team_away")),
-    })
+    # ----- modo "longo": pivot por seleção -----
+    if has_spread and not has_direct:
+        if not mk:
+            mk = "match_key"
+            df[mk] = _build_match_key(df, th, ta)
 
-    if mk and mk in df.columns:
-        out["match_key"] = df[mk].astype(str)
-        dbg["match_key"] = mk
+        sel_norm = df[sel_col].astype(str).str.lower().str.strip()
+        home_mask = sel_norm.str.contains(r"\b(home|casa|mandante|1)\b")
+        draw_mask = sel_norm.str.contains(r"\b(draw|empate|x|tie)\b")
+        away_mask = sel_norm.str.contains(r"\b(away|fora|visitante|2)\b")
+
+        tmp = pd.DataFrame({
+            "match_key": df[mk].astype(str),
+            "team_home": df[th],
+            "team_away": df[ta],
+            "sel_home": home_mask,
+            "sel_draw": draw_mask,
+            "sel_away": away_mask,
+            "price": _to_number(df[price_col]),
+        })
+
+        def best_for(mask):
+            t = tmp[mask][["match_key","price"]]
+            if t.empty: return pd.Series(dtype=float)
+            return t.groupby("match_key")["price"].max()
+
+        oh = best_for(tmp["sel_home"])
+        od = best_for(tmp["sel_draw"])
+        oa = best_for(tmp["sel_away"])
+
+        idx = tmp.drop_duplicates("match_key")[["match_key","team_home","team_away"]]
+        out = pd.DataFrame({
+            "match_key": idx["match_key"],
+            "team_home": idx["team_home"],
+            "team_away": idx["team_away"],
+            "odds_home": idx["match_key"].map(oh),
+            "odds_draw": idx["match_key"].map(od),
+            "odds_away": idx["match_key"].map(oa),
+        })
+
+    # ----- modo "colunas": ***AGORA AGREGA POR MATCH_KEY*** -----
     else:
-        out["match_key"] = (
-            out["team_home"].astype(str).str.strip().str.lower()
-            + "__vs__" +
-            out["team_away"].astype(str).str.strip().str.lower()
-        )
-        dbg["match_key"] = "<auto>"
+        ch = _pick(df, HOME)
+        cd = _pick(df, DRAW)
+        ca = _pick(df, AWAY)
 
-    ch = _pick_col_contains(df, HOME_CANDS)
-    cd = _pick_col_contains(df, DRAW_CANDS)
-    ca = _pick_col_contains(df, AWAY_CANDS)
+        work = pd.DataFrame({
+            "team_home": df.get(th),
+            "team_away": df.get(ta),
+        })
+        if not mk:
+            work["match_key"] = _build_match_key(df, th, ta)
+        else:
+            work["match_key"] = df[mk].astype(str)
 
-    # fallbacks por palavras-chave se não achou pelos aliases
-    if not ch:
-        ch = _pick_numeric_fallback(df, ["home", "cas", "_1", "price1"])
-    if not cd:
-        cd = _pick_numeric_fallback(df, ["draw", "empate", "_x", "pricex", "tie"])
-    if not ca:
-        ca = _pick_numeric_fallback(df, ["away", "fora", "_2", "price2"])
+        work["odds_home"] = _to_number(df[ch]) if ch else pd.NA
+        work["odds_draw"] = _to_number(df[cd]) if cd else pd.NA
+        work["odds_away"] = _to_number(df[ca]) if ca else pd.NA
 
-    dbg["odds_home"] = ch or "<na>"
-    dbg["odds_draw"] = cd or "<na>"
-    dbg["odds_away"] = ca or "<na>"
-
-    out["odds_home"] = _to_num_series(df[ch]) if ch else pd.NA
-    out["odds_draw"] = _to_num_series(df[cd]) if cd else pd.NA
-    out["odds_away"] = _to_num_series(df[ca]) if ca else pd.NA
-
-    def _valid_row(r) -> bool:
-        vals = [r["odds_home"], r["odds_draw"], r["odds_away"]]
-        vals = [float(x) for x in vals if pd.notna(x)]
-        return sum(v > 1.0 for v in vals) >= 2
+        # >>>>>>>>> AGREGA por match_key (pega o melhor valor não-nulo) <<<<<<<<<
+        # time_home/away: pega o 1º não nulo da chave
+        firsts = work.groupby("match_key")[["team_home","team_away"]].first()
+        agg = work.groupby("match_key")[["odds_home","odds_draw","odds_away"]].max(min_count=1)
+        out = firsts.join(agg, how="outer").reset_index()
 
     out["__valid"] = out.apply(_valid_row, axis=1)
-    return out, dbg
+    reasons["menos_de_duas_odds"] = int((~out["__valid"]).sum())
+    out = out[out["__valid"]].drop(columns="__valid")
+    out["__provider"] = tag
+    return out, reasons
 
 def _read_provider(path: str, tag: str) -> Tuple[pd.DataFrame, Dict[str,int]]:
     reasons = {"menos_de_duas_odds": 0}
-    if not os.path.isfile(path):
-        print(f"[consensus-safe] AVISO: arquivo não encontrado: {path}")
+    if not path:
+        print(f"[consensus-safe] AVISO: {tag} não encontrado em /out nem /in.")
         return pd.DataFrame(), reasons
-
     try:
         raw = pd.read_csv(path)
     except Exception as e:
         print(f"[consensus-safe] ERRO ao ler {path}: {e}", file=sys.stderr)
         return pd.DataFrame(), reasons
 
-    norm, dbg = _normalize(raw)
-    total = len(norm)
-    valid = int(norm["__valid"].sum())
-    reasons["menos_de_duas_odds"] = total - valid
-
-    print(f"[consensus-safe] lido {os.path.basename(path)} -> {total} linhas; válidas: {valid}")
-    print(f"[consensus-safe] mapping {tag}: team_home='{dbg.get('team_home','team_home')}' "
-          f"team_away='{dbg.get('team_away','team_away')}' match_key='{dbg.get('match_key')}', "
-          f"odds_home='{dbg.get('odds_home')}', odds_draw='{dbg.get('odds_draw')}', odds_away='{dbg.get('odds_away')}'")
-
-    norm = norm[norm["__valid"]].drop(columns=["__valid"]).copy()
-    norm["__provider"] = tag
+    norm, reasons = _normalize_provider(raw, tag)
+    print(f"[consensus-safe] lido {os.path.basename(path)} -> {len(raw)} linhas; válidas: {len(norm)}")
+    if reasons.get("menos_de_duas_odds",0) > 0 and not norm.empty:
+        print(f"[consensus-safe] motivos inválidos {tag}: {reasons}")
     return norm, reasons
 
 def _merge_best(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
-    """Une por match_key e pega a MAIOR odd por mercado."""
+    # se só um provedor existe, retorna ele
     if a.empty and b.empty:
         return pd.DataFrame(columns=["team_home","team_away","match_key","odds_home","odds_draw","odds_away"])
-    if b.empty:
-        return a.drop(columns=["__provider"], errors="ignore")
-    if a.empty:
-        return b.drop(columns=["__provider"], errors="ignore")
+    if b.empty: return a.drop(columns=["__provider"], errors="ignore")
+    if a.empty: return b.drop(columns=["__provider"], errors="ignore")
 
     cols = ["match_key","team_home","team_away","odds_home","odds_draw","odds_away"]
-    a_ = a[cols].copy()
-    b_ = b[cols].copy()
+    m = pd.merge(a[cols], b[cols], on=["match_key","team_home","team_away"], how="outer", suffixes=("_a","_b"))
 
-    m = pd.merge(a_, b_, on=["match_key","team_home","team_away"], how="outer", suffixes=("_a","_b"))
-
-    def pick_max(row, col):
-        va = row.get(col + "_a", pd.NA)
-        vb = row.get(col + "_b", pd.NA)
+    def pick(col, r):
+        va, vb = r.get(col+"_a"), r.get(col+"_b")
         vals = [v for v in [va, vb] if pd.notna(v)]
         return max(vals) if vals else pd.NA
 
@@ -191,57 +237,42 @@ def _merge_best(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
         "team_home": m["team_home"],
         "team_away": m["team_away"],
         "match_key": m["match_key"],
-        "odds_home": m.apply(lambda r: pick_max(r, "odds_home"), axis=1),
-        "odds_draw": m.apply(lambda r: pick_max(r, "odds_draw"), axis=1),
-        "odds_away": m.apply(lambda r: pick_max(r, "odds_away"), axis=1),
+        "odds_home": m.apply(lambda r: pick("odds_home", r), axis=1),
+        "odds_draw": m.apply(lambda r: pick("odds_draw", r), axis=1),
+        "odds_away": m.apply(lambda r: pick("odds_away", r), axis=1),
     })
-
-    def valid_row(r):
-        vals = [r["odds_home"], r["odds_draw"], r["odds_away"]]
-        vals = [float(x) for x in vals if pd.notna(x)]
-        return sum(v > 1.0 for v in vals) >= 2
-
-    out["__valid"] = out.apply(valid_row, axis=1)
-    out = out[out["__valid"]].drop(columns=["__valid"])
+    # valida de novo
+    out["__valid"] = out.apply(_valid_row, axis=1)
+    out = out[out["__valid"]].drop(columns="__valid")
     return out
 
-# --------------------------
-# Main
-# --------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Ex.: 2025-09-27_1213")
+    ap.add_argument("--rodada", required=True)
     args = ap.parse_args()
 
-    out_dir = os.path.join("data","out", args.rodada)
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = _ensure_out_dir(args.rodada)
+    p_out = os.path.join(out_dir, "odds_consensus.csv")
 
-    path_theodds = os.path.join(out_dir, "odds_theoddsapi.csv")
-    path_apifoot = os.path.join(out_dir, "odds_apifootball.csv")
-    path_cons    = os.path.join(out_dir, "odds_consensus.csv")
+    # procura arquivos; basta 1 provedor
+    p_theo = _probe("odds_theoddsapi.csv", args.rodada)
+    p_api  = _probe("odds_apifootball.csv", args.rodada)
 
-    df_theo, r_theo = _read_provider(path_theodds, "theoddsapi")
-    df_api , r_api  = _read_provider(path_apifoot, "apifootball")
+    df_theo, _ = _read_provider(p_theo, "theoddsapi")
+    df_api , _ = _read_provider(p_api , "apifootball")
+    df = _merge_best(df_theo, df_api)
 
-    df_cons = _merge_best(df_theo, df_api)
-
-    total_valid = len(df_cons)
-    total_raw = len(df_theo) + len(df_api)
-    print(f"[consensus-safe] consenso bruto: {total_raw} (soma linhas válidas dos provedores); finais (>=2 odds > 1.0): {total_valid}")
-
-    if total_valid == 0:
-        # escreve arquivo vazio com cabeçalho para facilitar debug downstream
-        empty = pd.DataFrame(columns=["team_home","team_away","match_key","odds_home","odds_draw","odds_away"])
-        empty.to_csv(path_cons, index=False)
+    total = len(df)
+    print(f"[consensus-safe] consenso final: {total} linhas")
+    if total == 0:
+        # escreve CSV vazio com header esperado (mantém semântica do pipeline)
+        pd.DataFrame(columns=["team_home","team_away","match_key","odds_home","odds_draw","odds_away"]).to_csv(p_out, index=False)
         print("[consensus-safe] ERRO: nenhuma linha de odds válida. Abortando.")
         sys.exit(10)
 
-    # Amostra para debug
-    sample = df_cons.head(5).to_dict(orient="records")
-    print(f"[consensus-safe] AMOSTRA (top 5): {sample}")
-
-    df_cons.to_csv(path_cons, index=False)
-    print(f"[consensus-safe] OK -> {path_cons} ({total_valid} linhas)")
+    print(f"[consensus-safe] AMOSTRA (top 5): {df.head(5).to_dict(orient='records')}")
+    df.to_csv(p_out, index=False)
+    print(f"[consensus-safe] OK -> {p_out} ({total} linhas)")
 
 if __name__ == "__main__":
     main()
