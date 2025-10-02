@@ -2,14 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-scripts/consensus_odds_safe.py
+Gera odds de consenso a partir dos provedores disponíveis.
+Agora funciona mesmo que apenas UM provedor tenha retornado odds válidas.
 
-Gera odds de consenso a partir dos provedores disponíveis (TheOddsAPI e/ou API-Football/RapidAPI).
-Funciona se existir pelo menos UM provedor com odds válidas (> 1.0). Se os dois existirem,
-faz a média por partida. Salva em data/out/<RODADA>/odds_consensus.csv.
+Entrada esperada (se existirem):
+  data/out/<RODADA>/odds_theoddsapi.csv
+  data/out/<RODADA>/odds_apifootball.csv
 
-Uso:
-  python -m scripts.consensus_odds_safe --rodada 2025-09-27_1213 [--debug]
+Saída:
+  data/out/<RODADA>/odds_consensus.csv
+
+Uma linha é considerada "válida" se tiver pelo menos 2 odds numéricas > 1.0
+(em geral 1x2 → home/draw/away).
 """
 
 import argparse
@@ -21,167 +25,155 @@ from typing import List, Optional
 import pandas as pd
 
 
-EXIT_NO_VALID_ODDS = 10
+REQUIRED_BASE_COLS = ["match_key", "team_home", "team_away"]
+ODDS_COLS = ["odds_home", "odds_draw", "odds_away"]
 
 
-def log(msg: str, debug: bool = False):
-    # imprime sempre; usar if debug para mensagens muito verbosas
-    print(msg)
+def _log(msg: str) -> None:
+    print(f"[consensus-safe] {msg}")
 
 
-def _coerce_float_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    for c in cols:
+def _exists(p: str) -> bool:
+    return os.path.isfile(p) and os.path.getsize(p) > 0
+
+
+def _read_provider_csv(path: str, provider: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    # padroniza nomes em minúsculo
+    df.columns = [c.strip().lower() for c in df.columns]
+    # garante colunas base
+    for c in REQUIRED_BASE_COLS:
+        if c not in df.columns:
+            raise ValueError(f"{provider}: coluna obrigatória ausente: {c}")
+
+    # odds → numéricas (ponto decimal). vírgulas viram ponto, strings viram NaN
+    for c in ODDS_COLS:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+            df[c] = pd.to_numeric(
+                df[c].astype(str).str.replace(",", ".", regex=False),
+                errors="coerce",
+            )
+        else:
+            df[c] = pd.NA
+
+    # __join_key para merge robusto
+    def _mk_key(r):
+        h = str(r.get("team_home", "")).strip().lower()
+        a = str(r.get("team_away", "")).strip().lower()
+        mk = str(r.get("match_key", "")).strip().lower()
+        if mk:
+            return mk
+        return f"{h}__vs__{a}"
+
+    df["__join_key"] = df.apply(_mk_key, axis=1)
+    df["__prov"] = provider
+    # indica se linha tem pelo menos 2 odds > 1
+    df["__valid"] = (
+        ((df["odds_home"] > 1).astype("Int64").fillna(0))
+        + ((df["odds_draw"] > 1).astype("Int64").fillna(0))
+        + ((df["odds_away"] > 1).astype("Int64").fillna(0))
+    ) >= 2
+
     return df
 
 
-def _strip_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    for c in cols:
-        if c in df.columns:
-            df[c] = df[c].astype(str).str.strip()
-    return df
+def _consensus(dfs: List[pd.DataFrame]) -> pd.DataFrame:
+    # une por __join_key mantendo a primeira ocorrência dos metadados
+    base = (
+        pd.concat(dfs, ignore_index=True)
+        .sort_values(["__join_key"])
+        .reset_index(drop=True)
+    )
 
+    # mantém primeira info de times/chave por jogo
+    meta = (
+        base.sort_values(["__join_key", "__prov"])
+        .drop_duplicates("__join_key", keep="first")[["__join_key", *REQUIRED_BASE_COLS]]
+    )
 
-def _has_any_valid_odds(df: Optional[pd.DataFrame]) -> bool:
-    if df is None or df.empty:
-        return False
-    for c in ("odds_home", "odds_draw", "odds_away"):
-        if c in df.columns:
-            if (df[c] > 1.0).any():
-                return True
-    return False
+    # agrega odds por média entre provedores que trouxeram valor
+    agg = (
+        base.groupby("__join_key")[ODDS_COLS]
+        .mean(numeric_only=True)
+        .reset_index()
+    )
 
+    out = meta.merge(agg, on="__join_key", how="left")
 
-def _valid_rows(df: pd.DataFrame) -> pd.DataFrame:
-    # Considera linha válida se pelo menos duas casas (home/draw/away) tiverem odds > 1.0
-    needed = ["odds_home", "odds_draw", "odds_away"]
-    present = [c for c in needed if c in df.columns]
-    if len(present) < 2:
-        return df.iloc[0:0]  # sem colunas suficientes
-    m = (df[present] > 1.0).sum(axis=1) >= 2
-    return df[m].copy()
+    # marca válidas (>= 2 odds > 1)
+    out["__valid"] = (
+        ((out["odds_home"] > 1).astype("Int64").fillna(0))
+        + ((out["odds_draw"] > 1).astype("Int64").fillna(0))
+        + ((out["odds_away"] > 1).astype("Int64").fillna(0))
+    ) >= 2
 
-
-def _ensure_join_key(df: pd.DataFrame) -> pd.DataFrame:
-    # Usa match_key se existir; senão, cria a partir de team_home x team_away
-    out = df.copy()
-    if "match_key" in out.columns and out["match_key"].notna().any():
-        out["__join_key"] = out["match_key"].astype(str).str.strip()
-    else:
-        # normaliza nomes de times
-        _strip_cols(out, ["team_home", "team_away"])
-        out["__join_key"] = (out.get("team_home", "").astype(str).str.strip()
-                             + " x "
-                             + out.get("team_away", "").astype(str).str.strip())
+    # ordena bonito
+    out = out[["match_key", "team_home", "team_away", *ODDS_COLS, "__valid"]]
     return out
 
 
-def _load_provider_csv(path: str, debug: bool = False) -> Optional[pd.DataFrame]:
-    if not os.path.isfile(path):
-        log(f"[consensus-safe] AVISO: arquivo não encontrado: {path}", debug=debug)
-        return None
-    try:
-        df = pd.read_csv(path)
-    except Exception as e:
-        log(f"[consensus-safe] AVISO: falha ao ler {path}: {e}", debug=debug)
-        return None
-
-    # normalização mínima
-    base_cols = ["team_home", "team_away", "match_key", "odds_home", "odds_draw", "odds_away"]
-    missing = [c for c in ["team_home", "team_away"] if c not in df.columns]
-    if missing:
-        log(f"[consensus-safe] AVISO: {path} sem colunas essenciais: {missing}", debug=debug)
-        return None
-
-    # cria colunas de odds se não existirem (como NaN)
-    for c in ["odds_home", "odds_draw", "odds_away"]:
-        if c not in df.columns:
-            df[c] = float("nan")
-
-    df = _coerce_float_cols(df, ["odds_home", "odds_draw", "odds_away"])
-    df = _strip_cols(df, ["team_home", "team_away", "match_key"])
-    df = _ensure_join_key(df)
-
-    valid = _valid_rows(df)
-    log(f"[consensus-safe] lido {os.path.basename(path)} -> {len(df)} linhas; válidas: {len(valid)}", debug=debug)
-    return valid if not valid.empty else None
-
-
-def _consensus_concat_and_mean(parts: List[pd.DataFrame], debug: bool = False) -> pd.DataFrame:
-    # Concatena todas e agrega por __join_key fazendo mean de odds_* e pegando o primeiro team_home/away/match_key
-    concat = pd.concat(parts, ignore_index=True)
-
-    # Se ambos providers trouxerem o mesmo jogo com nomes levemente diferentes mas mesmo match_key,
-    # a agregação por __join_key (derivado de match_key ou home x away) resolve.
-    key = "__join_key"
-    num_cols = ["odds_home", "odds_draw", "odds_away"]
-
-    # Para preservar nomes de times e match_key, pegamos o "primeiro" por chave
-    first_meta = (concat
-                  .sort_values(by=[key])
-                  .drop_duplicates(subset=[key], keep="first")
-                  [[key, "team_home", "team_away", "match_key"]]
-                  )
-
-    # Média das odds por chave
-    means = (concat
-             .groupby(key, as_index=False)[num_cols]
-             .mean(numeric_only=True)
-             )
-
-    merged = pd.merge(means, first_meta, on=key, how="left")
-    cols = ["team_home", "team_away", "match_key", "odds_home", "odds_draw", "odds_away"]
-    merged = merged[cols]
-
-    # Reaplica filtro de validade (pode haver médias <= 1.0 se algum provedor mandar lixo)
-    merged = _valid_rows(merged)
-
-    return merged.reset_index(drop=True)
-
-
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--rodada", required=True, help="Identificador da rodada (ex: 2025-09-27_1213)")
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True, help="Identificador da rodada/pasta")
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
 
     out_dir = os.path.join("data", "out", args.rodada)
     os.makedirs(out_dir, exist_ok=True)
 
-    path_theodds = os.path.join(out_dir, "odds_theoddsapi.csv")
-    path_apifoot = os.path.join(out_dir, "odds_apifootball.csv")
+    # paths de provedores
+    p_theodds = os.path.join(out_dir, "odds_theoddsapi.csv")
+    p_apifoot = os.path.join(out_dir, "odds_apifootball.csv")
+
+    providers_loaded = []
+    dfs: List[pd.DataFrame] = []
+
+    if _exists(p_theodds):
+        try:
+            df = _read_provider_csv(p_theodds, "theoddsapi")
+            _log(f"lido odds_theoddsapi.csv -> {len(df)} linhas; válidas: {int(df['__valid'].sum())}")
+            providers_loaded.append("theoddsapi")
+            dfs.append(df)
+        except Exception as e:
+            _log(f"AVISO: erro lendo odds_theoddsapi.csv: {e}")
+
+    if _exists(p_apifoot):
+        try:
+            df = _read_provider_csv(p_apifoot, "apifootball")
+            _log(f"lido odds_apifootball.csv -> {len(df)} linhas; válidas: {int(df['__valid'].sum())}")
+            providers_loaded.append("apifootball")
+            dfs.append(df)
+        except Exception as e:
+            _log(f"AVISO: erro lendo odds_apifootball.csv: {e}")
+
+    if not dfs:
+        _log("AVISO: nenhum CSV de odds encontrado em data/out/<RODADA>.")
+        _log("consenso bruto: 0 linhas; válidas (>=2 odds > 1.0): 0")
+        _log("ERRO: nenhuma linha de odds válida. Abortando.")
+        sys.exit(10)
+
+    cons = _consensus(dfs)
+    total = len(cons)
+    valid = int(cons["__valid"].sum())
+
+    if valid == 0:
+        _log(f"consenso bruto: {total} linhas; válidas (>=2 odds > 1.0): 0")
+        _log("ERRO: nenhuma linha de odds válida. Abortando.")
+        sys.exit(10)
+
+    # mantém só válidas
+    cons = cons[cons["__valid"]].drop(columns=["__valid"]).reset_index(drop=True)
+
     out_path = os.path.join(out_dir, "odds_consensus.csv")
-
-    parts: List[pd.DataFrame] = []
-    df_theodds = _load_provider_csv(path_theodds, debug=args.debug)
-    if df_theodds is not None and _has_any_valid_odds(df_theodds):
-        parts.append(df_theodds)
-
-    df_apifoot = _load_provider_csv(path_apifoot, debug=args.debug)
-    if df_apifoot is not None and _has_any_valid_odds(df_apifoot):
-        parts.append(df_apifoot)
-
-    total_raw = sum([0 if d is None else len(d) for d in [df_theodds, df_apifoot]])
-    log(f"[consensus-safe] consenso bruto: {total_raw} linhas; "
-        f"válidas (>=2 odds > 1.0): {sum(0 if d is None else len(d) for d in parts)}", debug=args.debug)
-
-    if not parts:
-        log("[consensus-safe] ERRO: nenhuma linha de odds válida. Abortando.")
-        sys.exit(EXIT_NO_VALID_ODDS)
-
-    # Se tiver 1 provedor -> passa adiante; se tiver 2+ -> média
-    if len(parts) == 1:
-        consensus = parts[0].copy()
-        # Mantém as colunas e a ordem esperada
-        consensus = consensus[["team_home", "team_away", "match_key", "odds_home", "odds_draw", "odds_away"]]
-        log(f"[consensus-safe] OK (1 provedor) -> {out_path} ({len(consensus)} linhas)")
-    else:
-        consensus = _consensus_concat_and_mean(parts, debug=args.debug)
-        log(f"[consensus-safe] OK (média de {len(parts)} provedores) -> {out_path} ({len(consensus)} linhas)")
-
-    consensus.to_csv(out_path, index=False)
-
+    cons.to_csv(out_path, index=False)
+    _log(f"OK -> {out_path} ({len(cons)} linhas)")
+    if args.debug:
+        dbg = {
+            "providers": providers_loaded,
+            "linhas_total": total,
+            "linhas_validas": len(cons),
+        }
+        print(json.dumps({"consensus": dbg}, ensure_ascii=False))
 
 if __name__ == "__main__":
     main()
