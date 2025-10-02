@@ -1,7 +1,6 @@
-match_id,home,away,country,league,season,kickoff_date
-BR001,Palmeiras,Vasco da Gama,Brazil,Serie A,2025,2025-09-27
-BR002,Sport,Fluminense,Brazil,Serie A,2025,2025-09-27
-BR003,Mirassol,Red Bull Bragantino,Brazil,Serie A,2025,2025-09-27
-BR004,Internacional,Corinthians,Brazil,Serie A,2025,2025-09-27
-BR005,Santos,Grêmio,Brazil,Serie A,2025,2025-09-27
-BR006,Botafogo,Bahia,Brazil,Serie A,2025,2025-09-27
+team_home,team_away,match_key
+Vitoria,Ceara,vitoria__vs__ceara
+Fortaleza,Sao Paulo,fortaleza__vs__sao_paulo
+Flamengo,Cruzeiro,flamengo__vs__cruzeiro
+Paysandu,Cuiaba,paysandu__vs__cuiaba
+Vila Nova,Criciuma,vila_nova__vs__criciuma
