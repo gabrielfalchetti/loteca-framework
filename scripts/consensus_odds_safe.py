@@ -1,269 +1,225 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Gera odds de consenso a partir dos provedores disponíveis.
+Gera odds de consenso a partir dos CSVs presentes em data/out/<RODADA>/.
 
-✔ Funciona com UM provedor só.
-✔ Detecta automaticamente nomes de colunas de odds (home/draw/away), mesmo que mudem:
-   - "odds_home", "home_odds", "h2h_home", "moneyline_home", "home", etc.
-✔ Converte formatos:
-   - Probabilidades (0<p<1, soma ≈1) -> odds decimais (1/p)
-   - American (+120/-150) -> odds decimais
-   - Vírgula decimal e '%' -> normaliza
-✔ Diagnóstico: conta os motivos de invalidação por linha.
+✅ Aceita 1 ou 2 provedores:
+   - data/out/<RODADA>/odds_theoddsapi.csv
+   - data/out/<RODADA>/odds_apifootball.csv
+Se existir só um arquivo com linhas válidas, ele é usado como consenso (pass-through).
+Se existirem os dois, o consenso pega a **melhor odd disponível (máxima)** por mercado
+(home/draw/away) linha a linha.
 
-Entrada (se existirem):
-  data/out/<RODADA>/odds_theoddsapi.csv
-  data/out/<RODADA>/odds_apifootball.csv
+Critério de validade por linha: pelo menos 2 odds > 1.0 (home/draw/away).
 
-Saída:
-  data/out/<RODADA>/odds_consensus.csv
+Saída: data/out/<RODADA>/odds_consensus.csv com colunas:
+  team_home, team_away, match_key, odds_home, odds_draw, odds_away
 
-Uma linha é considerada válida se tiver ≥2 odds numéricas > 1.0.
+Uso:
+  python -m scripts.consensus_odds_safe --rodada 2025-09-27_1213
 """
 
 import argparse
 import os
-import re
 import sys
-from typing import Dict, List, Optional, Tuple
-
+import math
+from typing import Tuple, Dict, List
 import pandas as pd
 
+# --------------------------
+# Normalização de colunas
+# --------------------------
+HOME_CANDIDATES = [
+    "odds_home","home_odds","h2h_home","price_home","home","home_price",
+    "price1","book_home","h","team_home_odds"
+]
+DRAW_CANDIDATES = [
+    "odds_draw","draw_odds","h2h_draw","price_draw","draw","draw_price",
+    "pricex","book_draw","d","empate_odds","x"
+]
+AWAY_CANDIDATES = [
+    "odds_away","away_odds","h2h_away","price_away","away","away_price",
+    "price2","book_away","a","team_away_odds"
+]
+THOME_CANDIDATES = ["team_home","home_team","mandante","time_casa"]
+TAWAY_CANDIDATES = ["team_away","away_team","visitante","time_fora"]
+KEY_CANDIDATES   = ["match_key","game_key","fixture_key","key","match","partida"]
 
-REQUIRED_BASE = ["match_key", "team_home", "team_away"]
-PREFS_HOME = ["odds_home", "home_odds", "h2h_home", "moneyline_home", "home_ml", "home"]
-PREFS_DRAW = ["odds_draw", "draw_odds", "h2h_draw", "moneyline_draw", "x", "empate", "draw"]
-PREFS_AWAY = ["odds_away", "away_odds", "h2h_away", "moneyline_away", "away_ml", "away"]
+def _to_num_series(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(
+        s.astype("object").astype(str).str.replace(",", ".", regex=False),
+        errors="coerce"
+    )
 
-def log(msg: str) -> None:
-    print(f"[consensus-safe] {msg}")
-
-def exists(p: str) -> bool:
-    return os.path.isfile(p) and os.path.getsize(p) > 0
-
-def cleanse_num_series(s: pd.Series) -> pd.Series:
-    # troca vírgula por ponto; remove %
-    s = s.astype(str).str.replace(",", ".", regex=False).str.replace("%", "", regex=False)
-    return pd.to_numeric(s, errors="coerce")
-
-def detect_col(cols: List[str], prefs: List[str]) -> Optional[str]:
-    cols_l = [c.lower().strip() for c in cols]
-    # preferidos exatos
-    for p in prefs:
-        if p in cols_l:
-            return cols[cols_l.index(p)]
-    # heurística por regex
-    regexes = [
-        r"\bhome\b|\bcasa\b",
-        r"\bdraw\b|\bx\b|\bempate\b",
-        r"\baway\b|\bfora\b|\bvisitor\b",
-    ]
-    # usa o conjunto pedido
-    targets = "|".join(re.escape(p) for p in prefs)
-    pat = re.compile(targets, re.I)
-    for c in cols:
-        if pat.search(c):
+def _pick_col(df: pd.DataFrame, candidates: List[str]) -> str:
+    for c in candidates:
+        if c in df.columns:
             return c
-    # fallback: heurística curta
-    for c in cols:
-        cl = c.lower()
-        if prefs is PREFS_HOME and ("home" in cl or "casa" in cl or cl.endswith("_h")):
-            return c
-        if prefs is PREFS_DRAW and ("draw" in cl or "empate" in cl or cl in ("x",)):
-            return c
-        if prefs is PREFS_AWAY and ("away" in cl or "fora" in cl or cl.endswith("_a")):
-            return c
-    return None
+    # tentativa por "contém" (ex.: outcomes.home, markets_h2h_home etc.)
+    lcols = [c.lower() for c in df.columns]
+    for name in candidates:
+        for i, lc in enumerate(lcols):
+            if name in lc:
+                return df.columns[i]
+    return ""
 
-def map_columns(df: pd.DataFrame) -> Tuple[str, str, str, str, str, str]:
-    cols = [c.strip() for c in df.columns]
-    # obrigatórias base (permite variações simples)
-    def pick_base(name: str, alt: List[str]) -> str:
-        candidates = [name] + alt
-        for c in candidates:
-            if c in df.columns:
-                return c
-        # heurística: match_key pode faltar — criaremos depois
-        return ""
-    c_match = pick_base("match_key", ["match id", "matchid", "key", "id"])
-    c_home = pick_base("team_home", ["home_team", "time_casa", "mandante", "home"])
-    c_away = pick_base("team_away", ["away_team", "time_fora", "visitante", "away"])
-    # odds
-    oh = detect_col(cols, PREFS_HOME)
-    od = detect_col(cols, PREFS_DRAW)
-    oa = detect_col(cols, PREFS_AWAY)
-    return c_match, c_home, c_away, oh or "", od or "", oa or ""
+def _normalize(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=[
+            "team_home","team_away","match_key",
+            "odds_home","odds_draw","odds_away","__valid"
+        ])
 
-def mk_join_key(row, c_match: str, c_home: str, c_away: str) -> str:
-    def g(c):
-        return "" if not c else str(row.get(c, "")).strip().lower()
-    mk = g(c_match)
-    if mk:
-        return mk
-    h = g(c_home)
-    a = g(c_away)
-    return f"{h}__vs__{a}"
+    th = _pick_col(df, THOME_CANDIDATES) or "team_home"
+    ta = _pick_col(df, TAWAY_CANDIDATES) or "team_away"
+    mk = _pick_col(df, KEY_CANDIDATES)
 
-def american_to_decimal(v: float) -> float:
-    if pd.isna(v):
-        return pd.NA
-    if v >= 100:
-        return 1.0 + (v / 100.0)
-    if v <= -100:
-        return 1.0 + (100.0 / abs(v))
-    return v  # não parece american; devolve como veio
-
-def normalize_row(row: pd.Series, oh: str, od: str, oa: str) -> pd.Series:
-    # forçar numérico com limpeza
-    for c in (oh, od, oa):
-        if c:
-            row[c] = cleanse_num_series(pd.Series([row[c]])).iloc[0]
-
-    vals = [row.get(oh), row.get(od), row.get(oa)]
-    nums = [v for v in vals if pd.notna(v)]
-
-    # Probabilidades?
-    if len(nums) >= 2 and all(0 < v < 1 for v in nums):
-        s = sum(nums)
-        if 0.90 <= s <= 1.10:  # relaxado
-            for c in (oh, od, oa):
-                v = row.get(c)
-                row[c] = (1.0 / v) if (c and pd.notna(v) and v > 0) else pd.NA
-            return row
-
-    # American?
-    if len(nums) >= 2 and sum(1 for v in nums if abs(v) >= 100) >= 2:
-        for c in (oh, od, oa):
-            v = row.get(c)
-            row[c] = american_to_decimal(v) if (c and pd.notna(v)) else pd.NA
-        return row
-
-    # Já decimal ou incerto
-    return row
-
-def read_provider(path: str, provider: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df.columns = [c.strip() for c in df.columns]
-
-    c_match, c_home, c_away, oh, od, oa = map_columns(df)
-
-    # criar join_key
-    df["__join_key"] = df.apply(lambda r: mk_join_key(r, c_match, c_home, c_away), axis=1)
-    # copiar base visível
     out = pd.DataFrame({
-        "match_key": df[c_match] if c_match else df["__join_key"],
-        "team_home": df[c_home] if c_home else "",
-        "team_away": df[c_away] if c_away else "",
+        "team_home": df[th] if th in df.columns else df.get("team_home"),
+        "team_away": df[ta] if ta in df.columns else df.get("team_away"),
     })
-    out["__join_key"] = df["__join_key"]
-    out["__prov"] = provider
 
-    # odds brutas
-    for nick, col in (("odds_home", oh), ("odds_draw", od), ("odds_away", oa)):
-        out[nick] = cleanse_num_series(df[col]) if col else pd.NA
+    if mk and mk in df.columns:
+        out["match_key"] = df[mk].astype(str)
+    else:
+        # gera se não existir
+        out["match_key"] = (
+            out["team_home"].astype(str).str.strip().str.lower()
+            + "__vs__" +
+            out["team_away"].astype(str).str.strip().str.lower()
+        )
 
-    # normalização por linha
-    tmp = out.copy()
-    tmp = tmp.rename(columns={"odds_home": "oh", "odds_draw": "od", "odds_away": "oa"})
-    tmp[["oh", "od", "oa"]] = df.apply(lambda r: normalize_row(
-        r.rename(index=str), oh, od, oa)[[oh, od, oa]].rename(index={oh:"oh", od:"od", oa:"oa"}) if True else r, axis=1)
-    # acima pode gerar NaNs se col não existir; então preenche a partir de out quando vazio
-    for a, b in (("odds_home", "oh"), ("odds_draw", "od"), ("odds_away", "oa")):
-        out[a] = pd.to_numeric(tmp[b], errors="coerce").fillna(out[a])
+    ch = _pick_col(df, HOME_CANDIDATES)
+    cd = _pick_col(df, DRAW_CANDIDATES)
+    ca = _pick_col(df, AWAY_CANDIDATES)
 
-    # marcar validade e motivo
-    def validity_reason(r) -> Tuple[bool, str]:
+    out["odds_home"] = _to_num_series(df[ch]) if ch else pd.NA
+    out["odds_draw"] = _to_num_series(df[cd]) if cd else pd.NA
+    out["odds_away"] = _to_num_series(df[ca]) if ca else pd.NA
+
+    def _valid_row(r) -> bool:
         vals = [r["odds_home"], r["odds_draw"], r["odds_away"]]
-        cnt_gt1 = sum(1 for v in vals if pd.notna(v) and v > 1.0)
-        if cnt_gt1 >= 2:
-            return True, ""
-        if all(pd.isna(v) for v in vals):
-            return False, "sem_odds"
-        if any(pd.notna(v) and v <= 0 for v in vals):
-            return False, "odds_nao_positivas"
-        if sum(1 for v in vals if pd.notna(v)) < 2:
-            return False, "menos_de_duas_odds"
-        return False, "odds_<=1"
-    val = out.apply(validity_reason, axis=1, result_type="expand")
-    out["__valid"] = val[0]
-    out["__reason"] = val[1]
+        vals = [float(x) for x in vals if pd.notna(x)]
+        return sum(v > 1.0 for v in vals) >= 2
 
+    out["__valid"] = out.apply(_valid_row, axis=1)
     return out
 
-def consensus(dfs: List[pd.DataFrame]) -> pd.DataFrame:
-    base = pd.concat(dfs, ignore_index=True)
+def _read_provider(path: str, tag: str) -> Tuple[pd.DataFrame, Dict[str,int]]:
+    reasons = {"menos_de_duas_odds": 0}
+    if not os.path.isfile(path):
+        print(f"[consensus-safe] AVISO: arquivo não encontrado: {path}")
+        return pd.DataFrame(), reasons
 
-    # escolher meta por join_key (primeiro provedor vence p/ nomes)
-    meta = (base.sort_values(["__join_key", "__prov"])
-                 .drop_duplicates("__join_key", keep="first")
-                 [["__join_key", "match_key", "team_home", "team_away"]])
+    try:
+        raw = pd.read_csv(path)
+    except Exception as e:
+        print(f"[consensus-safe] ERRO ao ler {path}: {e}", file=sys.stderr)
+        return pd.DataFrame(), reasons
 
-    agg = base.groupby("__join_key")[["odds_home","odds_draw","odds_away"]].mean(numeric_only=True).reset_index()
-    out = meta.merge(agg, on="__join_key", how="left")
+    norm = _normalize(raw)
+    total = len(norm)
+    valid = int(norm["__valid"].sum())
+    reasons["menos_de_duas_odds"] = total - valid
 
-    def is_valid(r):
+    print(f"[consensus-safe] lido {os.path.basename(path)} -> {total} linhas; válidas: {valid}")
+    if total and reasons["menos_de_duas_odds"] > 0:
+        print(f"[consensus-safe] motivos inválidos {tag}: {reasons}")
+
+    norm = norm[norm["__valid"]].drop(columns=["__valid"]).copy()
+    norm["__provider"] = tag
+    return norm, reasons
+
+# --------------------------
+# Consenso
+# --------------------------
+def _merge_best(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
+    """Une por match_key e pega a MELHOR odd disponível (máxima) por mercado."""
+    if a.empty and b.empty:
+        return pd.DataFrame(columns=["team_home","team_away","match_key",
+                                     "odds_home","odds_draw","odds_away"])
+    if b.empty:
+        return a.drop(columns=["__provider"], errors="ignore")
+    if a.empty:
+        return b.drop(columns=["__provider"], errors="ignore")
+
+    cols = ["match_key","team_home","team_away",
+            "odds_home","odds_draw","odds_away"]
+    # evita colunas duplicadas de nomes iguais no merge
+    a_ = a[cols].copy()
+    b_ = b[cols].copy()
+
+    m = pd.merge(
+        a_, b_,
+        on=["match_key","team_home","team_away"],
+        how="outer",
+        suffixes=("_a","_b")
+    )
+
+    def pick_max(row, col):
+        va = row.get(col + "_a", pd.NA)
+        vb = row.get(col + "_b", pd.NA)
+        vals = [v for v in [va, vb] if pd.notna(v)]
+        return max(vals) if vals else pd.NA
+
+    out = pd.DataFrame({
+        "team_home": m["team_home"],
+        "team_away": m["team_away"],
+        "match_key": m["match_key"],
+        "odds_home": m.apply(lambda r: pick_max(r, "odds_home"), axis=1),
+        "odds_draw": m.apply(lambda r: pick_max(r, "odds_draw"), axis=1),
+        "odds_away": m.apply(lambda r: pick_max(r, "odds_away"), axis=1),
+    })
+
+    # reforça o critério de validade
+    def valid_row(r):
         vals = [r["odds_home"], r["odds_draw"], r["odds_away"]]
-        return sum(1 for v in vals if pd.notna(v) and v > 1.0) >= 2
+        vals = [float(x) for x in vals if pd.notna(x)]
+        return sum(v > 1.0 for v in vals) >= 2
 
-    out["__valid"] = out.apply(is_valid, axis=1)
+    out["__valid"] = out.apply(valid_row, axis=1)
+    out = out[out["__valid"]].drop(columns=["__valid"])
     return out
 
+# --------------------------
+# Main
+# --------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--rodada", required=True, help="Ex.: 2025-09-27_1213")
     args = ap.parse_args()
 
-    out_dir = os.path.join("data", "out", args.rodada)
+    out_dir = os.path.join("data","out", args.rodada)
     os.makedirs(out_dir, exist_ok=True)
 
-    paths = [
-        ("theoddsapi", os.path.join(out_dir, "odds_theoddsapi.csv")),
-        ("apifootball", os.path.join(out_dir, "odds_apifootball.csv")),
-    ]
+    path_theodds = os.path.join(out_dir, "odds_theoddsapi.csv")
+    path_apifoot = os.path.join(out_dir, "odds_apifootball.csv")
+    path_cons    = os.path.join(out_dir, "odds_consensus.csv")
 
-    dfs: List[pd.DataFrame] = []
-    any_found = False
-    for prov, p in paths:
-        if exists(p):
-            any_found = True
-            try:
-                df = read_provider(p, prov)
-                valid = int(df["__valid"].sum())
-                log(f"lido {os.path.basename(p)} -> {len(df)} linhas; válidas: {valid}")
-                # diagnóstico resumido
-                if valid < len(df):
-                    diag = df.loc[~df["__valid"], "__reason"].value_counts().to_dict()
-                    if diag:
-                        log(f"motivos inválidos {prov}: {diag}")
-                dfs.append(df)
-            except Exception as e:
-                log(f"AVISO: erro lendo {p}: {e}")
+    df_theo, r_theo = _read_provider(path_theodds, "theoddsapi")
+    df_api , r_api  = _read_provider(path_apifoot, "apifootball")
 
-    if not any_found:
-        log("AVISO: nenhum CSV de odds encontrado em data/out/<RODADA>.")
-        log("consenso bruto: 0 linhas; válidas (>=2 odds > 1.0): 0")
-        log("ERRO: nenhuma linha de odds válida. Abortando.")
+    # Regra principal: aceita 1 provedor só; se tiver 2, faz "melhor odd".
+    df_cons = _merge_best(df_theo, df_api)
+
+    total_valid = len(df_cons)
+    total_raw = len(df_theo) + len(df_api)
+    print(f"[consensus-safe] consenso bruto: {total_raw} (soma linhas válidas dos provedores); finais (>=2 odds > 1.0): {total_valid}")
+
+    # Amostra para debug
+    if total_valid:
+        sample = df_cons.head(5).to_dict(orient="records")
+        print(f"[consensus-safe] AMOSTRA (top 5): {sample}")
+
+    if total_valid == 0:
+        # escreve arquivo vazio com cabeçalho para facilitar debug downstream
+        empty = pd.DataFrame(columns=["team_home","team_away","match_key","odds_home","odds_draw","odds_away"])
+        empty.to_csv(path_cons, index=False)
+        print("[consensus-safe] ERRO: nenhuma linha de odds válida. Abortando.")
         sys.exit(10)
 
-    cons = consensus(dfs)
-    total = len(cons)
-    valid = int(cons["__valid"].sum())
-    log(f"consenso bruto: {total} linhas; válidas (>=2 odds > 1.0): {valid}")
-
-    if valid == 0:
-        # imprime amostra para facilitar debug no log
-        sample = cons.head(5).to_dict(orient="records")
-        log(f"AMOSTRA (top 5): {sample}")
-        log("ERRO: nenhuma linha de odds válida. Abortando.")
-        sys.exit(10)
-
-    cons = cons.loc[cons["__valid"], ["match_key","team_home","team_away","odds_home","odds_draw","odds_away"]]
-    out_path = os.path.join(out_dir, "odds_consensus.csv")
-    cons.to_csv(out_path, index=False)
-    log(f"OK -> {out_path} ({len(cons)} linhas)")
+    df_cons.to_csv(path_cons, index=False)
+    print(f"[consensus-safe] OK -> {path_cons} ({total_valid} linhas)")
 
 if __name__ == "__main__":
     main()
