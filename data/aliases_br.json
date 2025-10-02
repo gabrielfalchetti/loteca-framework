@@ -323,3 +323,156 @@
   "botafogo": ["botafogo fr", "botafogo-rj"],
   "bahia": ["ec bahia", "bahia-ba"]
 }
+
+{
+  "alias_to_canonical": {
+    "Vitória": "Vitoria",
+    "EC Vitoria": "Vitoria",
+    "Esporte Clube Vitória": "Vitoria",
+    "Vitoria BA": "Vitoria",
+
+    "Ceará": "Ceara",
+    "Ceara SC": "Ceara",
+    "Ceara Sporting Club": "Ceara",
+
+    "Fortaleza EC": "Fortaleza",
+    "Fortaleza Esporte Clube": "Fortaleza",
+
+    "São Paulo": "Sao Paulo",
+    "Sao Paulo FC": "Sao Paulo",
+    "SPFC": "Sao Paulo",
+
+    "CR Flamengo": "Flamengo",
+    "Flamengo RJ": "Flamengo",
+    "Clube de Regatas do Flamengo": "Flamengo",
+
+    "Cruzeiro EC": "Cruzeiro",
+    "Cruzeiro MG": "Cruzeiro",
+    "Cruzeiro Esporte Clube": "Cruzeiro",
+
+    "Paysandu SC": "Paysandu",
+    "Paysandu Sport Club": "Paysandu",
+
+    "Cuiabá": "Cuiaba",
+    "Cuiaba EC": "Cuiaba",
+    "Cuiaba Esporte Clube": "Cuiaba",
+    "Cuiabá EC": "Cuiaba",
+
+    "Vila Nova FC": "Vila Nova",
+    "Vila Nova GO": "Vila Nova",
+    "Vila Nova-GO": "Vila Nova",
+
+    "Criciúma": "Criciuma",
+    "Criciuma EC": "Criciuma",
+    "Criciuma Esporte Clube": "Criciuma",
+    "Criciúma EC": "Criciuma"
+  },
+
+  "teams": {
+    "Vitoria": [
+      "Vitória",
+      "EC Vitoria",
+      "Esporte Clube Vitória",
+      "Vitoria BA"
+    ],
+    "Ceara": [
+      "Ceará",
+      "Ceara SC",
+      "Ceara Sporting Club"
+    ],
+    "Fortaleza": [
+      "Fortaleza EC",
+      "Fortaleza Esporte Clube"
+    ],
+    "Sao Paulo": [
+      "São Paulo",
+      "Sao Paulo FC",
+      "SPFC"
+    ],
+    "Flamengo": [
+      "CR Flamengo",
+      "Flamengo RJ",
+      "Clube de Regatas do Flamengo"
+    ],
+    "Cruzeiro": [
+      "Cruzeiro EC",
+      "Cruzeiro MG",
+      "Cruzeiro Esporte Clube"
+    ],
+    "Paysandu": [
+      "Paysandu SC",
+      "Paysandu Sport Club"
+    ],
+    "Cuiaba": [
+      "Cuiabá",
+      "Cuiaba EC",
+      "Cuiaba Esporte Clube",
+      "Cuiabá EC"
+    ],
+    "Vila Nova": [
+      "Vila Nova FC",
+      "Vila Nova GO",
+      "Vila Nova-GO"
+    ],
+    "Criciuma": [
+      "Criciúma",
+      "Criciuma EC",
+      "Criciuma Esporte Clube",
+      "Criciúma EC"
+    ]
+  },
+
+  "team_aliases": {
+    "Vitoria": [
+      "Vitória",
+      "EC Vitoria",
+      "Esporte Clube Vitória",
+      "Vitoria BA"
+    ],
+    "Ceara": [
+      "Ceará",
+      "Ceara SC",
+      "Ceara Sporting Club"
+    ],
+    "Fortaleza": [
+      "Fortaleza EC",
+      "Fortaleza Esporte Clube"
+    ],
+    "Sao Paulo": [
+      "São Paulo",
+      "Sao Paulo FC",
+      "SPFC"
+    ],
+    "Flamengo": [
+      "CR Flamengo",
+      "Flamengo RJ",
+      "Clube de Regatas do Flamengo"
+    ],
+    "Cruzeiro": [
+      "Cruzeiro EC",
+      "Cruzeiro MG",
+      "Cruzeiro Esporte Clube"
+    ],
+    "Paysandu": [
+      "Paysandu SC",
+      "Paysandu Sport Club"
+    ],
+    "Cuiaba": [
+      "Cuiabá",
+      "Cuiaba EC",
+      "Cuiaba Esporte Clube",
+      "Cuiabá EC"
+    ],
+    "Vila Nova": [
+      "Vila Nova FC",
+      "Vila Nova GO",
+      "Vila Nova-GO"
+    ],
+    "Criciuma": [
+      "Criciúma",
+      "Criciuma EC",
+      "Criciuma Esporte Clube",
+      "Criciúma EC"
+    ]
+  }
+}
