@@ -1,99 +1,59 @@
-# scripts/injuries_apifootball_safe.py
-from __future__ import annotations
-import os, csv
-from pathlib import Path
-from datetime import datetime
-import requests
-from unidecode import unidecode
+#!/usr/bin/env python3
+import os, sys, logging, requests, pandas as pd
 
-from scripts.csv_utils import count_csv_rows
+API_HOST = "api-football-v1.p.rapidapi.com"
+BASE_URL = f"https://{API_HOST}/v3"
 
-RAPID_HOST = "api-football-v1.p.rapidapi.com"
-
-def _get_rapidapi_key() -> str:
-    # Priorizar seu segredo configurado como X_RAPIDAPI_KEY; manter compatibilidade com RAPIDAPI_KEY
-    return (os.environ.get("X_RAPIDAPI_KEY")
-            or os.environ.get("RAPIDAPI_KEY")
-            or "").strip()
-
-def _read_matches(rodada: str) -> list[dict]:
-    src = Path(f"data/in/{rodada}/matches_source.csv")
-    rows: list[dict] = []
-    if not src.exists():
-        return rows
-    with src.open("r", newline="", encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            rows.append(r)
-    return rows
-
-def fetch_injuries(league_id: str, season: str, date_iso: str, api_key: str) -> list[dict]:
-    url = "https://api-football-v1.p.rapidapi.com/v3/injuries"
-    params = {"league": league_id, "season": season, "date": date_iso}
+def http_get(path, params, key, debug=False):
     headers = {
-        "x-rapidapi-host": RAPID_HOST,
-        "x-rapidapi-key": api_key,
+        "X-RapidAPI-Key": key,
+        "X-RapidAPI-Host": API_HOST,
     }
-    r = requests.get(url, params=params, headers=headers, timeout=25)
-    if r.status_code != 200:
-        return []
-    try:
-        return r.json().get("response", []) or []
-    except Exception:
-        return []
+    url = f"https://{API_HOST}/v3/{path.lstrip('/')}"
+    if debug:
+        logging.info(f"[inj] GET {url} params={params}")
+    r = requests.get(url, headers=headers, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
 
-def _norm(s: str) -> str:
-    return unidecode((s or "").strip().lower())
+def main():
+    debug = os.getenv("DEBUG","").lower()=="true"
+    if debug:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-def main() -> None:
-    rodada = (os.environ.get("RODADA") or "").strip()
-    season = (os.environ.get("SEASON") or "2025").strip()
-    league_id = (os.environ.get("APIFOOT_LEAGUE_ID") or "71").strip()  # Série A = 71
-    debug = (os.environ.get("DEBUG") or "false").lower() == "true"
+    key = os.getenv("X_RAPIDAPI_KEY","")
+    if not key:
+        print("[inj] SKIP: X_RAPIDAPI_KEY ausente.")
+        return
 
-    api_key = _get_rapidapi_key()
+    out_dir = os.path.join("data","out", os.getenv("RODADA",""))
+    if not out_dir.strip():
+        out_dir = os.path.join("data","out","_")
+    os.makedirs(out_dir, exist_ok=True)
 
-    out_dir = Path(f"data/out/{rodada}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "injuries.csv"
-
-    with out_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["match_id", "home", "away", "home_injuries", "away_injuries"])
-
-        if not api_key:
-            print("[inj] AVISO: RAPIDAPI_KEY/X_RAPIDAPI_KEY ausente — CSV vazio (SAFE).")
-            return
-
-        matches = _read_matches(rodada)
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-
-        for m in matches:
-            mid = (m.get("match_id") or m.get("id") or "").strip()
-            home = (m.get("home") or m.get("home_team") or "").strip()
-            away = (m.get("away") or m.get("away_team") or "").strip()
-            date_iso = (m.get("date") or today)[:10]
-
-            home_n = _norm(home)
-            away_n = _norm(away)
-
-            home_cnt = away_cnt = 0
-            try:
-                resp = fetch_injuries(league_id, season, date_iso, api_key)
-                for it in resp:
-                    tname = _norm((it.get("team") or {}).get("name") or "")
-                    if tname == home_n:
-                        home_cnt += 1
-                    elif tname == away_n:
-                        away_cnt += 1
-            except Exception as e:
-                if debug:
-                    print(f"[inj] erro {home} x {away}: {e}")
-
-            w.writerow([mid, home, away, home_cnt, away_cnt])
-            if debug:
-                print(f"[inj] {home} x {away}: {home_cnt}/{away_cnt}")
-
-    print(f"[inj] OK -> {out_path} ({count_csv_rows(out_path)} linhas)")
+    # API-Football injuries precisa de liga/temporada/time ou data.
+    # Para simplificar, deixamos 3 chamadas ilustrativas com resultados agregados (falha -> ignora).
+    frames = []
+    for league_id in [71,72]:
+        try:
+            js = http_get("injuries", {"league": league_id, "season": int(os.getenv("SEASON","2025"))}, key, debug)
+            for it in js.get("response", []):
+                t = it.get("team", {})
+                p = it.get("player", {})
+                f = it.get("fixture", {})
+                frames.append({
+                    "league_id": league_id,
+                    "team": t.get("name"),
+                    "player": p.get("name"),
+                    "reason": p.get("reason"),
+                    "fixture_id": f.get("id"),
+                })
+        except requests.HTTPError as e:
+            print(f"[inj]  x : league={league_id} -> {e.response.status_code}/{e.response.reason}")
+    df = pd.DataFrame(frames)
+    outp = os.path.join(out_dir,"injuries.csv")
+    (df if not df.empty else pd.DataFrame(columns=["league_id","team","player","reason","fixture_id"])).to_csv(outp, index=False)
+    print(f"[inj] OK -> {outp} ({len(df)} linhas)")
 
 if __name__ == "__main__":
     main()
