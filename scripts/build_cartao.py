@@ -1,53 +1,116 @@
-# scripts/build_cartao.py
-from __future__ import annotations
-import csv
-from pathlib import Path
-import os
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-def _read_csv(path: Path) -> list[dict]:
-    if not path.exists() or path.stat().st_size == 0:
-        return []
-    with path.open("r", newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+import os, argparse
+import pandas as pd
+import numpy as np
 
-def main() -> None:
-    rodada = (os.environ.get("RODADA") or "").strip()
-    out_dir = Path(f"data/out/{rodada}")
-    out_dir.mkdir(parents=True, exist_ok=True)
+"""
+Gera o cartão da Loteca (14 jogos) a partir da ordem de data/in/<RODADA>/matches_source.csv.
+Fonte de palpites (em ordem de preferência):
+1) data/out/<RODADA>/predictions_market.csv
+2) fallback: decide pelo menor odd em data/out/<RODADA>/odds_consensus.csv
+Saída: data/out/<RODADA>/loteca_cartao.txt
+Formato:
+  Jogo 01 - Vitoria x Ceara -> 1 (HOME) [conf=0.62]
+  ...
+E também uma linha compacta 14 colunas: ex: 1 X 2 1 1 X ...
+"""
 
-    odds = { (r.get("home","").strip(), r.get("away","").strip()): r
-             for r in _read_csv(out_dir / "odds_consensus.csv") }
+def pick_to_1x2(p):
+    if p == "HOME": return "1"
+    if p == "DRAW": return "X"
+    if p == "AWAY": return "2"
+    return "?"
 
-    news = { (r.get("home","").strip(), r.get("away","").strip()): r
-             for r in _read_csv(out_dir / "news.csv") }
+def best_from_odds(row):
+    # menor odd = favorito
+    trio = []
+    for tag,col in [("HOME","odds_home"),("DRAW","odds_draw"),("AWAY","odds_away")]:
+        o = row.get(col, np.nan)
+        if isinstance(o,(int,float,np.floating)) and o>1.0 and np.isfinite(o):
+            trio.append((tag,o))
+    if not trio:
+        return "?", np.nan
+    pick, odd = min(trio, key=lambda x: x[1])
+    return pick, float(1.0/odd) if odd>0 else np.nan  # confiança ~ prob implícita aprox.
 
-    inj =  { (r.get("home","").strip(), r.get("away","").strip()): r
-             for r in _read_csv(out_dir / "injuries.csv") }
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
 
-    # matches_source como fonte de ordem
-    matches = _read_csv(Path(f"data/in/{rodada}/matches_source.csv"))
+    in_matches = os.path.join("data","in",args.rodada,"matches_source.csv")
+    out_dir    = os.path.join("data","out",args.rodada)
+    pred_path  = os.path.join(out_dir,"predictions_market.csv")
+    cons_path  = os.path.join(out_dir,"odds_consensus.csv")
+    out_path   = os.path.join(out_dir,"loteca_cartao.txt")
 
-    lines: list[str] = []
-    for m in matches:
-        home = (m.get("home") or m.get("home_team") or "").strip()
-        away = (m.get("away") or m.get("away_team") or "").strip()
+    if not os.path.exists(in_matches):
+        raise SystemExit(f"[cartao] ERRO: arquivo não encontrado: {in_matches}")
+    df_m = pd.read_csv(in_matches)
+    for c in ["match_key","team_home","team_away"]:
+        if c not in df_m.columns:
+            raise SystemExit(f"[cartao] ERRO: coluna ausente em matches_source.csv: {c}")
 
-        o = odds.get((home, away), {})
-        pick = o.get("pick") or o.get("palpite") or ""
-        pick_odd = o.get("pick_odd") or o.get("odd") or ""
+    df_pred = pd.read_csv(pred_path) if os.path.exists(pred_path) else None
+    df_cons = pd.read_csv(cons_path) if os.path.exists(cons_path) else None
 
-        n = news.get((home, away), {})
-        hits = n.get("news_hits") or "0"
+    # index por match_key para acesso rápido
+    pred_map = {}
+    if df_pred is not None and not df_pred.empty:
+        pred_map = {r["match_key"]: r for _,r in df_pred.iterrows()}
 
-        ij = inj.get((home, away), {})
-        h_inj = ij.get("home_injuries") or "0"
-        a_inj = ij.get("away_injuries") or "0"
+    cons_map = {}
+    if df_cons is not None and not df_cons.empty:
+        cons_map = {r["match_key"]: r for _,r in df_cons.iterrows()}
 
-        lines.append(f"{home} x {away} — Palpite: {pick or '-'} — odd do palpite: {pick_odd or '-'} — news: {hits} hits, injury {h_inj}/{a_inj}")
+    lines = []
+    picks_compact = []
+    jogo_idx = 1
 
-    out_txt = out_dir / "loteca_cartao.txt"
-    out_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"[cartao] OK -> {out_txt}")
+    for _, m in df_m.iterrows():
+        mk = m["match_key"]
+        th = m["team_home"]
+        ta = m["team_away"]
+
+        pick, conf = None, None
+        origem = None
+
+        if mk in pred_map:
+            r = pred_map[mk]
+            pick = r.get("pick", None)
+            conf = r.get("confidence", None)
+            origem = "predictions_market"
+        elif mk in cons_map:
+            r = cons_map[mk]
+            pick, conf = best_from_odds(r)
+            origem = "odds_consensus"
+        else:
+            pick = "?"
+            conf = np.nan
+            origem = "indisponível"
+
+        simb = pick_to_1x2(pick)
+        picks_compact.append(simb)
+
+        lines.append(f"Jogo {jogo_idx:02d} - {th} x {ta} -> {simb} ({pick}) [conf={conf if conf==conf else 'NA'} | src={origem}]")
+        jogo_idx += 1
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        for ln in lines:
+            f.write(ln+"\n")
+        f.write("\nLinha 14 palpites (1/X/2):\n")
+        f.write(" ".join(picks_compact)+"\n")
+
+    print(f"[cartao] OK -> {out_path}")
+
+    if args.debug:
+        print("[cartao] AMOSTRA:")
+        for ln in lines[:5]:
+            print("  "+ln)
 
 if __name__ == "__main__":
     main()
