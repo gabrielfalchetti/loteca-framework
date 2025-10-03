@@ -1,4 +1,4 @@
-match_id,home,away,date
-1,Athletic Club,Amazonas,2025-10-05
-2,Coritiba,Botafogo-SP,2025-10-05
-3,CRB,Avaí,2025-10-05
+team_home,team_away
+Athletic Club (MG),Amazonas FC
+Coritiba,Botafogo-SP
+CRB,Avaí
