@@ -6,13 +6,14 @@ scripts/consensus_odds_safe.py (TheOddsAPI only)
 - Lê odds de data/out/<RODADA>/odds_theoddsapi.csv; se não houver, tenta data/in/<RODADA>/ e copia para /out.
 - Não depende de RapidAPI/API-Football.
 - Suporta CSV “longo” (uma seleção por linha) e “colunas”.
-- Agrega por match_key somando o melhor (máximo) odds_home/draw/away de múltiplas linhas.
-- Considera válido jogo com >= 2 odds > 1.0.
+- Agrega por match_key pegando o melhor (máximo) odds_home/draw/away quando houver múltiplas linhas.
+- Considera válido jogo com >= 1 odd > 1.0 (antes eram 2).
 - Gera data/out/<RODADA>/odds_consensus.csv.
-- Exit 10 quando não houver jogos válidos (mantém contrato do pipeline).
+- Exit 10 quando não houver nenhum jogo válido (para manter contrato do pipeline).
 """
 import argparse, os, sys, re, shutil
 from typing import List, Tuple, Dict
+import numpy as np
 import pandas as pd
 
 # -------------------- paths --------------------
@@ -60,13 +61,28 @@ def american_to_decimal(tok: str) -> float:
     return 1.0 + (v/100.0) if v > 0 else 1.0 + (100.0/abs(v))
 
 def to_number(series: pd.Series) -> pd.Series:
+    """Converte odds em string para decimal, aceitando '.', ',', e formato americano (+120/-150)."""
     if series is None:
         return pd.Series(dtype="float64")
     raw = series.astype("object").astype(str).str.strip()
-    is_am = raw.map(is_american_token)
+
+    # máscara de odds americanas
+    is_am = raw.map(is_american_token).to_numpy(dtype=bool)
+
+    # primeiro tenta decimal com vírgula/ponto
     dec = pd.to_numeric(raw.str.replace(",", ".", regex=False), errors="coerce")
-    dec.loc[is_am] = raw[is_am].map(american_to_decimal)
-    dec = dec.mask(dec <= 1.0)  # odds inválidas/placeholder -> NaN
+    dec = dec.astype("float64")  # garante dtype float64
+
+    # converte apenas as posições americanas usando numpy (evita FutureWarning de setitem incompatível)
+    if is_am.any():
+        am_vals = raw[is_am].map(american_to_decimal).astype("float64").to_numpy()
+        dec_np = dec.to_numpy(copy=True)
+        dec_np[is_am] = am_vals
+        dec = pd.Series(dec_np, index=series.index, dtype="float64")
+
+    # odds inválidas ou placeholders (<= 1.0) -> NaN
+    dec = dec.mask(dec <= 1.0)
+
     return pd.to_numeric(dec, errors="coerce")
 
 # aliases
@@ -75,11 +91,11 @@ TAWAY = ["team_away","away_team","visitante","time_fora","time_away","equipa_for
 MKEY  = ["match_key","game_key","fixture_key","key","match","partida","id_partida"]
 
 HOME  = ["odds_home","home_odds","price_home","home_price","home_decimal","price1",
-         "h2h_home","m1","selection_home","market_home","h"]
+         "h2h_home","m1","selection_home","market_home","h","home"]
 DRAW  = ["odds_draw","draw_odds","price_draw","draw_price","pricex","draw_decimal",
-         "h2h_draw","mx","selection_draw","market_draw","x","tie"]
+         "h2h_draw","mx","selection_draw","market_draw","x","tie","draw"]
 AWAY  = ["odds_away","away_odds","price_away","away_price","away_decimal","price2",
-         "h2h_away","m2","selection_away","market_away","a"]
+         "h2h_away","m2","selection_away","market_away","a","away"]
 
 SEL_NAME = ["selection","outcome","side","result","pick","market","bet"]
 PRICE    = ["odds","price","decimal","price_decimal","odds_decimal","h2h_price","value"]
@@ -103,10 +119,11 @@ def build_match_key(df: pd.DataFrame, th: str, ta: str) -> pd.Series:
 def valid_row(r) -> bool:
     vals = [r.get("odds_home"), r.get("odds_draw"), r.get("odds_away")]
     vals = [float(x) for x in vals if pd.notna(x)]
-    return sum(v > 1.0 for v in vals) >= 2
+    # >>> regra relaxada: basta pelo menos UMA odd válida > 1.0
+    return sum(v > 1.0 for v in vals) >= 1
 
 def normalize_theodds(raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str,int]]:
-    reasons = {"menos_de_duas_odds": 0}
+    reasons = {"sem_odd_valida": 0}
     if raw is None or raw.empty:
         cols = ["team_home","team_away","match_key","odds_home","odds_draw","odds_away"]
         return pd.DataFrame(columns=cols), reasons
@@ -185,7 +202,7 @@ def normalize_theodds(raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str,int]]:
         out = firsts.join(agg, how="outer").reset_index()
 
     out["__valid"] = out.apply(valid_row, axis=1)
-    reasons["menos_de_duas_odds"] = int((~out["__valid"]).sum())
+    reasons["sem_odd_valida"] = int((~out["__valid"]).sum())
     out = out[out["__valid"]].drop(columns="__valid")
     return out, reasons
 
@@ -201,7 +218,6 @@ def main():
     p_theo = find_theodds_path(args.rodada)
     if not p_theo:
         print("[consensus-safe] ERRO: odds_theoddsapi.csv não encontrado em /out nem /in.", file=sys.stderr)
-        # ainda assim gera header vazio p/ consistência do pipeline
         pd.DataFrame(columns=["team_home","team_away","match_key","odds_home","odds_draw","odds_away"]).to_csv(p_out, index=False)
         sys.exit(10)
 
@@ -213,8 +229,8 @@ def main():
         sys.exit(10)
 
     norm, reasons = normalize_theodds(raw)
-    print(f"[consensus-safe] lido odds_theoddsapi.csv -> {len(raw)} linhas; válidas: {len(norm)}")
-    if reasons.get("menos_de_duas_odds", 0) > 0 and len(norm) > 0:
+    print(f"[consensus-safe] lido odds_theoddsapi.csv -> {len(raw)} linhas; válidas (>=1 odd): {len(norm)}")
+    if len(norm) < len(raw):
         print(f"[consensus-safe] motivos inválidos theoddsapi: {reasons}")
 
     total = len(norm)
