@@ -1,307 +1,144 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Gera odds_consensus.csv a partir do TheOddsAPI apenas (RapidAPI IGNORADO).
-- Procura odds_theoddsapi.csv em data/in/<RODADA>/ e data/out/<RODADA>/ (nesta ordem).
-- Normaliza colunas (aliases), converte odds americanas -> decimal, limpa valores "[]", "", None.
-- Considera válida a linha com pelo menos MIN_ODDS_COLS odds > 1.0 (default=1).
-- Salva em data/out/<RODADA>/odds_consensus.csv.
+Lê odds coletadas (TheOddsAPI; RapidAPI opcional) e produz
+data/out/<RODADA>/odds_consensus.csv exigindo pelo menos 2 odds válidas (>1.0).
+
+Args:
+  --rodada RODADA
+  --debug
 """
 
-from __future__ import annotations
-import os
-import sys
-import unicodedata
-from pathlib import Path
-from typing import Optional, Tuple, Dict, List
-
+import os, sys, argparse, math
 import pandas as pd
-import numpy as np
 
+def log(msg): print(f"[consensus-safe] {msg}")
+def ddbg(debug, msg): 
+    if debug: print(f"[consensus-safe][DEBUG] {msg}")
 
-def log(msg: str) -> None:
-    print(f"[consensus-safe] {msg}")
+def sanitize(df: pd.DataFrame) -> pd.DataFrame:
+    repl = {"": float("nan"), "[]": float("nan"), "None": float("nan"), "null": float("nan")}
+    return df.replace(repl)
 
+def load_csv(path, debug=False):
+    if not os.path.isfile(path):
+        log(f"AVISO: arquivo não encontrado: {path}")
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+        return sanitize(df)
+    except Exception as e:
+        log(f"AVISO: falha ao ler {path}: {e}")
+        return pd.DataFrame()
 
-def norm_key(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    return s
-
-
-def build_match_key(home: str, away: str) -> str:
-    return f"{norm_key(home)}__vs__{norm_key(away)}"
-
-
-def american_to_decimal(x: float) -> Optional[float]:
-    """Converte cotação americana para decimal."""
+def american_to_decimal(x):
+    if x is None or (isinstance(x, float) and math.isnan(x)): return float("nan")
     try:
         v = float(x)
     except Exception:
-        return np.nan
-    if v > 0:
-        return 1.0 + (v / 100.0)
-    if v < 0:
-        return 1.0 + (100.0 / abs(v))
-    return np.nan
+        return float("nan")
+    if 1.01 <= v <= 100.0:  # já decimal
+        return v
+    if v > 0: return 1.0 + v/100.0
+    if v < 0: return 1.0 + 100.0/abs(v)
+    return float("nan")
 
+def to_float(c):
+    def f(v):
+        if v in ("", "[]", "None", "null"): return float("nan")
+        try: return float(v)
+        except: return float("nan")
+    return c.map(f)
 
-def coerce_odds_series(raw: pd.Series) -> pd.Series:
-    """
-    Converte uma série de odds (str/float/int/[]) em decimal (float).
-    Trata strings vazias, '[]', valores nulos, americanos (+120/-150) e decimais.
-    """
-    # Começa com float
-    dec = pd.Series(index=raw.index, dtype="float64")
+def ensure_mapping(df: pd.DataFrame, name: str, debug: bool) -> pd.DataFrame:
+    # garante colunas core
+    need = ["team_home","team_away","match_key","odds_home","odds_draw","odds_away"]
+    missing = [c for c in need if c not in df.columns]
+    if missing:
+        ddbg(debug, f"{name} faltando colunas {missing}, tentando mapear por nomes próximos…")
+        # tentativas simples
+        cols = {c.lower(): c for c in df.columns}
+        m = dict()
+        m["team_home"]  = cols.get("team_home")  or cols.get("home_team")  or cols.get("home") or "team_home"
+        m["team_away"]  = cols.get("team_away")  or cols.get("away_team")  or cols.get("away") or "team_away"
+        m["match_key"]  = cols.get("match_key")  or "match_key"
+        m["odds_home"]  = cols.get("odds_home")  or cols.get("home_odds")  or cols.get("price_home") or "odds_home"
+        m["odds_draw"]  = cols.get("odds_draw")  or cols.get("draw_odds")  or cols.get("price_draw") or "odds_draw"
+        m["odds_away"]  = cols.get("odds_away")  or cols.get("away_odds")  or cols.get("price_away") or "odds_away"
+        df = df.rename(columns={v:k for k,v in m.items() if v in df.columns})
+    # cast numérico + conversão americana→decimal quando necessário
+    for oc in ("odds_home","odds_draw","odds_away"):
+        s = to_float(df[oc]) if oc in df.columns else pd.Series(dtype=float)
+        df[oc] = s.map(american_to_decimal)
+    return df
 
-    # 1) valores já numéricos
-    is_num = raw.apply(lambda v: isinstance(v, (int, float))) & raw.notna()
-    dec.loc[is_num] = pd.to_numeric(raw[is_num], errors="coerce")
+def valid_row(row) -> bool:
+    cnt = 0
+    for oc in ("odds_home","odds_draw","odds_away"):
+        v = row.get(oc, float("nan"))
+        if isinstance(v,(int,float)) and v > 1.0 and math.isfinite(v):
+            cnt += 1
+    return cnt >= 2
 
-    # 2) strings
-    is_str = raw.apply(lambda v: isinstance(v, str))
-    if is_str.any():
-        s = raw[is_str].fillna("").str.strip()
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
+    debug = bool(args.debug or os.getenv("DEBUG","").lower()=="true")
 
-        # limpa '[]' e vazios
-        mask_empty = s.eq("") | s.eq("[]") | s.eq("[ ]")
-        if mask_empty.any():
-            dec.loc[mask_empty.index[mask_empty]] = np.nan
+    out_dir = os.path.join("data","out", args.rodada)
+    os.makedirs(out_dir, exist_ok=True)
 
-        # remove colchetes acidentais '[2.15]' -> '2.15'
-        s_clean = s.str.replace("[", "", regex=False).str.replace("]", "", regex=False)
+    # fontes
+    theodds_csv = os.path.join(out_dir, "odds_theoddsapi.csv")
+    rapid_csv   = os.path.join(out_dir, "odds_apifootball.csv")  # opcional
 
-        # americanos: começam com '+' ou '-' e NÃO contêm ponto (evita confundir -150.5)
-        is_am = s_clean.str.match(r"^[\+\-]\d+$")
-        if is_am.any():
-            dec.loc[is_am.index[is_am]] = s_clean[is_am].map(american_to_decimal)
+    srcs = []
+    theodds = load_csv(theodds_csv, debug)
+    if not theodds.empty:
+        theodds = ensure_mapping(theodds, "theoddsapi", debug)
+        srcs.append(theodds)
+    else:
+        log("lido odds_theoddsapi.csv -> 0 linhas; válidas: 0")
 
-        # decimais: números válidos com possível ponto
-        remaining = ~mask_empty & ~is_am
-        if remaining.any():
-            dec.loc[remaining.index[remaining]] = pd.to_numeric(
-                s_clean[remaining], errors="coerce"
-            )
+    rapid = load_csv(rapid_csv, debug)
+    if not rapid.empty:
+        rapid = ensure_mapping(rapid, "apifootball", debug)
+        srcs.append(rapid)
 
-    # 3) qualquer outra coisa (listas, dicts etc.) -> NaN
-    others = ~(is_num | is_str)
-    if others.any():
-        dec.loc[others.index[others]] = np.nan
-
-    # odds menores ou iguais a 1.0 são inválidas/no value
-    dec = dec.where(dec > 1.0, np.nan)
-    return dec
-
-
-# ---- mapeamento de aliases ----
-
-HOME_ALS = [
-    "team_home",
-    "home",
-    "home_team",
-    "mandante",
-]
-AWAY_ALS = [
-    "team_away",
-    "away",
-    "away_team",
-    "visitante",
-]
-MATCH_ALS = [
-    "match_key",
-    "match_id",
-    "partida",
-]
-
-ODDS_HOME_ALS = [
-    "odds_home",
-    "home_odds",
-    "price_home",
-    "home_price",
-    "h2h_home",
-]
-ODDS_DRAW_ALS = [
-    "odds_draw",
-    "draw_odds",
-    "price_draw",
-    "draw_price",
-    "h2h_draw",
-]
-ODDS_AWAY_ALS = [
-    "odds_away",
-    "away_odds",
-    "price_away",
-    "away_price",
-    "h2h_away",
-]
-
-
-def find_first(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    cols = {c.lower(): c for c in df.columns}
-    for c in candidates:
-        if c in cols:
-            return cols[c]
-    return None
-
-
-def normalize_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
-    lower_map = {c: c.lower() for c in df.columns}
-    df = df.rename(columns=lower_map)
-
-    home = find_first(df, HOME_ALS)
-    away = find_first(df, AWAY_ALS)
-    match_key = find_first(df, MATCH_ALS)
-
-    o_h = find_first(df, ODDS_HOME_ALS)
-    o_d = find_first(df, ODDS_DRAW_ALS)
-    o_a = find_first(df, ODDS_AWAY_ALS)
-
-    mapping = {
-        "team_home": home,
-        "team_away": away,
-        "match_key": match_key,
-        "odds_home": o_h,
-        "odds_draw": o_d,
-        "odds_away": o_a,
-    }
-
-    # cria match_key se faltar
-    df_out = df.copy()
-    if match_key is None and home and away:
-        df_out["match_key"] = df_out.apply(
-            lambda r: build_match_key(str(r[home]), str(r[away])), axis=1
-        )
-        mapping["match_key"] = "match_key"
-
-    # mantém apenas colunas relevantes + quaisquer extras originais
-    keep = [c for c in mapping.values() if c is not None]
-    if "match_key" not in keep:
-        keep.append("match_key")  # caso recém-criada
-    keep = list(dict.fromkeys(keep))  # uniq, preserva ordem
-    return df_out, mapping
-
-
-def read_csv_if_exists(path: Path) -> Optional[pd.DataFrame]:
-    if path.exists():
-        try:
-            df = pd.read_csv(path)
-            return df
-        except Exception as e:
-            log(f"ERRO ao ler {path}: {e}")
-            return None
-    return None
-
-
-def main() -> None:
-    rodada = os.environ.get("RODADA") or (
-        sys.argv[sys.argv.index("--rodada") + 1] if "--rodada" in sys.argv else None
-    )
-    if not rodada:
-        print("Uso: python -m scripts.consensus_odds_safe --rodada <YYYY-MM-DD_HHMM>")
-        sys.exit(2)
-
-    min_odds_cols = os.environ.get("MIN_ODDS_COLS")
-    try:
-        min_odds_cols = int(min_odds_cols) if min_odds_cols is not None else 1
-    except Exception:
-        min_odds_cols = 1
-
-    base_in = Path("data/in") / rodada
-    base_out = Path("data/out") / rodada
-    base_out.mkdir(parents=True, exist_ok=True)
-
-    # prioridade: IN depois OUT
-    candidate_paths = [
-        base_in / "odds_theoddsapi.csv",
-        base_out / "odds_theoddsapi.csv",
-    ]
-
-    src_df = None
-    src_used = None
-    for p in candidate_paths:
-        df = read_csv_if_exists(p)
-        if df is not None:
-            src_df = df
-            src_used = p
-            break
-
-    if src_df is None:
-        log(f"AVISO: arquivo não encontrado: {candidate_paths[0]}")
-        log(f"AVISO: arquivo não encontrado: {candidate_paths[1]}")
-        log("ERRO: nenhuma fonte de odds encontrada (TheOddsAPI). Abortando.")
+    if not srcs:
+        log("consenso bruto: 0 linhas; válidas (>=2 odds > 1.0): 0")
+        print("[consensus-safe] ERRO: nenhuma linha de odds válida. Abortando.")
         sys.exit(10)
 
-    # normalização de colunas
-    df_norm, mapping = normalize_columns(src_df)
+    # concatena e escolhe melhor preço por partida/outcome
+    all_df = pd.concat(srcs, ignore_index=True)
+    # dedupe por match_key normalizado
+    all_df["match_key"] = all_df["match_key"].astype(str)
+    # agrupa
+    def best(series):
+        vals = [v for v in series if isinstance(v,(int,float)) and v>1.0 and math.isfinite(v)]
+        return max(vals) if vals else float("nan")
+    grouped = all_df.groupby(["match_key","team_home","team_away"], as_index=False).agg({
+        "odds_home": best,
+        "odds_draw": best,
+        "odds_away": best,
+    })
 
-    # precisa ter home/away e match_key
-    for req in ("team_home", "team_away", "match_key"):
-        if mapping.get(req) is None and req not in df_norm.columns:
-            log("ERRO: colunas básicas ausentes (team_home/team_away/match_key).")
-            sys.exit(10)
+    # filtra válidas (>=2 odds > 1.0)
+    mask_valid = grouped.apply(valid_row, axis=1)
+    valid_df = grouped[mask_valid].reset_index(drop=True)
 
-    # odds: cria colunas mesmo se ausentes (ficam NaN)
-    for out_name, aliases in [
-        ("odds_home", ODDS_HOME_ALS),
-        ("odds_draw", ODDS_DRAW_ALS),
-        ("odds_away", ODDS_AWAY_ALS),
-    ]:
-        src_col = find_first(df_norm, aliases)
-        if src_col is None:
-            df_norm[out_name] = np.nan
-        else:
-            df_norm[out_name] = coerce_odds_series(df_norm[src_col])
-
-    # filtra válidas
-    odds_cols = ["odds_home", "odds_draw", "odds_away"]
-    cnt_valid = df_norm[odds_cols].gt(1.0).sum(axis=1)
-    df_valid = df_norm[cnt_valid >= min_odds_cols].copy()
-
-    log(
-        f"lido {src_used.name} -> {len(df_norm)} linhas; válidas: {len(df_valid)}"
-    )
-    if len(df_valid) == 0:
-        # mostra motivos
-        reason_counts = {
-            "menos_de_duas_odds" if min_odds_cols >= 2 else "menos_de_uma_odd": int(
-                (cnt_valid < min_odds_cols).sum()
-            )
-        }
-        log(f"motivos inválidos theoddsapi: {reason_counts}")
-        log(
-            f"ERRO: nenhuma linha de odds válida. Abortando."
-        )
+    log(f"lido odds_theoddsapi.csv -> {len(theodds)} linhas; válidas: {len(valid_df)}")
+    if valid_df.empty:
+        log(f"consenso bruto: {len(grouped)} (soma linhas válidas dos provedores); finais (>=2 odds > 1.0): 0")
+        print("[consensus-safe] ERRO: nenhuma linha de odds válida. Abortando.")
         sys.exit(10)
 
-    # colunas finais
-    final_cols = []
-    # garantir presença das três básicas
-    for c in ("team_home", "team_away", "match_key"):
-        if c in df_valid.columns:
-            final_cols.append(c)
-        else:
-            # mapear do original
-            src_col = mapping.get(c)
-            if src_col and src_col in df_valid.columns:
-                df_valid.rename(columns={src_col: c}, inplace=True)
-                final_cols.append(c)
-
-    final_cols += odds_cols
-    final_cols = list(dict.fromkeys(final_cols))
-
-    out_path = base_out / "odds_consensus.csv"
-    df_valid.to_csv(out_path, index=False, columns=final_cols)
-
-    log(
-        f"OK -> {out_path} ({len(df_valid)} linhas) | mapping theoddsapi: "
-        f"team_home='{mapping.get('team_home')}', "
-        f"team_away='{mapping.get('team_away')}', "
-        f"match_key='{mapping.get('match_key')}', "
-        f"odds_home='odds_home', odds_draw='odds_draw', odds_away='odds_away'"
-    )
-
+    out_csv = os.path.join(out_dir, "odds_consensus.csv")
+    valid_df.to_csv(out_csv, index=False)
+    log(f"OK -> {out_csv} ({len(valid_df)} linhas) | mapping theoddsapi: team_home='team_home', team_away='team_away', match_key='match_key', odds_home='odds_home', odds_draw='odds_draw', odds_away='odds_away'")
 
 if __name__ == "__main__":
     main()
