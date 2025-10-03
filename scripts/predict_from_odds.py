@@ -6,9 +6,9 @@ Gera previsões a partir das odds de mercado (consenso).
 - Entrada:  data/out/{RODADA}/odds_consensus.csv
 - Saída:    data/out/{RODADA}/predictions_market.csv
 
-Regra:
-- Usa odds_home / odds_draw / odds_away (>= 2 odds válidas > 1.0).
-- Converte para probabilidades implícitas corrigindo o overround.
+Lógica:
+- Usa odds_home / odds_draw / odds_away (exige >= 2 odds válidas > 1.0).
+- Converte para probabilidades implícitas e normaliza (corrige overround).
 - Predição = argmax(prob_*), confiança = probabilidade do argmax.
 """
 
@@ -21,7 +21,7 @@ import sys
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # <<< IMPORT CORRETO
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,15 +44,19 @@ def normalize_probs(odds: Dict[str, Optional[float]]) -> Dict[str, float]:
     """
     invs = {}
     for k, v in odds.items():
-        if v is not None and isinstance(v, (int, float)) and np.isfinite(v) and v > 1.0:
-            invs[k] = 1.0 / float(v)
+        try:
+            fv = float(v)
+        except Exception:
+            fv = np.nan
+        if np.isfinite(fv) and fv > 1.0:
+            invs[k] = 1.0 / fv
 
     if len(invs) < 2:
-        return {k: 0.0 for k in ["home", "draw", "away"]}
+        return {"home": 0.0, "draw": 0.0, "away": 0.0}
 
     s = sum(invs.values())
     if s <= 0 or not np.isfinite(s):
-        return {k: 0.0 for k in ["home", "draw", "away"]}
+        return {"home": 0.0, "draw": 0.0, "away": 0.0}
 
     return {
         "home": invs.get("home", 0.0) / s,
@@ -86,7 +90,7 @@ def main() -> None:
         print(f"[predict] ERRO ao ler {in_path}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Garantir colunas essenciais
+    # Checagem de colunas mínimas
     required_cols = ["team_home", "team_away", "odds_home", "odds_draw", "odds_away"]
     for c in required_cols:
         if c not in df.columns:
@@ -101,7 +105,6 @@ def main() -> None:
             return f"{th}__vs__{ta}"
         df["match_key"] = df.apply(mk, axis=1)
 
-    # Calcular probabilidades implícitas normalizadas
     probs_h, probs_d, probs_a, preds, confs = [], [], [], [], []
     valid_rows = 0
 
@@ -111,14 +114,18 @@ def main() -> None:
             "draw": row.get("odds_draw", np.nan),
             "away": row.get("odds_away", np.nan),
         }
-        # Normaliza
         pr = normalize_probs(odds)
         ph, pd_, pa = pr["home"], pr["draw"], pr["away"]
 
-        # Considera válida se pelo menos 2 mercados contribuíram
-        valid = sum(1 for k in ["home", "draw", "away"]
-                    if odds[k] is not None and np.isfinite(odds[k]) and float(odds[k]) > 1.0) >= 2
-        if valid:
+        is_valid = sum(
+            1
+            for k in ["home", "draw", "away"]
+            if (row.get(f"odds_{k}", np.nan) is not None
+                and np.isfinite(float(row.get(f"odds_{k}", np.nan)))
+                and float(row.get(f"odds_{k}", np.nan)) > 1.0)
+        ) >= 2
+
+        if is_valid:
             pred, conf = pick_prediction(ph, pd_, pa)
             valid_rows += 1
         else:
@@ -144,18 +151,14 @@ def main() -> None:
         "pred_conf": confs,
     })
 
-    # Ordena por confiança desc, só para facilitar a leitura
     out = out.sort_values(["pred_conf", "match_key"], ascending=[False, True]).reset_index(drop=True)
-
     ensure_dir(out_path)
     out.to_csv(out_path, index=False)
 
-    total = len(out)
     if debug:
-        amostra = out.head(5).to_dict(orient="records")
-        print("[predict] AMOSTRA (top 5):", json.dumps(amostra, ensure_ascii=False))
+        print("[predict] AMOSTRA (top 5):", json.dumps(out.head(5).to_dict(orient="records"), ensure_ascii=False))
 
-    print(f"[predict] OK -> {out_path} ({total} linhas; válidas p/ predição: {valid_rows})")
+    print(f"[predict] OK -> {out_path} ({len(out)} linhas; válidas p/ predição: {valid_rows})")
 
 
 if __name__ == "__main__":
