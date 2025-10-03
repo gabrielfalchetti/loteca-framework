@@ -43,10 +43,6 @@ on:
         description: "Número máximo de jogos no Kelly"
         required: true
         default: "14"
-      DEBUG:
-        description: "Ativar logs debug (true/false)"
-        required: true
-        default: "true"
 
 env:
   # inputs
@@ -60,9 +56,11 @@ env:
   MAX_STAKE: ${{ github.event.inputs.MAX_STAKE }}
   ROUND_TO: ${{ github.event.inputs.ROUND_TO }}
   KELLY_TOP_N: ${{ github.event.inputs.KELLY_TOP_N }}
-  DEBUG: ${{ github.event.inputs.DEBUG }}
 
-  # secrets
+  # debug fixo (tirei do inputs para respeitar o limite de 10)
+  DEBUG: "true"
+
+  # secrets/vars
   THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
   X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
   NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
