@@ -1,6 +1,4 @@
-team_home,team_away,match_key
-Vitoria,Ceara,Vitoria x Ceara
-Fortaleza,Sao Paulo,Fortaleza x Sao Paulo
-Flamengo,Cruzeiro,Flamengo x Cruzeiro
-Paysandu,Cuiaba,Paysandu x Cuiaba
-Vila Nova,Criciuma,Vila Nova x Criciuma
+match_id,home,away,date
+1,Athletic Club,Amazonas,2025-10-05
+2,Coritiba,Botafogo-SP,2025-10-05
+3,CRB,Avaí,2025-10-05
