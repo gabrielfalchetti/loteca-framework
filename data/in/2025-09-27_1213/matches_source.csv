@@ -1,4 +1,4 @@
-team_home,team_away
-Athletic Club (MG),Amazonas FC
-Coritiba,Botafogo-SP
-CRB,Avaí
+team_home,team_away,match_key,kickoff_utc
+Athletic Club (MG),Amazonas FC,athletic club (mg)__vs__amazonas fc,
+Coritiba,Botafogo SP,coritiba__vs__botafogo sp,
+CRB,Avai,crb__vs__avai,
