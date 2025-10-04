@@ -1,53 +1,148 @@
-# scripts/text_normalizer.py
-"""
-Módulo utilitário para normalizar nomes de times e gerar match_key.
-Usado pelos ingesters e pelo consenso.
-"""
-
-import unicodedata
-import re
 import json
-from unidecode import unidecode
+import re
+import unicodedata
+from typing import Dict, Tuple, Optional
 
 
-def normalize_text(s: str) -> str:
-    """Normaliza string: minúsculo, sem acentos, sem caracteres especiais."""
+# =========================
+# Helpers de normalização
+# =========================
+
+_SPACES_RE = re.compile(r"\s+")
+_PUNCT_RE = re.compile(r"[^\w\s-]", flags=re.UNICODE)
+_MULTI_DASH_RE = re.compile(r"-+")
+
+def _strip_accents(s: str) -> str:
     if not isinstance(s, str):
         return ""
-    s = s.lower().strip()
-    s = unidecode(s)  # remove acentos
-    s = re.sub(r"[^a-z0-9 ]", "", s)  # mantém letras/números/espaço
-    s = re.sub(r"\s+", " ", s)  # normaliza espaços
-    return s.strip()
+    nfkd = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
 
-
-def make_match_key(home: str, away: str) -> str:
-    """Cria chave única para o jogo: home__vs__away (normalizados)."""
-    return f"{normalize_text(home)}__vs__{normalize_text(away)}"
-
-
-def equals_team(a: str, b: str) -> bool:
-    """Compara nomes de times de forma normalizada."""
-    return normalize_text(a) == normalize_text(b)
-
-
-def canonicalize_team(name: str, aliases: dict = None) -> str:
+def normalize_string(s: str) -> str:
     """
-    Retorna a forma canônica do nome do time usando aliases se existir.
-    Caso contrário, retorna o nome normalizado.
+    Normaliza string para comparação resiliente:
+      - lower()
+      - remove acentos
+      - remove pontuação
+      - colapsa espaços
+      - trim
     """
-    norm = normalize_text(name)
-    if aliases:
-        for canonical, alist in aliases.items():
-            if norm in [normalize_text(x) for x in alist]:
-                return canonical
-    return norm
+    if s is None:
+        return ""
+    s = _strip_accents(s.lower())
+    s = _PUNCT_RE.sub(" ", s)
+    s = _SPACES_RE.sub(" ", s).strip()
+    return s
+
+def slugify(s: str) -> str:
+    """
+    Gera slug simples (ex.: "Atlético Goianiense" -> "atletico-goianiense")
+    """
+    s = normalize_string(s)
+    s = s.replace(" ", "-")
+    s = _MULTI_DASH_RE.sub("-", s)
+    return s
 
 
-def load_aliases(path: str) -> dict:
-    """Carrega dicionário de aliases de times a partir de um JSON."""
+# =========================
+# Aliases de times
+# =========================
+
+def load_aliases(path: Optional[str]) -> Dict[str, str]:
+    """
+    Lê mapa de aliases: { "alias normalizado": "nome canônico" }.
+    Se o arquivo não existir/for None, retorna {}.
+    """
+    if not path:
+        return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # normaliza chaves; valores ficam como canônicos originais
+        norm = {}
+        for k, v in data.items():
+            norm[normalize_string(k)] = v
+        return norm
     except FileNotFoundError:
         return {}
+    except Exception:
+        # Em caso de JSON malformado, prefira não travar o pipeline
+        return {}
+
+
+# =========================
+# Canonicalização e chaves
+# =========================
+
+_STOP_TOKENS = {
+    "fc", "ec", "sc", "ac", "afc", "saf", "club", "clube", "futebol", "futebol clube",
+    "atletico", "atlético", "associacao", "associação", "de", "do", "da", "esporte", "sport",
+    "grêmio", "gremio", "paranaense", "paulista", "mineiro", "goianiense", "goias", "goiás",
+}
+
+def _light_canonical_tokens(name: str) -> str:
+    """
+    Canon reduzida para ajudar matching: remove tokens genéricos e mantêm núcleo do nome.
+    """
+    tokens = [t for t in normalize_string(name).split(" ") if t and t not in _STOP_TOKENS]
+    return " ".join(tokens) if tokens else normalize_string(name)
+
+def canonicalize_team(name: str, aliases: Dict[str, str]) -> str:
+    """
+    Retorna nome canônico de time. Regra:
+      1) se o normalizado estiver no dicionário de aliases -> retorna o valor canônico
+      2) senão, retorna o próprio 'name' com whitespace aparado
+    """
+    if not name:
+        return ""
+    key = normalize_string(name)
+    if key in aliases:
+        return aliases[key]
+    # fallback: retorna como veio (mantendo caixa/acentos originais)
+    return name.strip()
+
+def make_match_key(team_home: str, team_away: str) -> str:
+    """
+    Gera a chave de jogo utilizada no framework:
+        "<home>__vs__<away>"
+    A chave é feita a partir da versão normalizada (sem acentos/pontuação, minúscula).
+    """
+    h = normalize_string(team_home)
+    a = normalize_string(team_away)
+    return f"{h}__vs__{a}"
+
+
+# =========================
+# Comparações
+# =========================
+
+def equals_team(a: str, b: str, aliases: Optional[Dict[str, str]] = None) -> bool:
+    """
+    Compara dois nomes de time de forma robusta:
+      - aplica aliases (se fornecidos)
+      - normaliza
+      - reduz tokens genéricos (_light_canonical_tokens)
+    """
+    if aliases is None:
+        aliases = {}
+    # aplica aliases para canônico
+    ca = canonicalize_team(a, aliases)
+    cb = canonicalize_team(b, aliases)
+    # compara versões light
+    na = _light_canonical_tokens(ca)
+    nb = _light_canonical_tokens(cb)
+    return na == nb
+
+
+# =========================
+# Mapeadores/Atalhos públicos
+# =========================
+
+__all__ = [
+    "load_aliases",
+    "canonicalize_team",
+    "make_match_key",
+    "equals_team",
+    "normalize_string",
+    "slugify",
+]
