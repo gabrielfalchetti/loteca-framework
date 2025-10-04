@@ -1,15 +1,15 @@
-match_key,team_home,team_away,kickoff_utc,competition
-sao paulo__vs__palmeiras,São Paulo,Palmeiras,,
-chapecoense__vs__novorizontino,Chapecoense,Novorizontino,,
-rb bragantino__vs__gremio,RB Bragantino,Grêmio,,
-volta redonda__vs__goias,Volta Redonda,Goiás,,
-fluminense__vs__atletico mineiro,Fluminense,Atlético Mineiro,,
-internacional__vs__botafogo,Internacional,Botafogo,,
-ferroviaria sp__vs__america mg,Ferroviária SP,América MG,,
-corinthians__vs__mirassol,Corinthians,Mirassol,,
-vasco__vs__vitoria,Vasco,Vitória,,
-juventude__vs__fortaleza,Juventude,Fortaleza,,
-bahia__vs__flamengo,Bahia,Flamengo,,
-cruzeiro__vs__sport,Cruzeiro,Sport,,
-atletico goianiense__vs__athletico paranaense,Atlético Goianiense,Athletico Paranaense,,
-ceara__vs__santos,Ceará,Santos,,
+team_home,team_away,match_key
+São Paulo,Palmeiras,sao paulo__vs__palmeiras
+Chapecoense,Novorizontino,chapecoense__vs__novorizontino
+RB Bragantino,Grêmio,rb bragantino__vs__gremio
+Volta Redonda,Goiás,volta redonda__vs__goias
+Fluminense,Atlético Mineiro,fluminense__vs__atletico mineiro
+Internacional,Botafogo,internacional__vs__botafogo
+Ferroviária SP,América MG,ferroviaria sp__vs__america mg
+Corinthians,Mirassol,corinthians__vs__mirassol
+Vasco,Vitória,vasco__vs__vitoria
+Juventude,Fortaleza,juventude__vs__fortaleza
+Bahia,Flamengo,bahia__vs__flamengo
+Cruzeiro,Sport,cruzeiro__vs__sport
+Atlético Goianiense,Athletico Paranaense,atletico goianiense__vs__athletico paranaense
+Ceará,Santos,ceara__vs__santos
