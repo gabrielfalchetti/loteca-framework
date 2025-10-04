@@ -2,164 +2,203 @@
 # -*- coding: utf-8 -*-
 
 """
-Gera previsões a partir das odds de mercado (consenso).
-- Entrada:  data/out/{RODADA}/odds_consensus.csv
-- Saída:    data/out/{RODADA}/predictions_market.csv
+Gera previsões puramente a partir das odds de mercado (baseline).
+Leitura preferencial: data/out/<rodada>/odds_consensus.csv
+Fallbacks (se necessário): data/out/<rodada>/odds_theoddsapi.csv
 
-Lógica:
-- Usa odds_home / odds_draw / odds_away (exige >= 2 odds válidas > 1.0).
-- Converte para probabilidades implícitas e normaliza (corrige overround).
-- Predição = argmax(prob_*), confiança = probabilidade do argmax.
+Saída: data/out/<rodada>/predictions_market.csv
+Colunas: match_key, team_home, team_away, prob_home, prob_draw, prob_away, pred, pred_conf
 """
-
-from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Tuple, Optional
 
+import pandas as pd
 import numpy as np
-import pandas as pd  # <<< IMPORT CORRETO
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Predict from market odds")
-    p.add_argument("--rodada", required=True, help="Identificador da rodada (ex: 2025-09-27_1213)")
-    p.add_argument("--debug", action="store_true", help="Debug logs")
-    return p.parse_args()
+def log(msg: str, debug: bool):
+    if debug:
+        print(f"[predict] {msg}")
 
 
-def ensure_dir(path: str) -> None:
-    d = os.path.dirname(path)
-    if d and not os.path.isdir(d):
-        os.makedirs(d, exist_ok=True)
-
-
-def normalize_probs(odds: Dict[str, Optional[float]]) -> Dict[str, float]:
+def implied_probs_overround(row: pd.Series) -> Tuple[float, float, float]:
     """
-    Converte odds decimais para probabilidades implícitas corrigindo overround.
-    Considera apenas odds > 1.0. Se menos de duas odds válidas, retorna todas 0.
+    Converte odds decimais em probabilidades implícitas com correção de overround.
+    Retorna (prob_home, prob_draw, prob_away). Se não houver 3 odds válidas (>1), retorna NaN.
     """
-    invs = {}
-    for k, v in odds.items():
-        try:
-            fv = float(v)
-        except Exception:
-            fv = np.nan
-        if np.isfinite(fv) and fv > 1.0:
-            invs[k] = 1.0 / fv
-
-    if len(invs) < 2:
-        return {"home": 0.0, "draw": 0.0, "away": 0.0}
-
-    s = sum(invs.values())
-    if s <= 0 or not np.isfinite(s):
-        return {"home": 0.0, "draw": 0.0, "away": 0.0}
-
-    return {
-        "home": invs.get("home", 0.0) / s,
-        "draw": invs.get("draw", 0.0) / s,
-        "away": invs.get("away", 0.0) / s,
-    }
+    oh, od, oa = row.get("odds_home"), row.get("odds_draw"), row.get("odds_away")
+    if any(pd.isna([oh, od, oa])) or (oh is None or oh <= 1) or (od is None or od <= 1) or (oa is None or oa <= 1):
+        return (np.nan, np.nan, np.nan)
+    inv = np.array([1.0 / oh, 1.0 / od, 1.0 / oa], dtype=float)
+    s = inv.sum()
+    if s <= 0:
+        return (np.nan, np.nan, np.nan)
+    p = inv / s
+    return (float(p[0]), float(p[1]), float(p[2]))
 
 
-def pick_prediction(ph: float, pd_: float, pa: float) -> Tuple[str, float]:
-    arr = np.array([ph, pd_, pa], dtype=float)
-    labels = np.array(["HOME", "DRAW", "AWAY"])
-    idx = int(np.argmax(arr))
-    return labels[idx], float(arr[idx])
+def ensure_columns(df: pd.DataFrame, mapping_hint: Optional[str] = None) -> pd.DataFrame:
+    """
+    Garante que o DataFrame possua as colunas padronizadas:
+    match_key, team_home, team_away, odds_home, odds_draw, odds_away
 
+    Se já estiverem presentes, retorna como está.
+    Se vier de theoddsapi.csv, tenta mapear.
+    """
+    needed = {"match_key", "team_home", "team_away", "odds_home", "odds_draw", "odds_away"}
+    if needed.issubset(df.columns):
+        return df[list(needed)]
 
-def main() -> None:
-    args = parse_args()
-    rodada = args.rodada
-    debug = args.debug or (os.getenv("DEBUG", "false").lower() == "true")
+    # tentativas de mapeamento comuns
+    cand_maps = []
 
-    in_path = os.path.join("data", "out", rodada, "odds_consensus.csv")
-    out_path = os.path.join("data", "out", rodada, "predictions_market.csv")
-
-    if not os.path.isfile(in_path):
-        print(f"[predict] ERRO: arquivo não encontrado: {in_path}", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        df = pd.read_csv(in_path)
-    except Exception as e:
-        print(f"[predict] ERRO ao ler {in_path}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # Checagem de colunas mínimas
-    required_cols = ["team_home", "team_away", "odds_home", "odds_draw", "odds_away"]
-    for c in required_cols:
-        if c not in df.columns:
-            print(f"[predict] ERRO: coluna ausente em odds_consensus.csv: {c}", file=sys.stderr)
-            sys.exit(2)
-
-    # match_key se não existir
-    if "match_key" not in df.columns:
-        def mk(row):
-            th = str(row.get("team_home", "")).strip().lower()
-            ta = str(row.get("team_away", "")).strip().lower()
-            return f"{th}__vs__{ta}"
-        df["match_key"] = df.apply(mk, axis=1)
-
-    probs_h, probs_d, probs_a, preds, confs = [], [], [], [], []
-    valid_rows = 0
-
-    for _, row in df.iterrows():
-        odds = {
-            "home": row.get("odds_home", np.nan),
-            "draw": row.get("odds_draw", np.nan),
-            "away": row.get("odds_away", np.nan),
-        }
-        pr = normalize_probs(odds)
-        ph, pd_, pa = pr["home"], pr["draw"], pr["away"]
-
-        is_valid = sum(
-            1
-            for k in ["home", "draw", "away"]
-            if (row.get(f"odds_{k}", np.nan) is not None
-                and np.isfinite(float(row.get(f"odds_{k}", np.nan)))
-                and float(row.get(f"odds_{k}", np.nan)) > 1.0)
-        ) >= 2
-
-        if is_valid:
-            pred, conf = pick_prediction(ph, pd_, pa)
-            valid_rows += 1
-        else:
-            pred, conf = "NA", 0.0
-
-        probs_h.append(ph)
-        probs_d.append(pd_)
-        probs_a.append(pa)
-        preds.append(pred)
-        confs.append(conf)
-
-    out = pd.DataFrame({
-        "match_key": df["match_key"],
-        "team_home": df["team_home"],
-        "team_away": df["team_away"],
-        "odds_home": df["odds_home"],
-        "odds_draw": df["odds_draw"],
-        "odds_away": df["odds_away"],
-        "prob_home": probs_h,
-        "prob_draw": probs_d,
-        "prob_away": probs_a,
-        "pred": preds,
-        "pred_conf": confs,
+    # map padrão (já ok)
+    cand_maps.append({
+        "match_key": "match_key",
+        "team_home": "team_home",
+        "team_away": "team_away",
+        "odds_home": "odds_home",
+        "odds_draw": "odds_draw",
+        "odds_away": "odds_away",
     })
 
-    out = out.sort_values(["pred_conf", "match_key"], ascending=[False, True]).reset_index(drop=True)
-    ensure_dir(out_path)
-    out.to_csv(out_path, index=False)
+    # alguns CSVs podem vir com nomes alternativos
+    cand_maps.append({
+        "match_key": "__join_key" if "__join_key" in df.columns else "match_key",
+        "team_home": "home_team" if "home_team" in df.columns else "team_home",
+        "team_away": "away_team" if "away_team" in df.columns else "team_away",
+        "odds_home": "home_odds" if "home_odds" in df.columns else "odds_home",
+        "odds_draw": "draw_odds" if "draw_odds" in df.columns else "odds_draw",
+        "odds_away": "away_odds" if "away_odds" in df.columns else "odds_away",
+    })
 
-    if debug:
-        print("[predict] AMOSTRA (top 5):", json.dumps(out.head(5).to_dict(orient="records"), ensure_ascii=False))
+    # mapping do theoddsapi “seguro”
+    cand_maps.append({
+        "match_key": "match_key",
+        "team_home": "team_home",
+        "team_away": "team_away",
+        "odds_home": "odds_home",
+        "odds_draw": "odds_draw",
+        "odds_away": "odds_away",
+    })
 
-    print(f"[predict] OK -> {out_path} ({len(out)} linhas; válidas p/ predição: {valid_rows})")
+    for m in cand_maps:
+        if set(m.values()).issubset(df.columns):
+            out = df[list(m.values())].copy()
+            out.columns = list(m.keys())
+            return out
+
+    # não foi possível mapear — retorna apenas as colunas existentes (e o chamador lida)
+    return df
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rodada", required=True, help="Identificador da rodada, ex: 2025-09-27_1213")
+    parser.add_argument("--debug", action="store_true", help="Logs verbosos")
+    args = parser.parse_args()
+
+    rodada = args.rodada
+    out_dir = os.path.join("data", "out", rodada)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # fontes (em ordem de preferência)
+    consensus_path = os.path.join(out_dir, "odds_consensus.csv")
+    theoddsapi_path = os.path.join(out_dir, "odds_theoddsapi.csv")
+
+    source = None
+    df = pd.DataFrame()
+
+    # tenta consensus primeiro
+    if os.path.exists(consensus_path):
+        try:
+            df = pd.read_csv(consensus_path)
+            source = "odds_consensus.csv"
+            log(f"lido {source} -> {len(df)} linhas", args.debug)
+        except Exception as e:
+            print(f"[predict] ERRO ao ler {consensus_path}: {e}")
+
+    # fallback: theoddsapi
+    if df.empty and os.path.exists(theoddsapi_path):
+        try:
+            df = pd.read_csv(theoddsapi_path)
+            source = "odds_theoddsapi.csv"
+            log(f"lido {source} -> {len(df)} linhas", args.debug)
+        except Exception as e:
+            print(f"[predict] ERRO ao ler {theoddsapi_path}: {e}")
+
+    out_path = os.path.join(out_dir, "predictions_market.csv")
+
+    # se nada foi encontrado, ainda assim geramos um CSV vazio bem formatado
+    if df.empty:
+        print(f"[predict] AVISO: nenhuma fonte de odds encontrada em {out_dir}. Gerando vazio.")
+        pd.DataFrame(columns=[
+            "match_key", "team_home", "team_away",
+            "prob_home", "prob_draw", "prob_away", "pred", "pred_conf"
+        ]).to_csv(out_path, index=False)
+        return 0
+
+    # garante colunas padronizadas (ou falha suave)
+    df = ensure_columns(df)
+
+    required = {"match_key", "team_home", "team_away", "odds_home", "odds_draw", "odds_away"}
+    missing = required - set(df.columns)
+    if missing:
+        print(f"[predict] ERRO: colunas ausentes para predição: {sorted(missing)}")
+        # escreve arquivo vazio para manter pipeline saudável
+        pd.DataFrame(columns=[
+            "match_key", "team_home", "team_away",
+            "prob_home", "prob_draw", "prob_away", "pred", "pred_conf"
+        ]).to_csv(out_path, index=False)
+        return 0
+
+    # remove linhas sem pelo menos 2 odds válidas > 1 (para termos base mínima)
+    def valid_row(r) -> bool:
+        vals = [r["odds_home"], r["odds_draw"], r["odds_away"]]
+        ok = sum([isinstance(v, (int, float)) and v and v > 1 for v in vals])
+        return ok >= 2
+
+    df = df[df.apply(valid_row, axis=1)].copy()
+    if df.empty:
+        print("[predict] AVISO: sem linhas válidas (>=2 odds > 1). Gerando vazio.")
+        pd.DataFrame(columns=[
+            "match_key", "team_home", "team_away",
+            "prob_home", "prob_draw", "prob_away", "pred", "pred_conf"
+        ]).to_csv(out_path, index=False)
+        return 0
+
+    # calcula probabilidades implícitas
+    probs = df.apply(implied_probs_overround, axis=1, result_type="expand")
+    probs.columns = ["prob_home", "prob_draw", "prob_away"]
+    df_pred = pd.concat([df[["match_key", "team_home", "team_away"]], probs], axis=1)
+
+    # escolhe a maior probabilidade como palpite
+    def pick_pred(r: pd.Series):
+        arr = np.array([r["prob_home"], r["prob_draw"], r["prob_away"]], dtype=float)
+        if np.any(np.isnan(arr)):
+            return pd.Series({"pred": np.nan, "pred_conf": np.nan})
+        i = int(np.argmax(arr))
+        return pd.Series({"pred": ["HOME", "DRAW", "AWAY"][i], "pred_conf": float(arr[i])})
+
+    picks = df_pred.apply(pick_pred, axis=1)
+    df_pred = pd.concat([df_pred, picks], axis=1)
+
+    # salva
+    df_pred.to_csv(out_path, index=False)
+
+    # logs
+    amostra = df_pred.head(5).to_dict(orient="records")
+    print(f"[predict] AMOSTRA (top 5): {json.dumps(amostra, ensure_ascii=False)}")
+    print(f"[predict] OK -> {out_path} ({len(df_pred)} linhas; válidas p/ predição: {df_pred['pred'].notna().sum()})")
+    if source:
+        log(f"fonte utilizada: {source}", args.debug)
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
