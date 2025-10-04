@@ -1,4 +1,15 @@
-team_home,team_away,match_key,kickoff_utc
-Athletic Club (MG),Amazonas FC,athletic club (mg)__vs__amazonas fc,
-Coritiba,Botafogo SP,coritiba__vs__botafogo sp,
-CRB,Avai,crb__vs__avai,
+match_key,team_home,team_away
+sao paulo__vs__palmeiras,São Paulo,Palmeiras
+chapecoense__vs__novorizontino,Chapecoense,Novorizontino
+rb bragantino__vs__gremio,RB Bragantino,Grêmio
+volta redonda__vs__goias,Volta Redonda,Goiás
+fluminense__vs__atletico mineiro,Fluminense,Atlético-MG
+internacional__vs__botafogo,Internacional,Botafogo
+ferroviaria sp__vs__america mg,Ferroviária SP,América-MG
+corinthians__vs__mirassol,Corinthians,Mirassol
+vasco da gama__vs__vitoria,Vasco da Gama,Vitória
+juventude__vs__fortaleza,Juventude,Fortaleza
+bahia__vs__flamengo,Bahia,Flamengo
+cruzeiro__vs__sport recife,Cruzeiro,Sport Recife
+atletico goianiense__vs__athletico paranaense,Atlético Goianiense,Athletico Paranaense
+ceara__vs__santos,Ceará,Santos
