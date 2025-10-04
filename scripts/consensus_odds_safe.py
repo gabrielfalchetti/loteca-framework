@@ -1,92 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import argparse, os, math, csv
+import os
+import sys
+import json
+import math
+import argparse
 import pandas as pd
-import numpy as np
 
-"""
-Consenso de odds (tolerante a faltar um provedor):
-- Lê data/out/<RODADA>/odds_theoddsapi.csv (OBRIGATÓRIO ter pelo menos 1 linha válida)
-- Opcionalmente lê data/out/<RODADA>/odds_apifootball.csv (se existir)
-- Faz o "consenso" por média simples das odds disponíveis (ou "pass-through" se só houver 1 fonte)
-- Mantém apenas linhas com pelo menos 2 odds válidas (>1.0) em HOME/DRAW/AWAY
-- Salva em data/out/<RODADA>/odds_consensus.csv
-"""
+def valid_mask(df: pd.DataFrame) -> pd.Series:
+    def row_ok(r):
+        vals = [r.get("odds_home"), r.get("odds_draw"), r.get("odds_away")]
+        cnt = sum(1 for x in vals if isinstance(x,(int,float)) and x and x>1.0 and not (isinstance(x,float) and math.isnan(x)))
+        return cnt >= 2
+    return df.apply(row_ok, axis=1)
 
-REQ_COLS = ["match_key","team_home","team_away","odds_home","odds_draw","odds_away"]
-
-def valid_odd(x):
-    return isinstance(x, (int,float,np.floating)) and x > 1.0 and np.isfinite(x)
-
-def load_csv(path, label):
-    if not os.path.exists(path):
+def safe_read(path: str) -> pd.DataFrame:
+    if not os.path.isfile(path):
         print(f"[consensus-safe] AVISO: arquivo não encontrado: {path}")
-        return None
+        return pd.DataFrame(columns=["match_key","team_home","team_away","odds_home","odds_draw","odds_away"])
     df = pd.read_csv(path)
-    # garante colunas
-    miss = [c for c in REQ_COLS if c not in df.columns]
-    if miss:
-        raise SystemExit(f"[consensus-safe] ERRO: colunas ausentes em {label}: {miss}")
-    # normaliza tipos
-    for c in ["odds_home","odds_draw","odds_away"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
-
-def combine_sources(dfs):
-    # Junta por match_key mantendo nomes/ordem
-    base = None
-    for label, df in dfs.items():
-        if df is None or df.empty: 
-            continue
-        sub = df[REQ_COLS].copy()
-        sub = sub.add_suffix(f"__{label}")
-        sub = sub.rename(columns={f"match_key__{label}":"match_key",
-                                  f"team_home__{label}":"team_home__"+label,
-                                  f"team_away__{label}":"team_away__"+label})
-        if base is None:
-            base = sub
-        else:
-            base = pd.merge(base, sub, on="match_key", how="outer")
-    if base is None:
-        return pd.DataFrame(columns=REQ_COLS)
-    # Reconstroi team_home/away (prioridade theoddsapi depois apifootball)
-    def first_nonnull(cols, row):
-        for c in cols:
-            v = row.get(c, None)
-            if isinstance(v, str) and v.strip():
-                return v
-        return None
-    out_rows = []
-    for _, row in base.iterrows():
-        team_home = first_nonnull([c for c in base.columns if c.startswith("team_home__")], row) or ""
-        team_away = first_nonnull([c for c in base.columns if c.startswith("team_away__")], row) or ""
-        # colete odds disponíveis
-        o_home, o_draw, o_away = [], [], []
-        for label in dfs.keys():
-            h = row.get(f"odds_home__{label}", np.nan)
-            d = row.get(f"odds_draw__{label}", np.nan)
-            a = row.get(f"odds_away__{label}", np.nan)
-            if valid_odd(h): o_home.append(h)
-            if valid_odd(d): o_draw.append(d)
-            if valid_odd(a): o_away.append(a)
-        # média simples das disponíveis
-        cons_home = float(np.mean(o_home)) if len(o_home)>0 else np.nan
-        cons_draw = float(np.mean(o_draw)) if len(o_draw)>0 else np.nan
-        cons_away = float(np.mean(o_away)) if len(o_away)>0 else np.nan
-
-        # critério de validade: pelo menos 2 odds válidas no total
-        valid_count = sum([valid_odd(cons_home), valid_odd(cons_draw), valid_odd(cons_away)])
-        if valid_count >= 2:
-            out_rows.append({
-                "match_key": row["match_key"],
-                "team_home": team_home,
-                "team_away": team_away,
-                "odds_home": cons_home,
-                "odds_draw": cons_draw,
-                "odds_away": cons_away,
-            })
-    return pd.DataFrame(out_rows, columns=REQ_COLS)
+    for col in ["match_key","team_home","team_away","odds_home","odds_draw","odds_away"]:
+        if col not in df.columns:
+            df[col] = None
+    return df[["match_key","team_home","team_away","odds_home","odds_draw","odds_away"]]
 
 def main():
     ap = argparse.ArgumentParser()
@@ -96,37 +33,56 @@ def main():
     out_dir = os.path.join("data","out",args.rodada)
     os.makedirs(out_dir, exist_ok=True)
 
-    p_theodds = os.path.join(out_dir, "odds_theoddsapi.csv")
-    p_apifoot  = os.path.join(out_dir, "odds_apifootball.csv")
+    p_theodds = os.path.join(out_dir,"odds_theoddsapi.csv")
+    p_apifoot = os.path.join(out_dir,"odds_apifootball.csv")
+    out_path  = os.path.join(out_dir,"odds_consensus.csv")
 
-    df_the = load_csv(p_theodds, "theoddsapi")
-    df_rap = load_csv(p_apifoot, "apifootball")
+    df1 = safe_read(p_theodds)
+    df2 = safe_read(p_apifoot)
 
-    if df_the is not None and not df_the.empty:
-        print(f"[consensus-safe] lido odds_theoddsapi.csv -> {len(df_the)} linhas")
-        inv_reasons = {"menos_de_duas_odds":0}
-        # estatística rápida (opcional)
-        for _, r in df_the.iterrows():
-            v = sum(valid_odd(r[c]) for c in ["odds_home","odds_draw","odds_away"])
-            if v < 2: inv_reasons["menos_de_duas_odds"] += 1
-        if inv_reasons["menos_de_duas_odds"]>0:
-            print(f"[consensus-safe] motivos inválidos theoddsapi: {inv_reasons}")
+    # filtra válidas por provedor
+    v1 = df1[valid_mask(df1)] if not df1.empty else df1
+    v2 = df2[valid_mask(df2)] if not df2.empty else df2
 
-    dfs = {}
-    if df_the is not None and not df_the.empty:
-        dfs["theoddsapi"] = df_the
-    if df_rap is not None and not df_rap.empty:
-        dfs["apifootball"] = df_rap
+    total_valid = (0 if v1 is None else len(v1)) + (0 if v2 is None else len(v2))
+    print(f"[consensus-safe] consenso bruto: {total_valid} (soma linhas válidas dos provedores)")
 
-    df_out = combine_sources(dfs)
-    if df_out.empty:
-        total = sum((0 if d is None else len(d)) for d in dfs.values())
-        print(f"[consensus-safe] consenso bruto: 0 (soma linhas válidas dos provedores); finais (>=2 odds > 1.0): 0")
-        raise SystemExit("[consensus-safe] ERRO: nenhuma linha de odds válida. Abortando.")
+    # se só existe um provedor válido, usa ele
+    if not v1.empty and v2.empty:
+        v1.to_csv(out_path, index=False)
+        print(f"[consensus-safe] OK -> {out_path} ({len(v1)} linhas) | mapping theoddsapi: team_home='team_home', team_away='team_away', match_key='match_key', odds_home='odds_home', odds_draw='odds_draw', odds_away='odds_away'")
+        sys.exit(0)
+    if v1.empty and not v2.empty:
+        v2.to_csv(out_path, index=False)
+        print(f"[consensus-safe] OK -> {out_path} ({len(v2)} linhas) | mapping apifootball: team_home='team_home', team_away='team_away', match_key='match_key', odds_home='odds_home', odds_draw='odds_draw', odds_away='odds_away'")
+        sys.exit(0)
 
-    save_path = os.path.join(out_dir, "odds_consensus.csv")
-    df_out.to_csv(save_path, index=False, float_format="%.6f")
-    print(f"[consensus-safe] OK -> {save_path} ({len(df_out)} linhas) | mapping theoddsapi: team_home='team_home', team_away='team_away', match_key='match_key', odds_home='odds_home', odds_draw='odds_draw', odds_away='odds_away'")
+    # se os dois existem, prioriza o que tiver mais odds (ou faz média onde ambos existem)
+    if v1.empty and v2.empty:
+        print("[consensus-safe] ERRO: nenhuma linha de odds válida. Abortando.")
+        sys.exit(1)
+
+    # merge por match_key
+    m = pd.merge(v1, v2, on=["match_key","team_home","team_away"], how="outer", suffixes=("_1","_2"))
+    def pick(o1, o2):
+        # se uma faltar, pega a outra; se ambas existirem, pode escolher a maior (ou média)
+        if pd.isna(o1) and pd.isna(o2):
+            return None
+        if pd.isna(o1): return o2
+        if pd.isna(o2): return o1
+        return max(o1, o2)  # escolhe o melhor preço
+
+    out = pd.DataFrame({
+        "match_key": m["match_key"],
+        "team_home": m["team_home"],
+        "team_away": m["team_away"],
+        "odds_home": [pick(a,b) for a,b in zip(m.get("odds_home_1"), m.get("odds_home_2"))],
+        "odds_draw": [pick(a,b) for a,b in zip(m.get("odds_draw_1"), m.get("odds_draw_2"))],
+        "odds_away": [pick(a,b) for a,b in zip(m.get("odds_away_1"), m.get("odds_away_2"))],
+    })
+    out = out[valid_mask(out)]
+    out.to_csv(out_path, index=False)
+    print(f"[consensus-safe] OK -> {out_path} ({len(out)} linhas)")
 
 if __name__ == "__main__":
     main()
