@@ -1,225 +1,140 @@
-name: End2End • Odds + News + ML
+name: End2End Odds + News + ML
 
 on:
   workflow_dispatch:
     inputs:
-      rodada:
-        description: "Identificador da rodada (ex.: 2025-10-04_1214)"
-        type: string
+      RODADA:
+        description: "Identificador da rodada (ex: 2025-10-04_1214)"
         required: true
-      season:
-        description: "Temporada (ex.: 2025)"
-        type: string
+      SEASON:
+        description: "Ano da temporada"
         required: true
         default: "2025"
-      regions:
-        description: "Regiões do TheOddsAPI (uk,eu,us,au)"
-        type: string
-        required: true
-        default: "uk,eu,us,au"
-      bankroll:
-        description: "Bankroll inicial (para Kelly)"
-        type: number
-        required: true
-        default: 1000
-      kelly_fraction:
-        description: "Fração de Kelly"
-        type: number
-        required: true
-        default: 0.5
-      kelly_cap:
-        description: "Teto de Kelly por aposta"
-        type: number
-        required: true
-        default: 0.1
-      round_to:
-        description: "Arredondamento de stake (ex.: 1)"
-        type: number
-        required: true
-        default: 1
-      kelly_top_n:
-        description: "Quantidade de picks (Top N)"
-        type: number
-        required: true
-        default: 14
-      apifoot_league_ids:
-        description: "IDs de ligas da API-Football (ex.: 71,72). Pode ficar vazio."
-        type: string
-        required: false
-        default: ""
-      debug:
-        description: "Modo debug (true/false)"
-        type: boolean
-        required: true
-        default: true
 
 jobs:
   end2end:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
-      # Inputs
-      RODADA: ${{ inputs.rodada }}
-      SEASON: ${{ inputs.season }}
-      REGIONS: ${{ inputs.regions }}
-      BANKROLL: ${{ inputs.bankroll }}
-      KELLY_FRACTION: ${{ inputs.kelly_fraction }}
-      KELLY_CAP: ${{ inputs.kelly_cap }}
-      ROUND_TO: ${{ inputs.round_to }}
-      KELLY_TOP_N: ${{ inputs.kelly_top_n }}
-      APIFOOT_LEAGUE_IDS: ${{ inputs.apifoot_league_ids }}
-      DEBUG: ${{ inputs.debug }}
-
-      # Secrets
+      RODADA: ${{ github.event.inputs.RODADA }}
+      SEASON: ${{ github.event.inputs.SEASON }}
+      REGIONS: uk,eu,us,au
+      BANKROLL: 1000.0
+      KELLY_FRACTION: 0.5
+      KELLY_CAP: 0.1
+      ROUND_TO: 1.0
+      KELLY_TOP_N: 14.0
+      DEBUG: true
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      APIFOOT_LEAGUE_IDS: 71,72
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
-        shell: bash
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Export PYTHONPATH
-        shell: bash
-        run: echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
-
-      # ──────────────────────────────────────────────
-      # Debug para confirmar presença do arquivo de entrada
-      - name: Debug input presence
-        shell: bash
+      - name: Sanity check entrada
         run: |
           set -e
-          echo "RODADA=${RODADA}"
-          FILE="data/in/${RODADA}/matches_source.csv"
-          if [ -f "$FILE" ]; then
-            echo "[OK] Encontrado: $FILE"
-            head -n 20 "$FILE"
-          else
-            echo "[ERRO] Não encontrado: $FILE"
-          fi
-
-      - name: Validate matches_source.csv presence
-        shell: bash
-        run: |
-          set -e
-          FILE="data/in/${RODADA}/matches_source.csv"
+          FILE="data/in/matches_source.csv"
           if [ ! -f "$FILE" ]; then
             echo "::error::Arquivo $FILE não encontrado."
             exit 2
           fi
           echo "Entrada OK: $FILE"
+          echo "Preview:"
+          head -n 5 "$FILE" || true
 
-      - name: Verify matches_source.csv schema
-        shell: bash
-        run: |
-          python scripts/verify_matches_input.py --rodada "${RODADA}"
-
-      - name: Weights & Biases login (opcional)
-        if: env.WANDB_API_KEY != ''
-        shell: bash
-        run: |
-          python -m wandb login "${WANDB_API_KEY}" --relogin || true
-
-      # ──────────────────────────────────────────────
-      # Ingestão Odds - TheOddsAPI
-      - name: Ingest • TheOddsAPI
-        shell: bash
+      - name: TheOddsAPI ingest
         run: |
           set -e
-          if [ -z "${THEODDS_API_KEY}" ]; then
-            echo "[theoddsapi] SKIP"
-            exit 0
-          fi
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
           python scripts/ingest_odds_theoddsapi_safe.py \
             --rodada "${RODADA}" \
             --regions "${REGIONS}" \
-            $([ "${DEBUG}" = "true" ] && echo "--debug")
+            ${EXTRA}
 
-      # Ingestão Odds - API-Football (opcional)
-      - name: Ingest • API-Football
-        shell: bash
+      - name: API-Football ingest
         run: |
           set -e
-          if [ -z "${X_RAPIDAPI_KEY}" ] || [ -z "${APIFOOT_LEAGUE_IDS}" ]; then
-            echo "[apifootball] SKIP"
-            exit 0
-          fi
-          python scripts/ingest_odds_apifootball_rapidapi_safe.py \
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          python -m scripts.ingest_odds_apifootball_rapidapi \
             --rodada "${RODADA}" \
             --season "${SEASON}" \
-            --league-ids "${APIFOOT_LEAGUE_IDS}" \
-            $([ "${DEBUG}" = "true" ] && echo "--debug")
+            --window 2 \
+            --fuzzy 0.90 \
+            --aliases data/aliases_br.json \
+            ${EXTRA} || true
 
-      # Consenso de Odds
       - name: Consensus Odds
-        shell: bash
         run: |
+          set -e
           python -m scripts.consensus_odds_safe --rodada "${RODADA}"
 
-      # Predições
-      - name: Predict from Odds
-        shell: bash
+      - name: Market Predictions
         run: |
-          python scripts/predict_from_odds.py --rodada "${RODADA}" \
-            $([ "${DEBUG}" = "true" ] && echo "--debug")
+          set -e
+          python scripts/predict_from_odds.py --rodada "${RODADA}"
 
-      # Notícias
       - name: News ingest
-        shell: bash
         run: |
-          if [ -z "${NEWSAPI_KEY}" ]; then
-            echo "[news] SKIP"
-            exit 0
-          fi
-          python scripts/news_ingest_safe.py
+          set -e
+          python scripts/news_ingest_safe.py || true
 
-      # Lesões
       - name: Injuries ingest
-        shell: bash
         run: |
-          if [ -z "${X_RAPIDAPI_KEY}" ]; then
-            echo "[injuries] SKIP"
-            exit 0
-          fi
-          python scripts/injuries_apifootball_safe.py
+          set -e
+          python scripts/injuries_apifootball_safe.py || true
 
-      # Cartão
-      - name: Build Cartão
-        shell: bash
+      - name: XG Univariado
         run: |
+          set -e
+          python scripts/ml_xg_univariado.py --rodada "${RODADA}" --season "${SEASON}" || true
+
+      - name: XG Bivariado
+        run: |
+          set -e
+          python scripts/ml_xg_bivariado.py --rodada "${RODADA}" --season "${SEASON}" || true
+
+      - name: Calibração Isotônica
+        run: |
+          set -e
+          python scripts/ml_calibracao_isotonica.py --rodada "${RODADA}" --season "${SEASON}" || true
+
+      - name: Stacking Bivariado
+        run: |
+          set -e
+          python scripts/ml_stacking_bivariado.py --rodada "${RODADA}" --season "${SEASON}" || true
+
+      - name: Build Cartão
+        run: |
+          set -e
           python scripts/build_cartao.py --rodada "${RODADA}"
 
-      # Kelly
-      - name: Publish Kelly
-        shell: bash
+      - name: Kelly Stakes
         run: |
-          python scripts/publish_kelly.py --rodada "${RODADA}" \
-            $([ "${DEBUG}" = "true" ] && echo "--debug")
+          set -e
+          python scripts/publish_kelly.py --rodada "${RODADA}"
 
-      # Reality Check
-      - name: Reality Check
-        continue-on-error: true
-        shell: bash
+      - name: Sanity Reality Check
         run: |
-          python scripts/sanity_reality_check.py --rodada "${RODADA}" --strict || true
+          set -e
+          python scripts/sanity_reality_check.py --rodada "${RODADA}" --strict
 
-      # Upload artifacts
-      - name: Upload Artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: loteca_full_${{ inputs.rodada }}
+          name: loteca_full_${{ env.RODADA }}
           path: |
-            data/out/${{ inputs.rodada }}/**
-          if-no-files-found: warn
-          compression-level: 6
+            data/out/${{ env.RODADA }}/*
