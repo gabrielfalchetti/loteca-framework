@@ -4,203 +4,173 @@ on:
   workflow_dispatch:
     inputs:
       RODADA:
-        description: "Rodada ex.: 2025-10-04_1214 (usa a data YYYY-MM-DD no começo)"
+        description: "Rodada (ex: 2025-09-27_1213)"
         required: true
+        type: string
       SEASON:
-        description: "Temporada ex.: 2025"
+        description: "Temporada (ex: 2025)"
         required: true
+        type: string
+      REGIONS:
+        description: "Regiões odds (uk,eu,us,au)"
+        required: true
+        default: "uk,eu,us,au"
+        type: string
+      DEBUG:
+        description: "Logs detalhados"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true","false"]
+
+env:
+  RODADA: ${{ github.event.inputs.RODADA }}
+  SEASON: ${{ github.event.inputs.SEASON }}
+  REGIONS: ${{ github.event.inputs.REGIONS }}
+  DEBUG:  ${{ github.event.inputs.DEBUG }}
+  # Parâmetros de Kelly
+  BANKROLL: 1000
+  KELLY_FRACTION: 0.5
+  KELLY_CAP: 0.1
+  KELLY_TOP_N: 14
 
 jobs:
   end2end:
     runs-on: ubuntu-24.04
-    env:
-      RODADA: ${{ inputs.RODADA }}
-      SEASON: ${{ inputs.SEASON }}
-      REGIONS: uk,eu,us,au
-      BANKROLL: 1000
-      KELLY_FRACTION: 0.5
-      KELLY_CAP: 0.1
-      ROUND_TO: 1
-      KELLY_TOP_N: 14
-      DEBUG: true
-
-      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
-      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-
-      # IDs das ligas na API-Football (configure em Settings > Variables do repo)
-      APIFOOT_LEAGUE_IDS: ${{ vars.APIFOOT_LEAGUE_IDS }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: 3.11
+          python-version: "3.11"
 
       - name: Install deps
-        shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
 
-      - name: Export PYTHONPATH
-        shell: bash
-        run: echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
-
-      # ===============================
-      # (A) matches_source.csv
-      # ===============================
-      - name: Generate matches_source.csv if missing (API-Football)
-        shell: bash
-        run: |
-          set -e
-          if [ ! -f "scripts/generate_matches_source_apifootball.py" ]; then
-            echo "[generate] AVISO: script não encontrado — pulando geração."
-            exit 0
-          fi
-          if [ -f "data/in/${RODADA}/matches_source.csv" ]; then
-            echo "[generate] OK: matches_source.csv já existe."
-            exit 0
-          fi
-          if [ -z "${X_RAPIDAPI_KEY}" ] || [ -z "${APIFOOT_LEAGUE_IDS}" ]; then
-            echo "[generate] AVISO: falta X_RAPIDAPI_KEY ou APIFOOT_LEAGUE_IDS."
-            exit 0
-          fi
-          python scripts/generate_matches_source_apifootball.py \
-            --rodada "${RODADA}" \
-            --season "${SEASON}" \
-            --leagues "${APIFOOT_LEAGUE_IDS}" \
-            --limit 14
-
-      - name: Check matches_source.csv
-        shell: bash
+      - name: Checagem de entrada (matches_source.csv)
         run: |
           set -e
           if [ ! -f "data/in/${RODADA}/matches_source.csv" ]; then
-            echo "ERRO: matches_source.csv não encontrado."
+            echo "ERRO: data/in/${RODADA}/matches_source.csv não encontrado"
             exit 2
           fi
-          echo "Entrada OK."
+          echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
 
-      # ===============================
-      # (B) W&B opcional
-      # ===============================
-      - name: (Optional) wandb login
-        shell: bash
+      - name: Mostrar chaves configuradas
+        env:
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+          X_RAPIDAPI_KEY:  ${{ secrets.X_RAPIDAPI_KEY }}
+          NEWSAPI_KEY:     ${{ secrets.NEWSAPI_KEY }}
+          WANDB_API_KEY:   ${{ secrets.WANDB_API_KEY }}
+          APIFOOT_LEAGUE_IDS: ${{ secrets.APIFOOT_LEAGUE_IDS }}
         run: |
-          if [ -n "${WANDB_API_KEY}" ]; then
-            python -m wandb login "${WANDB_API_KEY}" --relogin || true
-            echo "[wandb] login OK"
-          else
-            echo "[wandb] SKIP"
-          fi
+          set -e
+          [ -z "${THEODDS_API_KEY}" ] && echo "AVISO: THEODDS_API_KEY ausente (TheOddsAPI será pulado)." || echo "THEODDS_API_KEY: OK"
+          [ -z "${X_RAPIDAPI_KEY}" ] && echo "AVISO: X_RAPIDAPI_KEY ausente (API-Football será pulado)." || echo "X_RAPIDAPI_KEY: OK"
+          [ -z "${NEWSAPI_KEY}" ] && echo "AVISO: NEWSAPI_KEY ausente (News será pulado)." || echo "NEWSAPI_KEY: OK"
+          [ -z "${APIFOOT_LEAGUE_IDS}" ] && echo "APIFOOT_LEAGUE_IDS não definido (usará defaults 71,72)" || echo "APIFOOT_LEAGUE_IDS: ${APIFOOT_LEAGUE_IDS}"
 
-      # ===============================
-      # (C) TheOddsAPI
-      # ===============================
-      - name: Ingest TheOddsAPI
-        shell: bash
+      - name: W&B (opcional)
+        if: ${{ secrets.WANDB_API_KEY != '' }}
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
-          if [ -f "scripts/ingest_odds_theoddsapi_safe.py" ]; then
-            python scripts/ingest_odds_theoddsapi_safe.py \
-              --rodada "${RODADA}" \
-              --regions "${REGIONS}" \
-              --debug
-          else
-            echo "[theoddsapi] SKIP"
-          fi
+          set -e
+          python -m wandb login "${WANDB_API_KEY}" --relogin || true
+          echo "[wandb] login executado"
 
-      # ===============================
-      # (D) API-Football
-      # ===============================
-      - name: Ingest API-Football
-        shell: bash
+      # ---------- INGEST: TheOddsAPI ----------
+      - name: Ingest TheOddsAPI (SAFE)
+        if: ${{ secrets.THEODDS_API_KEY != '' }}
+        env:
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
-          if [ -f "scripts/ingest_odds_apifootball_rapidapi_safe.py" ]; then
-            python scripts/ingest_odds_apifootball_rapidapi_safe.py \
-              --rodada "${RODADA}" \
-              --season "${SEASON}" \
-              --leagues "${APIFOOT_LEAGUE_IDS}" \
-              --debug || true
-          else
-            echo "[apifootball] SKIP"
-          fi
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          python scripts/ingest_odds_theoddsapi_safe.py \
+            --rodada "${RODADA}" \
+            --regions "${REGIONS}" \
+            ${EXTRA}
 
-      # ===============================
-      # (E) CONSENSO odds
-      # ===============================
-      - name: Consensus odds
-        shell: bash
+      # ---------- INGEST: API-FOOTBALL (opcional) ----------
+      - name: Ingest API-FOOTBALL (SAFE)
+        if: ${{ secrets.X_RAPIDAPI_KEY != '' }}
+        env:
+          X_RAPIDAPI_KEY:    ${{ secrets.X_RAPIDAPI_KEY }}
+          APIFOOT_LEAGUE_IDS: ${{ secrets.APIFOOT_LEAGUE_IDS }}
         run: |
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          python scripts/ingest_odds_apifootball_rapidapi_safe.py \
+            --rodada "${RODADA}" \
+            --season "${SEASON}" \
+            ${EXTRA} || true
+
+      # ---------- CONSENSO ----------
+      - name: Consenso de Odds (SAFE)
+        run: |
+          set -e
           python -m scripts.consensus_odds_safe --rodada "${RODADA}"
 
-      # ===============================
-      # (F) PREDICT
-      # ===============================
-      - name: Predict from odds
-        shell: bash
+      # ---------- PREDICT (mercado) ----------
+      - name: Predições a partir do mercado
         run: |
-          python scripts/predict_from_odds.py --rodada "${RODADA}" --debug
+          set -e
+          EXTRA=""
+          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          python scripts/predict_from_odds.py --rodada "${RODADA}" ${EXTRA}
 
-      # ===============================
-      # (G) News ingest
-      # ===============================
-      - name: News ingest
-        shell: bash
+      # ---------- NEWS (opcional) ----------
+      - name: News (SAFE)
+        if: ${{ secrets.NEWSAPI_KEY != '' }}
+        env:
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
         run: |
-          if [ -n "${NEWSAPI_KEY}" ]; then
-            python scripts/news_ingest_safe.py
-          else
-            echo "[news] SKIP"
-          fi
+          set -e
+          python scripts/news_ingest_safe.py || true
 
-      # ===============================
-      # (H) Injuries ingest
-      # ===============================
-      - name: Injuries ingest
-        shell: bash
+      # ---------- Injuries (opcional – placeholder) ----------
+      - name: Injuries (SAFE)
+        if: ${{ secrets.X_RAPIDAPI_KEY != '' }}
+        env:
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         run: |
-          if [ -n "${X_RAPIDAPI_KEY}" ]; then
-            python scripts/injuries_apifootball_safe.py
-          else
-            echo "[inj] SKIP"
-          fi
+          set -e
+          python scripts/injuries_apifootball_safe.py || true
 
-      # ===============================
-      # (I) Cartão
-      # ===============================
-      - name: Build cartão
-        shell: bash
+      # ---------- Cartão ----------
+      - name: Cartão Loteca
         run: |
+          set -e
           python scripts/build_cartao.py --rodada "${RODADA}"
 
-      # ===============================
-      # (J) Kelly
-      # ===============================
-      - name: Kelly staking
-        shell: bash
+      # ---------- Sanity / Reality Check ----------
+      - name: Sanity reality check
         run: |
-          python scripts/publish_kelly.py --rodada "${RODADA}" --debug
+          set -e
+          python scripts/sanity_reality_check.py --rodada "${RODADA}" --strict
 
-      # ===============================
-      # (K) Reality check
-      # ===============================
-      - name: Reality check
-        shell: bash
-        run: |
-          python scripts/sanity_reality_check.py --rodada "${RODADA}" --strict || true
-
-      # ===============================
-      # (L) Upload artifacts
-      # ===============================
-      - name: Upload artifacts
+      # ---------- Publicação / Artefatos ----------
+      - name: Publicar artefatos
         uses: actions/upload-artifact@v4
         with:
           name: loteca_full_${{ env.RODADA }}
           path: |
-            data/out/${{ env.RODADA }}/**
-          if-no-files-found: warn
+            data/out/${{ env.RODADA }}/odds_theoddsapi.csv
+            data/out/${{ env.RODADA }}/unmatched_theoddsapi.csv
+            data/out/${{ env.RODADA }}/odds_apifootball.csv
+            data/out/${{ env.RODADA }}/unmatched_apifootball.csv
+            data/out/${{ env.RODADA }}/odds_consensus.csv
+            data/out/${{ env.RODADA }}/predictions_market.csv
+            data/out/${{ env.RODADA }}/news.csv
+            data/out/${{ env.RODADA }}/injuries.csv
+            data/out/${{ env.RODADA }}/loteca_cartao.txt
+            data/out/${{ env.RODADA }}/kelly_stakes.csv
+            data/out/${{ env.RODADA }}/reality_report.*
