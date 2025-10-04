@@ -1,64 +1,75 @@
-name: end2end
+name: End2End • Odds + News + ML
 
 on:
   workflow_dispatch:
     inputs:
-      RODADA:
-        description: 'ID da rodada (ex: 2025-10-04_1214)'
+      rodada:
+        description: "Identificador da rodada (ex.: 2025-10-04_1214)"
+        type: string
         required: true
-        default: '2025-10-04_1214'
-      SEASON:
-        description: 'Temporada (ex: 2025)'
+      season:
+        description: "Temporada (ex.: 2025)"
+        type: string
         required: true
-        default: '2025'
-      REGIONS:
-        description: 'Regiões do TheOddsAPI (uk,eu,us,au)'
+        default: "2025"
+      regions:
+        description: "Regiões do TheOddsAPI (uk,eu,us,au)"
+        type: string
         required: true
-        default: 'uk,eu,us,au'
-      BANKROLL:
-        description: 'Bankroll inicial'
+        default: "uk,eu,us,au"
+      bankroll:
+        description: "Bankroll inicial (para Kelly)"
+        type: number
         required: true
-        default: '1000'
-      KELLY_FRACTION:
-        description: 'Fração Kelly'
+        default: 1000
+      kelly_fraction:
+        description: "Fração de Kelly"
+        type: number
         required: true
-        default: '0.5'
-      KELLY_CAP:
-        description: 'Cap Kelly'
+        default: 0.5
+      kelly_cap:
+        description: "Teto de Kelly por aposta"
+        type: number
         required: true
-        default: '0.1'
-      ROUND_TO:
-        description: 'Arredondar stake para'
+        default: 0.1
+      round_to:
+        description: "Arredondamento de stake (ex.: 1)"
+        type: number
         required: true
-        default: '1'
-      KELLY_TOP_N:
-        description: 'Quantidade máxima de picks'
+        default: 1
+      kelly_top_n:
+        description: "Quantidade de picks (Top N)"
+        type: number
         required: true
-        default: '14'
-      DEBUG:
-        description: 'Debug (true/false)'
-        required: true
-        default: 'true'
-      APIFOOT_LEAGUE_IDS:
-        description: 'IDs da API-Football separados por vírgula (ex: 71,72)'
+        default: 14
+      apifoot_league_ids:
+        description: "IDs de ligas da API-Football (ex.: 71,72). Pode ficar vazio."
+        type: string
         required: false
-        default: '71,72'
+        default: ""
+      debug:
+        description: "Modo debug (true/false)"
+        type: boolean
+        required: true
+        default: true
 
 jobs:
   end2end:
     runs-on: ubuntu-24.04
-
     env:
-      RODADA: ${{ inputs.RODADA }}
-      SEASON: ${{ inputs.SEASON }}
-      REGIONS: ${{ inputs.REGIONS }}
-      BANKROLL: ${{ inputs.BANKROLL }}
-      KELLY_FRACTION: ${{ inputs.KELLY_FRACTION }}
-      KELLY_CAP: ${{ inputs.KELLY_CAP }}
-      ROUND_TO: ${{ inputs.ROUND_TO }}
-      KELLY_TOP_N: ${{ inputs.KELLY_TOP_N }}
-      DEBUG: ${{ inputs.DEBUG }}
-      APIFOOT_LEAGUE_IDS: ${{ inputs.APIFOOT_LEAGUE_IDS }}
+      # Inputs
+      RODADA: ${{ inputs.rodada }}
+      SEASON: ${{ inputs.season }}
+      REGIONS: ${{ inputs.regions }}
+      BANKROLL: ${{ inputs.bankroll }}
+      KELLY_FRACTION: ${{ inputs.kelly_fraction }}
+      KELLY_CAP: ${{ inputs.kelly_cap }}
+      ROUND_TO: ${{ inputs.round_to }}
+      KELLY_TOP_N: ${{ inputs.kelly_top_n }}
+      APIFOOT_LEAGUE_IDS: ${{ inputs.apifoot_league_ids }}
+      DEBUG: ${{ inputs.debug }}
+
+      # Secrets
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
@@ -71,180 +82,144 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install deps
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Expose PYTHONPATH
+      - name: Export PYTHONPATH
+        shell: bash
         run: echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
 
-      - name: Conferir entrada
+      # ──────────────────────────────────────────────
+      # Debug para confirmar presença do arquivo de entrada
+      - name: Debug input presence
+        shell: bash
         run: |
           set -e
-          if [ ! -f "data/in/${RODADA}/matches_source.csv" ]; then
-            echo "ERRO: data/in/${RODADA}/matches_source.csv não encontrado"
+          echo "RODADA=${RODADA}"
+          FILE="data/in/${RODADA}/matches_source.csv"
+          if [ -f "$FILE" ]; then
+            echo "[OK] Encontrado: $FILE"
+            head -n 20 "$FILE"
+          else
+            echo "[ERRO] Não encontrado: $FILE"
+          fi
+
+      - name: Validate matches_source.csv presence
+        shell: bash
+        run: |
+          set -e
+          FILE="data/in/${RODADA}/matches_source.csv"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Arquivo $FILE não encontrado."
             exit 2
           fi
-          echo "Entrada OK: data/in/${RODADA}/matches_source.csv"
+          echo "Entrada OK: $FILE"
 
-      - name: Chaves presentes?
+      - name: Verify matches_source.csv schema
+        shell: bash
         run: |
-          set -e
-          [ -z "${THEODDS_API_KEY}" ] && echo "AVISO: THEODDS_API_KEY ausente (TheOddsAPI será pulado)." || echo "THEODDS_API_KEY: OK"
-          [ -z "${X_RAPIDAPI_KEY}" ] && echo "AVISO: X_RAPIDAPI_KEY ausente (API-Football será pulado)." || echo "X_RAPIDAPI_KEY: OK"
-          [ -z "${NEWSAPI_KEY}" ] && echo "AVISO: NEWSAPI_KEY ausente (News será pulado)." || echo "NEWSAPI_KEY: OK"
+          python scripts/verify_matches_input.py --rodada "${RODADA}"
 
       - name: Weights & Biases login (opcional)
         if: env.WANDB_API_KEY != ''
+        shell: bash
         run: |
-          set -e
           python -m wandb login "${WANDB_API_KEY}" --relogin || true
-          echo "[wandb] login executado"
 
-      # ---------------- Ingestão de odds ----------------
-      - name: TheOddsAPI (safe)
-        if: env.THEODDS_API_KEY != ''
+      # ──────────────────────────────────────────────
+      # Ingestão Odds - TheOddsAPI
+      - name: Ingest • TheOddsAPI
+        shell: bash
         run: |
           set -e
-          EXTRA=""
-          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
+          if [ -z "${THEODDS_API_KEY}" ]; then
+            echo "[theoddsapi] SKIP"
+            exit 0
+          fi
           python scripts/ingest_odds_theoddsapi_safe.py \
             --rodada "${RODADA}" \
             --regions "${REGIONS}" \
-            ${EXTRA}
+            $([ "${DEBUG}" = "true" ] && echo "--debug")
 
-      - name: API-Football (safe)
-        if: env.X_RAPIDAPI_KEY != '' && env.APIFOOT_LEAGUE_IDS != ''
+      # Ingestão Odds - API-Football (opcional)
+      - name: Ingest • API-Football
+        shell: bash
         run: |
           set -e
-          EXTRA=""
-          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
-          python -m scripts.ingest_odds_apifootball_rapidapi \
+          if [ -z "${X_RAPIDAPI_KEY}" ] || [ -z "${APIFOOT_LEAGUE_IDS}" ]; then
+            echo "[apifootball] SKIP"
+            exit 0
+          fi
+          python scripts/ingest_odds_apifootball_rapidapi_safe.py \
             --rodada "${RODADA}" \
             --season "${SEASON}" \
-            --window 2 \
-            --fuzzy 0.90 \
-            --aliases data/aliases_br.json \
-            ${EXTRA}
+            --league-ids "${APIFOOT_LEAGUE_IDS}" \
+            $([ "${DEBUG}" = "true" ] && echo "--debug")
 
-      - name: Consenso de odds (tolerante a 1 provedor)
+      # Consenso de Odds
+      - name: Consensus Odds
+        shell: bash
         run: |
-          set -e
-          if python -c "import importlib.util,sys;sys.exit(0 if importlib.util.find_spec('scripts.consensus_odds_safe') else 1)"; then
-            python -m scripts.consensus_odds_safe --rodada "${RODADA}"
-          else
-            echo "[consensus-safe] ERRO: módulo scripts.consensus_odds_safe não encontrado."
-            exit 10
+          python -m scripts.consensus_odds_safe --rodada "${RODADA}"
+
+      # Predições
+      - name: Predict from Odds
+        shell: bash
+        run: |
+          python scripts/predict_from_odds.py --rodada "${RODADA}" \
+            $([ "${DEBUG}" = "true" ] && echo "--debug")
+
+      # Notícias
+      - name: News ingest
+        shell: bash
+        run: |
+          if [ -z "${NEWSAPI_KEY}" ]; then
+            echo "[news] SKIP"
+            exit 0
           fi
-
-      # ---------------- Predição via mercado ----------------
-      - name: Predição (market-implied)
-        run: |
-          set -e
-          EXTRA=""
-          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
-          python scripts/predict_from_odds.py --rodada "${RODADA}" ${EXTRA}
-
-      # ---------------- News & Injuries ----------------
-      - name: News (opcional)
-        if: env.NEWSAPI_KEY != ''
-        run: |
-          set -e
           python scripts/news_ingest_safe.py
 
-      - name: Injuries via API-Football (opcional)
-        if: env.X_RAPIDAPI_KEY != '' && env.APIFOOT_LEAGUE_IDS != ''
+      # Lesões
+      - name: Injuries ingest
+        shell: bash
         run: |
-          set -e
+          if [ -z "${X_RAPIDAPI_KEY}" ]; then
+            echo "[injuries] SKIP"
+            exit 0
+          fi
           python scripts/injuries_apifootball_safe.py
 
-      # ---------------- ML (uni, bi, calibração, stacking) ----------------
-      - name: XG univariado (opcional)
+      # Cartão
+      - name: Build Cartão
+        shell: bash
         run: |
-          set -e
-          if [ -f "scripts/ml_xg_univariado.py" ]; then
-            EXTRA=""
-            [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
-            python scripts/ml_xg_univariado.py --rodada "${RODADA}" --season "${SEASON}" ${EXTRA} || true
-          else
-            echo "[ml] AVISO: scripts/ml_xg_univariado.py não encontrado — pulando."
-          fi
-
-      - name: XG bivariado (opcional)
-        run: |
-          set -e
-          if [ -f "scripts/ml_xg_bivariado.py" ]; then
-            EXTRA=""
-            [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
-            python scripts/ml_xg_bivariado.py --rodada "${RODADA}" --season "${SEASON}" ${EXTRA} || true
-          else
-            echo "[ml] AVISO: scripts/ml_xg_bivariado.py não encontrado — pulando."
-          fi
-
-      - name: Calibração isotônica (opcional)
-        run: |
-          set -e
-          if [ -f "scripts/ml_calibracao_isotonica.py" ]; then
-            EXTRA=""
-            [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
-            python scripts/ml_calibracao_isotonica.py --rodada "${RODADA}" --season "${SEASON}" ${EXTRA} || true
-          else
-            echo "[ml] AVISO: scripts/ml_calibracao_isotonica.py não encontrado — pulando."
-          fi
-
-      - name: Stacking bivariado (opcional)
-        run: |
-          set -e
-          if [ -f "scripts/ml_stacking_bivariado.py" ]; then
-            EXTRA=""
-            [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
-            python scripts/ml_stacking_bivariado.py --rodada "${RODADA}" --season "${SEASON}" ${EXTRA} || true
-          else
-            echo "[ml] AVISO: scripts/ml_stacking_bivariado.py não encontrado — pulando."
-          fi
-
-      # ---------------- Cartão Loteca & Kelly ----------------
-      - name: Cartão Loteca (sempre passar --rodada)
-        run: |
-          set -e
           python scripts/build_cartao.py --rodada "${RODADA}"
 
-      - name: Publicar Kelly
+      # Kelly
+      - name: Publish Kelly
+        shell: bash
         run: |
-          set -e
-          EXTRA=""
-          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
-          python scripts/publish_kelly.py --rodada "${RODADA}" ${EXTRA}
+          python scripts/publish_kelly.py --rodada "${RODADA}" \
+            $([ "${DEBUG}" = "true" ] && echo "--debug")
 
-      # ---------------- Sanity & reality check ----------------
-      - name: Sanity reality check
+      # Reality Check
+      - name: Reality Check
+        continue-on-error: true
+        shell: bash
         run: |
-          set -e
           python scripts/sanity_reality_check.py --rodada "${RODADA}" --strict || true
 
-      # ---------------- Artefatos ----------------
-      - name: Upload artifacts
+      # Upload artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: loteca_full_${{ inputs.RODADA }}
+          name: loteca_full_${{ inputs.rodada }}
           path: |
-            data/out/${{ inputs.RODADA }}/odds_theoddsapi.csv
-            data/out/${{ inputs.RODADA }}/unmatched_theoddsapi.csv
-            data/out/${{ inputs.RODADA }}/odds_apifootball.csv
-            data/out/${{ inputs.RODADA }}/unmatched_apifootball.csv
-            data/out/${{ inputs.RODADA }}/odds_consensus.csv
-            data/out/${{ inputs.RODADA }}/predictions_market.csv
-            data/out/${{ inputs.RODADA }}/news.csv
-            data/out/${{ inputs.RODADA }}/injuries.csv
-            data/out/${{ inputs.RODADA }}/predictions_xg_uni.csv
-            data/out/${{ inputs.RODADA }}/predictions_xg_bi.csv
-            data/out/${{ inputs.RODADA }}/predictions_calibrated.csv
-            data/out/${{ inputs.RODADA }}/predictions_stacked.csv
-            data/out/${{ inputs.RODADA }}/kelly_stakes.csv
-            data/out/${{ inputs.RODADA }}/loteca_cartao.txt
-            data/out/${{ inputs.RODADA }}/reality_report.*
-            data/out/${{ inputs.RODADA }}/debug/**
+            data/out/${{ inputs.rodada }}/**
           if-no-files-found: warn
+          compression-level: 6
