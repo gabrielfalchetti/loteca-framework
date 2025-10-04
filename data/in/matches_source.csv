@@ -1,15 +1,15 @@
-home,away
-São Paulo,Palmeiras
-Chapecoense,Novorizontino
-RB Bragantino,Grêmio
-Volta Redonda,Goiás
-Fluminense,Atlético Mineiro
-Internacional,Botafogo
-Ferroviária,América Mineiro
-Corinthians,Mirassol
-Vasco da Gama,Vitória
-Juventude,Fortaleza
-Bahia,Flamengo
-Cruzeiro,Sport
-Atlético Goianiense,Athletico Paranaense
-Ceará,Santos
+match_id,home,away
+1,São Paulo,Palmeiras
+2,Chapecoense,Novorizontino
+3,RB Bragantino,Grêmio
+4,Volta Redonda,Goiás
+5,Fluminense,Atlético Mineiro
+6,Internacional,Botafogo
+7,Ferroviária,América Mineiro
+8,Corinthians,Mirassol
+9,Vasco,Vitória
+10,Juventude,Fortaleza
+11,Bahia,Flamengo
+12,Cruzeiro,Sport
+13,Atlético Goianiense,Athletico Paranaense
+14,Ceará,Santos
