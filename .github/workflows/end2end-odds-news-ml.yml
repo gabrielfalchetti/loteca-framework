@@ -3,9 +3,6 @@ name: End2End Odds + News + ML
 on:
   workflow_dispatch:
     inputs:
-      RODADA:
-        description: "Identificador da rodada (ex: 2025-10-04_1214)"
-        required: true
       SEASON:
         description: "Ano da temporada"
         required: true
@@ -15,7 +12,6 @@ jobs:
   end2end:
     runs-on: ubuntu-latest
     env:
-      RODADA: ${{ github.event.inputs.RODADA }}
       SEASON: ${{ github.event.inputs.SEASON }}
       REGIONS: uk,eu,us,au
       BANKROLL: 1000.0
@@ -29,6 +25,7 @@ jobs:
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       APIFOOT_LEAGUE_IDS: 71,72
+      OUT_DIR: data/out/${{ github.run_id }}
 
     steps:
       - uses: actions/checkout@v4
@@ -51,90 +48,60 @@ jobs:
             exit 2
           fi
           echo "Entrada OK: $FILE"
-          echo "Preview:"
           head -n 5 "$FILE" || true
 
       - name: TheOddsAPI ingest
         run: |
-          set -e
-          EXTRA=""
-          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
           python scripts/ingest_odds_theoddsapi_safe.py \
-            --rodada "${RODADA}" \
+            --rodada "${OUT_DIR}" \
             --regions "${REGIONS}" \
-            ${EXTRA}
+            --debug
 
       - name: API-Football ingest
         run: |
-          set -e
-          EXTRA=""
-          [ "${DEBUG}" = "true" ] && EXTRA="--debug" || true
           python -m scripts.ingest_odds_apifootball_rapidapi \
-            --rodada "${RODADA}" \
+            --rodada "${OUT_DIR}" \
             --season "${SEASON}" \
             --window 2 \
             --fuzzy 0.90 \
             --aliases data/aliases_br.json \
-            ${EXTRA} || true
+            --debug || true
 
       - name: Consensus Odds
-        run: |
-          set -e
-          python -m scripts.consensus_odds_safe --rodada "${RODADA}"
+        run: python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}"
 
       - name: Market Predictions
-        run: |
-          set -e
-          python scripts/predict_from_odds.py --rodada "${RODADA}"
+        run: python scripts/predict_from_odds.py --rodada "${OUT_DIR}"
 
       - name: News ingest
-        run: |
-          set -e
-          python scripts/news_ingest_safe.py || true
+        run: python scripts/news_ingest_safe.py || true
 
       - name: Injuries ingest
-        run: |
-          set -e
-          python scripts/injuries_apifootball_safe.py || true
+        run: python scripts/injuries_apifootball_safe.py || true
 
       - name: XG Univariado
-        run: |
-          set -e
-          python scripts/ml_xg_univariado.py --rodada "${RODADA}" --season "${SEASON}" || true
+        run: python scripts/ml_xg_univariado.py --rodada "${OUT_DIR}" --season "${SEASON}" || true
 
       - name: XG Bivariado
-        run: |
-          set -e
-          python scripts/ml_xg_bivariado.py --rodada "${RODADA}" --season "${SEASON}" || true
+        run: python scripts/ml_xg_bivariado.py --rodada "${OUT_DIR}" --season "${SEASON}" || true
 
       - name: Calibração Isotônica
-        run: |
-          set -e
-          python scripts/ml_calibracao_isotonica.py --rodada "${RODADA}" --season "${SEASON}" || true
+        run: python scripts/ml_calibracao_isotonica.py --rodada "${OUT_DIR}" --season "${SEASON}" || true
 
       - name: Stacking Bivariado
-        run: |
-          set -e
-          python scripts/ml_stacking_bivariado.py --rodada "${RODADA}" --season "${SEASON}" || true
+        run: python scripts/ml_stacking_bivariado.py --rodada "${OUT_DIR}" --season "${SEASON}" || true
 
       - name: Build Cartão
-        run: |
-          set -e
-          python scripts/build_cartao.py --rodada "${RODADA}"
+        run: python scripts/build_cartao.py --rodada "${OUT_DIR}"
 
       - name: Kelly Stakes
-        run: |
-          set -e
-          python scripts/publish_kelly.py --rodada "${RODADA}"
+        run: python scripts/publish_kelly.py --rodada "${OUT_DIR}"
 
       - name: Sanity Reality Check
-        run: |
-          set -e
-          python scripts/sanity_reality_check.py --rodada "${RODADA}" --strict
+        run: python scripts/sanity_reality_check.py --rodada "${OUT_DIR}" --strict
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: loteca_full_${{ env.RODADA }}
-          path: |
-            data/out/${{ env.RODADA }}/*
+          name: loteca_full_${{ github.run_id }}
+          path: data/out/${{ github.run_id }}/*
