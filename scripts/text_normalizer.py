@@ -9,6 +9,7 @@ import re
 import json
 from unidecode import unidecode
 
+
 def normalize_text(s: str) -> str:
     """Normaliza string: minúsculo, sem acentos, sem caracteres especiais."""
     if not isinstance(s, str):
@@ -19,13 +20,29 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s)  # normaliza espaços
     return s.strip()
 
+
 def make_match_key(home: str, away: str) -> str:
     """Cria chave única para o jogo: home__vs__away (normalizados)."""
     return f"{normalize_text(home)}__vs__{normalize_text(away)}"
 
+
 def equals_team(a: str, b: str) -> bool:
     """Compara nomes de times de forma normalizada."""
     return normalize_text(a) == normalize_text(b)
+
+
+def canonicalize_team(name: str, aliases: dict = None) -> str:
+    """
+    Retorna a forma canônica do nome do time usando aliases se existir.
+    Caso contrário, retorna o nome normalizado.
+    """
+    norm = normalize_text(name)
+    if aliases:
+        for canonical, alist in aliases.items():
+            if norm in [normalize_text(x) for x in alist]:
+                return canonical
+    return norm
+
 
 def load_aliases(path: str) -> dict:
     """Carrega dicionário de aliases de times a partir de um JSON."""
