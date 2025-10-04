@@ -33,4 +33,225 @@
   "Criciúma": ["Criciuma", "Criciúma EC", "Criciuma-SC", "Criciúma-SC"],
   "Paysandu": ["Paysandu SC", "Paysandu-PA", "Papão"],
   "Cuiabá": ["Cuiaba", "Cuiabá EC", "Cuiaba EC", "Cuiabá-MT"]
+{
+  "athletic club mg": "Athletic Club (MG)",
+  "athletic club (mg)": "Athletic Club (MG)",
+  "athletic mg": "Athletic Club (MG)",
+  "athletic": "Athletic Club (MG)",
+
+  "amazonas": "Amazonas FC",
+  "amazonas fc": "Amazonas FC",
+  "amazonas futebol clube": "Amazonas FC",
+
+  "coritiba": "Coritiba",
+  "coritiba fc": "Coritiba",
+  "cfc": "Coritiba",
+
+  "botafogo sp": "Botafogo-SP",
+  "botafogo-sp": "Botafogo-SP",
+  "botafogo ribeirao preto": "Botafogo-SP",
+  "botafogo ribeirão preto": "Botafogo-SP",
+  "botafogo de ribeirao preto": "Botafogo-SP",
+  "botafogo de ribeirão preto": "Botafogo-SP",
+
+  "crb": "CRB",
+  "clube de regatas brasil": "CRB",
+
+  "avai": "Avaí",
+  "avaí": "Avaí",
+  "avai fc": "Avaí",
+  "avaí fc": "Avaí",
+
+  "vitoria": "Vitória",
+  "vitória": "Vitória",
+  "ec vitoria": "Vitória",
+  "ec vitória": "Vitória",
+  "vitoria ba": "Vitória",
+
+  "ceara": "Ceará",
+  "ceará": "Ceará",
+  "ceara sc": "Ceará",
+  "ceará sc": "Ceará",
+
+  "fortaleza": "Fortaleza",
+  "fortaleza ec": "Fortaleza",
+
+  "sao paulo": "São Paulo",
+  "são paulo": "São Paulo",
+  "spfc": "São Paulo",
+  "sao paulo fc": "São Paulo",
+  "são paulo fc": "São Paulo",
+
+  "flamengo": "Flamengo",
+  "cr flamengo": "Flamengo",
+  "clube de regatas do flamengo": "Flamengo",
+
+  "cruzeiro": "Cruzeiro",
+  "cruzeiro ec": "Cruzeiro",
+
+  "paysandu": "Paysandu",
+  "paysandu sc": "Paysandu",
+  "paysandu sport club": "Paysandu",
+
+  "cuiaba": "Cuiabá",
+  "cuiabá": "Cuiabá",
+  "cuiaba ec": "Cuiabá",
+  "cuiabá ec": "Cuiabá",
+
+  "vila nova": "Vila Nova",
+  "vila nova fc": "Vila Nova",
+
+  "criciuma": "Criciúma",
+  "criciúma": "Criciúma",
+  "criciuma ec": "Criciúma",
+  "criciúma ec": "Criciúma",
+
+  "goias": "Goiás",
+  "goiás": "Goiás",
+  "goias ec": "Goiás",
+  "goiás ec": "Goiás",
+
+  "atletico goianiense": "Atlético Goianiense",
+  "atlético goianiense": "Atlético Goianiense",
+  "atletico-go": "Atlético Goianiense",
+  "acg": "Atlético Goianiense",
+
+  "athletico paranaense": "Athletico Paranaense",
+  "atlético paranaense": "Athletico Paranaense",
+  "atletico paranaense": "Athletico Paranaense",
+  "athletico-pr": "Athletico Paranaense",
+  "cap": "Athletico Paranaense",
+
+  "atletico mineiro": "Atlético Mineiro",
+  "atlético mineiro": "Atlético Mineiro",
+  "atletico-mg": "Atlético Mineiro",
+  "cam": "Atlético Mineiro",
+
+  "america mg": "América Mineiro",
+  "américa mg": "América Mineiro",
+  "america mineiro": "América Mineiro",
+  "américa mineiro": "América Mineiro",
+
+  "bahia": "Bahia",
+  "ec bahia": "Bahia",
+
+  "gremio": "Grêmio",
+  "grêmio": "Grêmio",
+  "gremio fbpa": "Grêmio",
+
+  "internacional": "Internacional",
+  "sc internacional": "Internacional",
+
+  "fluminense": "Fluminense",
+  "fluminense fc": "Fluminense",
+
+  "vasco": "Vasco da Gama",
+  "vasco da gama": "Vasco da Gama",
+  "cr vasco da gama": "Vasco da Gama",
+
+  "botafogo": "Botafogo",
+  "botafogo rj": "Botafogo",
+  "botafogo de futebol e regatas": "Botafogo",
+
+  "bragantino": "Red Bull Bragantino",
+  "rb bragantino": "Red Bull Bragantino",
+  "red bull bragantino": "Red Bull Bragantino",
+
+  "juventude": "Juventude",
+  "ec juventude": "Juventude",
+
+  "santos": "Santos",
+  "santos fc": "Santos",
+
+  "palmeiras": "Palmeiras",
+  "se palmeiras": "Palmeiras",
+
+  "sport": "Sport Recife",
+  "sport recife": "Sport Recife",
+  "sport club do recife": "Sport Recife",
+
+  "chapecoense": "Chapecoense",
+  "chapecoense-sc": "Chapecoense",
+  "a chapecoense": "Chapecoense",
+
+  "sampaio correa": "Sampaio Corrêa",
+  "sampaio corrêa": "Sampaio Corrêa",
+
+  "ponte preta": "Ponte Preta",
+  "aa ponte preta": "Ponte Preta",
+
+  "ituano": "Ituano",
+  "ituano fc": "Ituano",
+
+  "novorizontino": "Novorizontino",
+  "gremio novorizontino": "Novorizontino",
+  "grêmio novorizontino": "Novorizontino",
+
+  "mirassol": "Mirassol",
+  "mirassol fc": "Mirassol",
+
+  "londrina": "Londrina",
+  "londrina ec": "Londrina",
+
+  "tombense": "Tombense",
+  "tombense fc": "Tombense",
+
+  "abc": "ABC",
+  "abc fc": "ABC",
+
+  "guarani": "Guarani",
+  "guarani campinas": "Guarani",
+
+  "nautico": "Náutico",
+  "náutico": "Náutico",
+  "clube nautico capibaribe": "Náutico",
+  "clube náutico capibaribe": "Náutico",
+
+  "csa": "CSA",
+  "centro esportivo alagoano": "CSA",
+
+  "remo": "Remo",
+  "clube do remo": "Remo",
+
+  "operario": "Operário",
+  "operário": "Operário",
+  "operario ferroviario": "Operário",
+  "operário ferroviário": "Operário",
+
+  "ferroviaria": "Ferroviária",
+  "ferroviária": "Ferroviária",
+
+  "y piranga": "Ypiranga",
+  "ypiranga": "Ypiranga",
+
+  "brusque": "Brusque",
+  "brusque fc": "Brusque",
+
+  "botafogo pb": "Botafogo-PB",
+  "botafogo-pb": "Botafogo-PB",
+
+  "ceilandia": "Ceilândia",
+  "ceilândia": "Ceilândia",
+
+  "confianca": "Confiança",
+  "confiança": "Confiança",
+
+  "manaus": "Manaus",
+  "manaus fc": "Manaus",
+
+  "paissandu": "Paysandu",
+  "parana": "Paraná",
+  "paraná": "Paraná",
+
+  "caxias": "Caxias",
+  "ser caxias": "Caxias",
+
+  "sao bernardo": "São Bernardo",
+  "são bernardo": "São Bernardo",
+
+  "volta redonda": "Volta Redonda",
+  "volta redonda fc": "Volta Redonda",
+
+  "bahia de feira": "Bahia de Feira",
+  "bahia de feira de santana": "Bahia de Feira"
 }
