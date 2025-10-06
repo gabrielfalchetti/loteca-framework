@@ -1,75 +1,45 @@
-name: end2end-odds-news-ml
+name: End2End - Odds + News + ML
 
 on:
   workflow_dispatch:
     inputs:
-      REGIONS:
-        description: "Regiões das odds (TheOddsAPI)"
-        required: false
-        default: "uk,eu,us,au"
-        type: string
-      BANKROLL:
-        description: "Bankroll para Kelly"
-        required: false
-        default: "1000"
-        type: string
-      KELLY_FRACTION:
-        description: "Fração de Kelly"
-        required: false
-        default: "0.5"
-        type: string
-      KELLY_CAP:
-        description: "Cap de Kelly por aposta (0-1)"
-        required: false
-        default: "0.1"
-        type: string
-      ROUND_TO:
-        description: "Arredondamento do stake (ex: 1)"
-        required: false
-        default: "1"
-        type: string
-      KELLY_TOP_N:
-        description: "Limite de picks por Kelly"
-        required: false
-        default: "14"
-        type: string
-      APIFOOT_LEAGUE_IDS:
-        description: "IDs de ligas API-Football (ex: 71,72). Deixe vazio p/ pular."
-        required: false
-        default: ""
-        type: string
-      RESULTS_CSV:
-        description: "CSV de resultados (opcional) p/ calibração pós-jogo. Ex: data/in/results_1214.csv"
-        required: false
-        default: ""
-        type: string
+      SEASON:
+        description: "Ano da temporada"
+        default: "2025"
+        required: true
 
 jobs:
   end2end:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
-      # OUT_DIR único por run (sem “rodada”): simples e estável
-      OUT_DIR: data/out/${{ github.run_id }}
-      SEASON: "2025"
-      REGIONS: ${{ inputs.REGIONS }}
-      BANKROLL: ${{ inputs.BANKROLL }}
-      KELLY_FRACTION: ${{ inputs.KELLY_FRACTION }}
-      KELLY_CAP: ${{ inputs.KELLY_CAP }}
-      ROUND_TO: ${{ inputs.ROUND_TO }}
-      KELLY_TOP_N: ${{ inputs.KELLY_TOP_N }}
-      APIFOOT_LEAGUE_IDS: ${{ inputs.APIFOOT_LEAGUE_IDS }}
-      DEBUG: "true"
-      # Segredos
+      # ==== Parâmetros do modelo/ban banca ====
+      SEASON: ${{ inputs.SEASON }}
+      REGIONS: uk,eu,us,au
+      BANKROLL: 1000
+      KELLY_FRACTION: 0.5
+      KELLY_CAP: 0.1
+      ROUND_TO: 1
+      KELLY_TOP_N: 14
+      DEBUG: true
+
+      # ==== Segredos/APIs (defina em Settings > Secrets and variables > Actions) ====
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
 
+      # ==== Ligas do API-Football (RapidAPI) — ajuste à sua realidade ====
+      # 71 = Brasil Série A, 72 = Série B (exemplo)
+      APIFOOT_LEAGUE_IDS: "71,72"
+
+      # ==== Saída desta execução (um diretório único por run) ====
+      OUT_DIR: data/out/${{ github.run_id }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -78,42 +48,70 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Export PYTHONPATH
-        run: echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
-
-      - name: Verificar entrada simplificada (matches_source)
-        run: |
-          set -e
-          FILE="data/in/matches_source.csv"
-          if [ ! -f "$FILE" ]; then
-            echo "::error::Arquivo $FILE não encontrado. Crie-o com colunas: home,away"
-            exit 2
-          fi
-          # checa colunas mínimas
+          # checagem rápida
           python - << 'PY'
-import sys, pandas as pd
-df = pd.read_csv("data/in/matches_source.csv")
-need = {"home","away"}
-if not need.issubset(df.columns):
-    sys.exit("coluna(s) ausente(s) em data/in/matches_source.csv: " + str(need - set(df.columns)))
-print("[check] matches_source.csv OK ->", len(df), "linhas")
+import importlib, sys
+mods = ["requests","pandas","numpy","PyYAML","scikit_learn","tqdm"]
+miss = [m for m in mods if importlib.util.find_spec(m) is None]
+if miss:
+    sys.exit(f"Dependências ausentes: {miss}")
+print("Dependências OK.")
 PY
-          echo "Entrada OK: data/in/matches_source.csv"
-          echo "OUT_DIR=${OUT_DIR}"
+
+      - name: Config env (PYTHONPATH, OUT_DIR)
+        run: |
+          echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
           mkdir -p "${OUT_DIR}"
 
-      - name: Login W&B (opcional)
-        if: env.WANDB_API_KEY != ''
+      - name: Preparar matches_source (aceita formato simples)
         run: |
           set -e
+          SIMPLE="data/in/matches_source.csv"
+          if [ -f "$SIMPLE" ]; then
+            echo "Encontrado $SIMPLE"
+            # muitos scripts esperam data/in/<rodada>/matches_source.csv;
+            # copiamos o simples para o OUT_DIR, mantendo compatibilidade:
+            mkdir -p "data/in/${OUT_DIR}"
+            cp "$SIMPLE" "data/in/${OUT_DIR}/matches_source.csv"
+          fi
+
+          FILE="data/in/${OUT_DIR}/matches_source.csv"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Arquivo $FILE não encontrado. Crie data/in/matches_source.csv com colunas: home,away,match_key (opcional)."
+            exit 2
+          fi
+          # validação mínima de header
           python - << 'PY'
-import os, wandb
+import sys, pandas as pd
+f = sys.argv[1]
+df = pd.read_csv(f)
+need = {"home","away"}
+missing = [c for c in need if c not in df.columns]
+if missing:
+    sys.exit(f"Header inválido em {f}. Faltando colunas: {missing}")
+print("matches_source OK:", f)
+PY
+          echo "Entrada OK: $FILE"
+
+        shell: bash
+
+      - name: Login W&B (opcional)
+        run: |
+          if [ -n "${WANDB_API_KEY}" ]; then
+            python - << 'PY'
+import os, subprocess
+key=os.environ.get("WANDB_API_KEY","")
+if key:
+    subprocess.run(["wandb","login",key], check=True)
 print("[wandb] login executado")
 PY
+          else
+            echo "[wandb] sem chave — pulando"
+          fi
 
-      # ======= ODDS (TheOddsAPI) =======
-      - name: Ingest odds (TheOddsAPI)
+      # ====================== INGEST ======================
+
+      - name: Ingest odds (TheOddsAPI) SAFE
         run: |
           set -e
           python scripts/ingest_odds_theoddsapi_safe.py \
@@ -121,135 +119,89 @@ PY
             --regions "${REGIONS}" \
             --debug
 
-      # ======= ODDS (API-Football via RapidAPI) OPCIONAL =======
-      - name: Ingest odds (API-Football via RapidAPI) - OPCIONAL
+      - name: Ingest odds (API-Football via RapidAPI) SAFE
+        env:
+          # usa env APIFOOT_LEAGUE_IDS
+          APIFOOT_LEAGUE_IDS: ${{ env.APIFOOT_LEAGUE_IDS }}
         run: |
           set -e
-          if [ -n "${X_RAPIDAPI_KEY}" ] && [ -n "${APIFOOT_LEAGUE_IDS}" ]; then
-            echo "[apifootball-safe] Executando ingest..."
-            python -m scripts.ingest_odds_apifootball_rapidapi \
-              --rodada "${OUT_DIR}" \
-              --season "${SEASON}" \
-              --window 2 \
-              --aliases data/aliases_br.json \
-              --leagues "${APIFOOT_LEAGUE_IDS}" \
-              --debug || true
-          else
-            echo "[apifootball-safe] Sem chave ou ligas — pulando."
-          fi
+          python -m scripts.ingest_odds_apifootball_rapidapi \
+            --rodada "${OUT_DIR}" \
+            --season "${SEASON}" \
+            --window 2 \
+            --aliases data/aliases_br.json \
+            --leagues "${APIFOOT_LEAGUE_IDS}" \
+            --debug || echo "[apifootball-safe] prosseguindo mesmo se vazio/403"
 
-      # ======= CONSENSO =======
-      - name: Consensus odds (safe)
+      - name: Build consensus odds SAFE
         run: |
           set -e
-          if python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('scripts.consensus_odds_safe') else 1)"; then
+          if python -c "import importlib.util as u; import sys; sys.exit(0 if u.find_spec('scripts.consensus_odds_safe') else 1)"; then
             python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}"
           else
             echo "[consensus-safe] ERRO: módulo scripts.consensus_odds_safe não encontrado."
             exit 10
           fi
 
-      # ======= PREVISÃO A PARTIR DAS ODDS =======
+      # ====================== PREVISÃO ======================
+
       - name: Predict from market odds
         run: |
           set -e
-          if [ -f "scripts/predict_from_odds.py" ]; then
-            python scripts/predict_from_odds.py --rodada "${OUT_DIR}" --debug
+          python scripts/predict_from_odds.py --rodada "${OUT_DIR}" --debug
+
+      # (se você tiver xG/univariado/bivariado/calibração/stacked, mantenha aqui)
+      - name: Predict xG (uni/bi/calib/stack) — opcional
+        continue-on-error: true
+        run: |
+          set -e
+          for f in scripts/predict_xg_uni.py scripts/predict_xg_bi.py scripts/calibrate_predictions.py scripts/stack_predictions.py; do
+            if [ -f "$f" ]; then
+              python "$f" --rodada "${OUT_DIR}" --debug || true
+            fi
+          done
+
+      # ====================== NEWS / INJURIES ======================
+
+      - name: News ingest (opcional)
+        continue-on-error: true
+        run: |
+          if [ -f "scripts/news_ingest_safe.py" ]; then
+            python scripts/news_ingest_safe.py || true
           else
-            echo "[predict] ERRO: scripts/predict_from_odds.py não encontrado."
-            exit 11
+            echo "[news-safe] ausente — pulando"
           fi
 
-      # ======= CARTÃO LOTECA =======
+      - name: Injuries ingest (opcional)
+        continue-on-error: true
+        run: |
+          if [ -f "scripts/injuries_apifootball_safe.py" ]; then
+            python scripts/injuries_apifootball_safe.py || true
+          else
+            echo "[injuries-safe] ausente — pulando"
+          fi
+
+      # ====================== CARTÃO / KELLY ======================
+
       - name: Build Cartão Loteca
         run: |
           set -e
-          if [ -f "scripts/build_cartao.py" ]; then
-            # exige predictions_market.csv
-            if [ ! -s "${OUT_DIR}/predictions_market.csv" ]; then
-              echo "[cartao] ERRO: predictions_market.csv ausente ou vazio."
-              ls -l "${OUT_DIR}" || true
-              exit 12
-            fi
-            python scripts/build_cartao.py --rodada "${OUT_DIR}"
-          else
-            echo "[cartao] ERRO: scripts/build_cartao.py não encontrado."
-            exit 12
-          fi
+          python scripts/build_cartao.py --rodada "${OUT_DIR}"
 
-      # ======= KELLY =======
-      - name: Kelly stakes (publicação)
+      - name: Publicar Kelly stakes
         run: |
           set -e
-          if [ -f "scripts/publish_kelly.py" ]; then
-            python scripts/publish_kelly.py --rodada "${OUT_DIR}" --debug
-          else
-            echo "[kelly] AVISO: scripts/publish_kelly.py não encontrado — pulando Kelly."
-          fi
+          python scripts/publish_kelly.py --rodada "${OUT_DIR}" --debug
 
-      # ======= ARTIFACTOS =======
-      - name: Upload artifacts (pré-jogo)
+      # ====================== UPLOAD ======================
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: loteca_full_${{ github.run_id }}
           path: |
-            ${{ env.OUT_DIR }}/odds_theoddsapi.csv
-            ${{ env.OUT_DIR }}/unmatched_theoddsapi.csv
-            ${{ env.OUT_DIR }}/odds_apifootball.csv
-            ${{ env.OUT_DIR }}/unmatched_apifootball.csv
-            ${{ env.OUT_DIR }}/odds_consensus.csv
-            ${{ env.OUT_DIR }}/predictions_market.csv
-            ${{ env.OUT_DIR }}/news.csv
-            ${{ env.OUT_DIR }}/injuries.csv
-            ${{ env.OUT_DIR }}/loteca_cartao.txt
-            ${{ env.OUT_DIR }}/kelly_stakes.csv
-            ${{ env.OUT_DIR }}/debug/**
+            ${{ env.OUT_DIR }}/**
+            data/out/**/odds_*.csv
+            data/in/${{ env.OUT_DIR }}/matches_source.csv
           if-no-files-found: warn
-
-  postgame:
-    needs: end2end
-    if: ${{ inputs.RESULTS_CSV != '' }}
-    runs-on: ubuntu-latest
-    env:
-      OUT_DIR: data/out/${{ github.run_id }}
-      RESULTS: ${{ inputs.RESULTS_CSV }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Export PYTHONPATH
-        run: echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
-
-      - name: Verificar arquivos de entrada do pós-jogo
-        run: |
-          set -e
-          test -s "${OUT_DIR}/predictions_market.csv" || (echo "::error::${OUT_DIR}/predictions_market.csv ausente"; exit 2)
-          test -s "${RESULTS}" || (echo "::error::${RESULTS} ausente"; exit 2)
-          echo "[postgame] OK entradas: ${OUT_DIR} e ${RESULTS}"
-
-      - name: Calibração pós-jogo (aplica k_home/k_draw/k_away)
-        run: |
-          set -e
-          python scripts/postgame_update.py --out-dir "${OUT_DIR}" --results "${RESULTS}" --debug
-
-      - name: Upload artifacts (pós-jogo calibrado)
-        uses: actions/upload-artifact@v4
-        with:
-          name: postgame_calibrated_${{ github.run_id }}
-          path: |
-            ${{ env.OUT_DIR }}/predictions_calibrated.csv
-            ${{ env.OUT_DIR }}/postgame_report.txt
-            ${{ env.OUT_DIR }}/postgame_report.json
-            data/model/model_params.yaml
-          if-no-files-found: error
+          overwrite: false
