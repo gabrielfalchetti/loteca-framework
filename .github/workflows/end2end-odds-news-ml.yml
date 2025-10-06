@@ -54,7 +54,7 @@ jobs:
           echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
           mkdir -p "${OUT_DIR}"
 
-      - name: "Prepare matches_source (aceita formato simples)"
+      - name: "Prepare matches_source (formato simples)"
         run: |
           set -e
           SIMPLE="data/in/matches_source.csv"
@@ -72,17 +72,10 @@ jobs:
             exit 2
           fi
 
-          python - <<'PY'
-import sys, pandas as pd
-f = sys.argv[1] if len(sys.argv)>1 else "${DEST_FILE}"
-df = pd.read_csv(f)
-need = {"home","away"}
-missing = [c for c in need if c not in df.columns]
-if missing:
-    raise SystemExit(f"Header inválido em {f}. Faltando: {missing}")
-print("matches_source OK:", f)
-PY
-          echo "Entrada OK: ${DEST_FILE}"
+          python -c "import sys,pandas as pd; f='${DEST_FILE}'; df=pd.read_csv(f); need={'home','away'}; miss=[c for c in need if c not in df.columns]; 
+if miss: 
+  raise SystemExit(f'Header inválido em {f}. Faltando: {miss}')
+print('matches_source OK:', f)"
 
       - name: "W&B login (opcional)"
         run: |
@@ -112,15 +105,12 @@ PY
 
       - name: "Build consensus odds (SAFE)"
         run: |
-          python -m scripts.consensus_odds_safe \
-            --rodada "${OUT_DIR}"
+          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}"
 
       # ================= PREVISÃO =================
       - name: "Predict from market odds"
         run: |
-          python scripts/predict_from_odds.py \
-            --rodada "${OUT_DIR}" \
-            --debug
+          python scripts/predict_from_odds.py --rodada "${OUT_DIR}" --debug
 
       - name: "xG/Calib/Stack (opcional)"
         continue-on-error: true
