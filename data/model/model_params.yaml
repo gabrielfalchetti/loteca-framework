@@ -1,0 +1,7 @@
+version: "4.3.RC1+"
+calibration:
+  k_home: 1.0
+  k_draw: 1.0
+  k_away: 1.0
+  updated_at: null
+  note: "default; será atualizado pelo postgame_update.py"
