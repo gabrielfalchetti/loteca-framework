@@ -1,286 +1,215 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Ingeste odds da TheOddsAPI e casa com os jogos do arquivo de entrada
-fixo: data/in/matches_source.csv
-
-Saídas (em OUT_DIR passado por --rodada):
-- odds_theoddsapi.csv
-- unmatched_theoddsapi.csv
-
-Uso:
-  python scripts/ingest_odds_theoddsapi_safe.py \
-    --rodada data/out/<id_do_run> \
-    --regions "uk,eu,us,au" \
-    [--debug]
-"""
-
-import argparse
-import csv
-import json
 import os
 import sys
-from typing import Dict, List, Tuple, Optional
+import csv
+import json
+import time
+import argparse
+from typing import List, Dict, Tuple
 
 import requests
 import pandas as pd
+from rapidfuzz import fuzz, process
 
-# Imports utilitários
-from scripts.text_normalizer import (
-    load_aliases,
-    canonicalize_team,
-    make_match_key,
-    equals_team,
-    normalize_string,
-)
+# ---------- Utilidades ----------
+def dbg(msg: str, enable: bool):
+    if enable:
+        print(f"[theoddsapi-safe][DEBUG] {msg}", flush=True)
 
-INPUT_FILE = "data/in/matches_source.csv"  # ENTRADA FIXA
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
 
-# Endpoints TheOddsAPI
-THEODDS_ENDPOINT = "https://api.the-odds-api.com/v4/sports/{sport}/odds"
+def norm(s: str) -> str:
+    return (s or "").strip().lower()
 
-SPORTS = [
-    "soccer_brazil_campeonato",  # Série A
-    "soccer_brazil_serie_b",     # Série B
-]
+def make_match_key(home: str, away: str) -> str:
+    return f"{norm(home)}__vs__{norm(away)}"
 
-# Colunas esperadas do matches_source.csv
-REQUIRED_COLS = ["home", "away"]  # "league" e "date" podem existir, mas não são exigidas
-
-
-def debug_print(enabled: bool, *args):
-    if enabled:
-        print(*args, flush=True)
-
-
-def read_source_matches(path: str, debug: bool = False) -> pd.DataFrame:
-    if not os.path.isfile(path):
-        print(f"[theoddsapi-safe] ERRO: {path} não encontrado", flush=True)
+def read_matches_source(in_path: str, debug: bool=False) -> pd.DataFrame:
+    if not os.path.isfile(in_path):
+        print(f"[theoddsapi-safe] ERRO: arquivo não encontrado: {in_path}", flush=True)
         sys.exit(2)
 
-    df = pd.read_csv(path)
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    df = pd.read_csv(in_path)
+    # Aceita o formato simples (home,away). Se vier outro, acusa.
+    required = {"home", "away"}
+    missing = [c for c in required if c not in df.columns]
     if missing:
-        print(f"[theoddsapi-safe] ERRO: coluna(s) ausente(s) em {path}: {', '.join(missing)}", flush=True)
+        print(f"[theoddsapi-safe] ERRO: coluna(s) ausente(s) em {in_path}: {', '.join(missing)}", flush=True)
         sys.exit(2)
 
-    # Gera match_key se não existir
-    if "match_key" not in df.columns:
-        df["match_key"] = df.apply(lambda r: make_match_key(str(r["home"]), str(r["away"])), axis=1)
+    # Cria match_key
+    df["match_key"] = df.apply(lambda r: make_match_key(r["home"], r["away"]), axis=1)
+    # Canoniza auxiliares
+    df["home_n"] = df["home"].map(norm)
+    df["away_n"] = df["away"].map(norm)
+    dbg(f"matches_source lidas: {len(df)}", debug)
+    return df[["match_key", "home", "away", "home_n", "away_n"]]
 
-    # Renomeia para padrão interno
-    df = df.rename(columns={"home": "team_home", "away": "team_away"})
-    # Colunas ordenadas
-    cols = ["match_key", "team_home", "team_away"] + [c for c in df.columns if c not in {"match_key", "team_home", "team_away"}]
-    df = df[cols]
-    debug_print(debug, f"[theoddsapi-safe][DEBUG] source rows: {len(df)}")
-    return df
+def get_sport_keys_from_env() -> List[str]:
+    env_val = os.getenv("ODDS_SPORTS", "").strip()
+    if not env_val:
+        # Fallback (Brasil – antigo comportamento). Mas recomendamos setar ODDS_SPORTS no workflow.
+        return ["soccer_brazil_campeonato", "soccer_brazil_serie_b"]
+    return [s.strip() for s in env_val.split(",") if s.strip()]
 
-
-def fetch_odds_for_sport(api_key: str, sport: str, regions: str, debug: bool = False) -> List[dict]:
-    params = {
-        "apiKey": api_key,
-        "regions": regions,
-        "markets": "h2h",
-    }
-    url = THEODDS_ENDPOINT.format(sport=sport)
-    debug_print(debug, f"[theoddsapi-safe][DEBUG] GET {url} {params}")
+def fetch_odds_for_sport(api_key: str, sport_key: str, regions: str, debug: bool=False) -> List[Dict]:
+    base = "https://api.the-odds-api.com/v4/sports"
+    url = f"{base}/{sport_key}/odds"
+    params = {"apiKey": api_key, "regions": regions, "markets": "h2h"}
+    dbg(f"GET {url} {params}", debug)
     r = requests.get(url, params=params, timeout=30)
+    if r.status_code == 404:
+        # esporte não disponível (TheOddsAPI retorna 404 para sport_key desconhecida)
+        dbg(f"404 para {sport_key} — ignorando", debug)
+        return []
     r.raise_for_status()
-    data = r.json()
-    return data if isinstance(data, list) else []
+    return r.json()
 
-
-def flatten_theodds_events(raw_events: List[dict]) -> List[dict]:
-    """
-    Converte resposta da TheOddsAPI em linhas simplificadas:
-      {
-        "team_home": ...,
-        "team_away": ...,
-        "odds_home": float|None,
-        "odds_draw": float|None,
-        "odds_away": float|None
-      }
-    OBS: A TheOddsAPI não marca home/away no objeto "bookmakers". Usaremos "home_team" do evento.
-    """
-    rows = []
-    for ev in raw_events:
-        home = ev.get("home_team", "")
-        away = ev.get("away_team", "")
-
-        # Pega PRIMEIRO bookmaker disponível com market h2h
-        odds_home = odds_draw = odds_away = None
+def explode_events(raw: List[Dict]) -> pd.DataFrame:
+    # Converte a resposta da TheOddsAPI em linhas (home, away e odds)
+    records = []
+    for ev in raw:
         try:
-            books = ev.get("bookmakers", [])
-            if books:
-                mkts = books[0].get("markets", [])
-                for m in mkts:
-                    if m.get("key") == "h2h":
-                        outcomes = m.get("outcomes", [])
-                        # outcomes: [{name: "Draw"/team, price: ...}, ...]
-                        for out in outcomes:
-                            name = out.get("name", "")
-                            price = out.get("price")
-                            if not price:
-                                continue
-                            if name.lower() in {"draw", "empate"}:
-                                odds_draw = float(price)
-                            elif normalize_string(name) == normalize_string(home):
-                                odds_home = float(price)
-                            elif normalize_string(name) == normalize_string(away):
-                                odds_away = float(price)
+            teams = ev.get("teams", [])
+            home = ev.get("home_team", "")
+            # TheOddsAPI nem sempre marca home_team; se faltar, tentamos inferir
+            if not home and len(teams) == 2:
+                home = teams[0]
+            away = ""
+            if len(teams) == 2:
+                away = teams[1] if teams[0] == home else teams[0]
+
+            # odds H2H: buscamos melhor média entre os books disponíveis
+            o_home, o_draw, o_away = None, None, None
+            for bk in ev.get("bookmakers", []):
+                for mk in bk.get("markets", []):
+                    if mk.get("key") == "h2h":
+                        sel = mk.get("outcomes", [])
+                        # outcomes podem vir em qualquer ordem
+                        for s in sel:
+                            if norm(s.get("name")) in (norm(home), "home", "1"):
+                                o_home = s.get("price", o_home)
+                            elif norm(s.get("name")) in (norm(away), "away", "2"):
+                                o_away = s.get("price", o_away)
+                            elif norm(s.get("name")) in ("draw", "empate", "x"):
+                                o_draw = s.get("price", o_draw)
+            if home and away and (o_home or o_away or o_draw):
+                records.append({
+                    "team_home_api": home,
+                    "team_away_api": away,
+                    "odds_home": o_home,
+                    "odds_draw": o_draw,
+                    "odds_away": o_away,
+                })
         except Exception:
-            pass
+            continue
+    return pd.DataFrame.from_records(records)
 
-        rows.append(
-            {
-                "team_home": home or "",
-                "team_away": away or "",
-                "odds_home": odds_home,
-                "odds_draw": odds_draw,
-                "odds_away": odds_away,
-            }
-        )
-    return rows
+def fuzzy_match(src: pd.DataFrame, ev: pd.DataFrame, debug: bool=False) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if ev.empty:
+        return pd.DataFrame(columns=[
+            "match_key","team_home","team_away","odds_home","odds_draw","odds_away"
+        ]), src.copy()
 
+    # Listas normalizadas do source
+    pairs = src[["match_key", "home", "away", "home_n", "away_n"]].to_dict("records")
 
-def match_events_to_source(events_df: pd.DataFrame, src_df: pd.DataFrame, aliases_path: Optional[str], debug: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    aliases = load_aliases(aliases_path)
+    matched_rows = []
+    used_keys = set()
 
-    # prepara lista de linhas válidas (eventos com ao menos UMA odd numérica)
-    valid = events_df[
-        (events_df["odds_home"].apply(lambda x: isinstance(x, (int, float)))) |
-        (events_df["odds_draw"].apply(lambda x: isinstance(x, (int, float)))) |
-        (events_df["odds_away"].apply(lambda x: isinstance(x, (int, float))))
-    ].copy()
+    for _, row in ev.iterrows():
+        h_api = row["team_home_api"]
+        a_api = row["team_away_api"]
+        h_n, a_n = norm(h_api), norm(a_api)
 
-    if valid.empty:
-        debug_print(debug, "[theoddsapi-safe][DEBUG] nenhum evento com odds numéricas -> 0 válidos.")
-        matched = src_df.iloc[0:0].copy()
-        matched[["odds_home", "odds_draw", "odds_away"]] = None
-        return matched, src_df.copy()
+        # Melhor par source por soma das similaridades
+        best = None
+        best_score = -1
+        for p in pairs:
+            # sim entre home_api vs home_src e away_api vs away_src
+            s1 = fuzz.token_set_ratio(h_n, p["home_n"])
+            s2 = fuzz.token_set_ratio(a_n, p["away_n"])
+            score = (s1 + s2) / 2
+            if score > best_score:
+                best_score = score
+                best = p
 
-    # cria match_key para eventos (normalizando nomes)
-    valid["match_key"] = valid.apply(
-        lambda r: make_match_key(
-            canonicalize_team(str(r["team_home"]), aliases),
-            canonicalize_team(str(r["team_away"]), aliases),
-        ),
-        axis=1,
-    )
+        if best and best_score >= 80:  # limiar razoável
+            mk = best["match_key"]
+            if mk not in used_keys:
+                matched_rows.append({
+                    "match_key": mk,
+                    "team_home": best["home"],
+                    "team_away": best["away"],
+                    "odds_home": row.get("odds_home"),
+                    "odds_draw": row.get("odds_draw"),
+                    "odds_away": row.get("odds_away"),
+                })
+                used_keys.add(mk)
 
-    # também canonicaliza a fonte para ficar comparável
-    src_df = src_df.copy()
-    src_df["__canon_home"] = src_df["team_home"].apply(lambda s: canonicalize_team(str(s), aliases))
-    src_df["__canon_away"] = src_df["team_away"].apply(lambda s: canonicalize_team(str(s), aliases))
-    src_df["__canon_key"] = src_df.apply(lambda r: make_match_key(r["__canon_home"], r["__canon_away"]), axis=1)
-
-    # join por match_key canônica
-    merged = src_df.merge(
-        valid[["match_key", "odds_home", "odds_draw", "odds_away"]],
-        left_on="__canon_key",
-        right_on="match_key",
-        how="left",
-        suffixes=("", "_ev"),
-    )
-
-    matched = merged[~merged["odds_home"].isna() | ~merged["odds_draw"].isna() | ~merged["odds_away"].isna()].copy()
-    unmatched = merged[merged["odds_home"].isna() & merged["odds_draw"].isna() & merged["odds_away"].isna()].copy()
-
-    # padroniza saída matched
-    if not matched.empty:
-        matched_out = matched[["team_home", "team_away"]].copy()
-        matched_out["match_key"] = matched["match_key"]  # o da direita (eventos) já é canônico
-        matched_out["odds_home"] = matched["odds_home"]
-        matched_out["odds_draw"] = matched["odds_draw"]
-        matched_out["odds_away"] = matched["odds_away"]
-    else:
-        matched_out = src_df.iloc[0:0][["team_home", "team_away"]].copy()
-        matched_out["match_key"] = []
-        matched_out["odds_home"] = []
-        matched_out["odds_draw"] = []
-        matched_out["odds_away"] = []
-
-    # saída unmatched: preserve colunas originais úteis
-    if not unmatched.empty:
-        unmatched_out = unmatched[["match_key", "team_home", "team_away"]].copy()
-    else:
-        unmatched_out = src_df.iloc[0:0][["match_key", "team_home", "team_away"]].copy()
-
-    if debug:
-        print(f"[theoddsapi-safe][DEBUG] src: {len(src_df)} | válidas(evts): {len(valid)} | matched: {len(matched_out)} | unmatched: {len(unmatched_out)}", flush=True)
-
-    return matched_out, unmatched_out
-
+    matched_df = pd.DataFrame(matched_rows)
+    unmatched_df = src[~src["match_key"].isin(list(used_keys))].copy()
+    dbg(f"casados={len(matched_df)}; sem_casar={len(unmatched_df)}", debug)
+    return matched_df, unmatched_df
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--rodada", required=True, help="Diretório de saída (OUT_DIR)")
-    parser.add_argument("--regions", default="uk,eu,us,au")
-    parser.add_argument("--aliases", default="data/aliases_br.json")
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True, help="Diretório de saída (OUT_DIR)")
+    ap.add_argument("--regions", default=os.getenv("REGIONS", "uk,eu,us,au"))
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
 
     out_dir = args.rodada
-    os.makedirs(out_dir, exist_ok=True)
+    ensure_dir(out_dir)
 
-    api_key = os.environ.get("THEODDS_API_KEY", "")
+    # Entrada fixa que combinamos
+    src_path = "data/in/matches_source.csv"
+    src_df = read_matches_source(src_path, debug=args.debug)
+
+    api_key = os.getenv("THEODDS_API_KEY", "").strip()
     if not api_key:
-        print("[theoddsapi-safe] SKIP: THEODDS_API_KEY ausente.", flush=True)
-        sys.exit(0)
+        print("[theoddsapi-safe] ERRO: THEODDS_API_KEY ausente.", flush=True)
+        sys.exit(2)
 
-    # 1) Carrega a FONTE (sempre fixa)
-    src_df = read_source_matches(INPUT_FILE, debug=args.debug)
+    sport_keys = get_sport_keys_from_env()
+    all_events = []
 
-    # 2) Coleta eventos das ligas desejadas
-    raw_all: List[dict] = []
-    for sport in SPORTS:
+    for sk in sport_keys:
         try:
-            chunk = fetch_odds_for_sport(api_key, sport, args.regions, debug=args.debug)
-            raw_all.extend(chunk)
+            raw = fetch_odds_for_sport(api_key, sk, args.regions, debug=args.debug)
+            if raw:
+                ev_df = explode_events(raw)
+                if not ev_df.empty:
+                    all_events.append(ev_df)
         except requests.HTTPError as e:
-            print(f"[theoddsapi-safe] AVISO: HTTP {e.response.status_code} em {sport} — seguindo.", flush=True)
+            print(f"[theoddsapi-safe] AVISO: {sk}: {e}", flush=True)
         except Exception as e:
-            print(f"[theoddsapi-safe] AVISO: erro '{e}' em {sport} — seguindo.", flush=True)
+            print(f"[theoddsapi-safe] AVISO: erro genérico em {sk}: {e}", flush=True)
 
-    # 3) Achata e filtra
-    flat_rows = flatten_theodds_events(raw_all)
-    events_df = pd.DataFrame(flat_rows)
-    if events_df.empty:
-        print(f"[theoddsapi-safe] AVISO: nenhum evento retornado pela API.", flush=True)
+    if all_events:
+        events_df = pd.concat(all_events, ignore_index=True)
+    else:
+        events_df = pd.DataFrame(columns=["team_home_api","team_away_api","odds_home","odds_draw","odds_away"])
 
-    # 4) Matching com a fonte
-    valid_df, unmatched_df = match_events_to_source(events_df, src_df, aliases_path=args.aliases, debug=args.debug)
+    valid_df, unmatched_df = fuzzy_match(src_df, events_df, debug=args.debug)
 
-    # 5) Escritas
+    # Garante saída, mesmo vazia (para não quebrar o consensus)
+    ensure_dir(out_dir)
     odds_path = os.path.join(out_dir, "odds_theoddsapi.csv")
     unmatched_path = os.path.join(out_dir, "unmatched_theoddsapi.csv")
 
-    # odds
-    with open(odds_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["team_home", "team_away", "match_key", "odds_home", "odds_draw", "odds_away"],
-        )
-        writer.writeheader()
-        for _, r in valid_df.iterrows():
-            writer.writerow(
-                {
-                    "team_home": r["team_home"],
-                    "team_away": r["team_away"],
-                    "match_key": r["match_key"],
-                    "odds_home": r.get("odds_home"),
-                    "odds_draw": r.get("odds_draw"),
-                    "odds_away": r.get("odds_away"),
-                }
-            )
+    valid_cols = ["match_key","team_home","team_away","odds_home","odds_draw","odds_away"]
+    valid_df = valid_df.reindex(columns=valid_cols)
+    valid_df.to_csv(odds_path, index=False)
 
-    # unmatched
+    unmatched_cols = ["match_key","home","away"]
+    unmatched_df = unmatched_df.reindex(columns=unmatched_cols)
     unmatched_df.to_csv(unmatched_path, index=False)
 
-    # 6) Logs finais
-    print(f"[theoddsapi-safe] linhas -> {json.dumps({os.path.basename(odds_path): len(valid_df), os.path.basename(unmatched_path): len(unmatched_df)})}", flush=True)
+    print(f"[theoddsapi-safe] linhas -> {json.dumps({os.path.basename(odds_path): int(valid_df.shape[0]), os.path.basename(unmatched_path): int(unmatched_df.shape[0])})}", flush=True)
 
 
 if __name__ == "__main__":
