@@ -4,29 +4,22 @@ on:
   workflow_dispatch: {}
 
 env:
-  # ===== Parâmetros base =====
   SEASON: "2025"
-  REGIONS: "uk,eu,us,au"     # regiões do TheOddsAPI
-  # (nota) Se seu script "ingest_odds_theoddsapi_safe.py" suportar --sports, adicione a flag na etapa de coleta.
+  REGIONS: "uk,eu,us,au"
   ODDS_SPORTS: "soccer_brazil_campeonato,soccer_brazil_serie_b,soccer_argentina_primera_division,soccer_argentina_primera_nacional"
 
-  # ===== Kelly =====
   BANKROLL: "1000"
   KELLY_FRACTION: "0.5"
   KELLY_CAP: "0.1"
   ROUND_TO: "1"
   KELLY_TOP_N: "14"
 
-  # ===== API-Football =====
-  # Defina X_RAPIDAPI_KEY nos Secrets. Para filtrar, liste ligas por ID separadas por vírgula.
   APIFOOT_LEAGUE_IDS: ""
 
 jobs:
   end2end:
     runs-on: ubuntu-latest
-
     steps:
-      # ---------------- Setup ----------------
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -41,7 +34,7 @@ jobs:
           pip install -r requirements.txt
           echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
 
-      - name: Definir RODADA_ID / OUT_DIR e validar entrada
+      - name: Definir RODADA_ID/OUT_DIR + validar e copiar entrada
         run: |
           set -e
           echo "RODADA_ID=${GITHUB_RUN_ID}" >> $GITHUB_ENV
@@ -53,18 +46,19 @@ jobs:
             echo "::error::Arquivo $SRC não encontrado. Crie com cabeçalho: home,away"
             exit 2
           fi
-          # sanity mínimo: colunas
           python - <<'PY'
-import sys, pandas as pd
-df = pd.read_csv("data/in/matches_source.csv")
-missing = [c for c in ["home","away"] if c not in df.columns]
-if missing:
-    print(f"::error::Faltam colunas no matches_source.csv: {missing}")
-    sys.exit(2)
-print("[entrada] matches_source.csv OK:", len(df), "linhas")
+import sys,pandas as pd
+df=pd.read_csv("data/in/matches_source.csv")
+miss=[c for c in["home","away"] if c not in df.columns]
+if miss:
+  print(f"::error::Faltam colunas no matches_source.csv: {miss}")
+  sys.exit(2)
+print("[entrada] matches_source.csv OK:",len(df),"linhas")
 PY
+          # 👇 NOVO: garantir que a rodada tenha o matches_source
+          cp "data/in/matches_source.csv" "data/out/${GITHUB_RUN_ID}/"
 
-      # ---------------- Coleta de ODDS ----------------
+      # ---------- COLETA ----------
       - name: Coletar odds (TheOddsAPI)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
@@ -77,7 +71,6 @@ PY
               echo "::error::scripts/ingest_odds_theoddsapi_safe.py não encontrado."
               exit 4
             fi
-            # Se seu script aceitar --sports, adicione a flag abaixo.
             python scripts/ingest_odds_theoddsapi_safe.py \
               --rodada "${OUT_DIR}" \
               --regions "${REGIONS}" \
@@ -94,7 +87,6 @@ PY
             echo "[apifootball] AVISO: X_RAPIDAPI_KEY não definida — pulando."
           else
             if [ -f "scripts/ingest_odds_apifootball_rapidapi.py" ]; then
-              # Tolerante a 403/limites/sem assinatura:
               python scripts/ingest_odds_apifootball_rapidapi.py \
                 --rodada "${OUT_DIR}" \
                 --season "${SEASON}" \
@@ -112,7 +104,7 @@ PY
           rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/"
           ls -la "data/out/${RODADA_ID}" || true
 
-      # ---------------- Dados auxiliares (opcionais) ----------------
+      # ---------- DADOS AUXILIARES (opcionais) ----------
       - name: Ingestão de News (opcional)
         env:
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
@@ -123,10 +115,10 @@ PY
           else
             if [ -f "scripts/news_ingest_safe.py" ]; then
               python scripts/news_ingest_safe.py --rodada "${OUT_DIR}" --debug || true
+              rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/" || true
             else
               echo "[news] AVISO: scripts/news_ingest_safe.py não encontrado — pulando."
             fi
-            rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/" || true
           fi
 
       - name: Ingestão de Injuries (API-Football, opcional)
@@ -139,10 +131,10 @@ PY
           else
             if [ -f "scripts/injuries_apifootball_safe.py" ]; then
               python scripts/injuries_apifootball_safe.py --rodada "${OUT_DIR}" --debug || true
+              rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/" || true
             else
               echo "[injuries] AVISO: scripts/injuries_apifootball_safe.py não encontrado — pulando."
             fi
-            rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/" || true
           fi
 
       - name: Ingestão de Weather (opcional)
@@ -155,10 +147,10 @@ PY
           else
             if [ -f "scripts/weather_ingest_safe.py" ]; then
               python scripts/weather_ingest_safe.py --rodada "${OUT_DIR}" --debug || true
+              rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/" || true
             else
               echo "[weather] AVISO: scripts/weather_ingest_safe.py não encontrado — pulando."
             fi
-            rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/" || true
           fi
 
       - name: Login no Weights & Biases (opcional)
@@ -170,14 +162,14 @@ PY
             echo "[wandb] AVISO: WANDB_API_KEY não definida — pulando login."
           else
             python - <<'PY'
-import os, subprocess
+import os,subprocess
 key=os.environ.get("WANDB_API_KEY","").strip()
 if key: subprocess.run(["bash","-lc", f'wandb login {key}'], check=False)
 print("[wandb] login executado (se a key estiver correta).")
 PY
           fi
 
-      # ---------------- Consenso & Predições ----------------
+      # ---------- CONSENSO & PREDIÇÕES ----------
       - name: Consolidar odds (consensus)
         run: |
           set -e
@@ -192,13 +184,11 @@ PY
           echo "==== predictions_market.csv (preview) ===="
           head -n 20 "data/out/${RODADA_ID}/predictions_market.csv" || true
 
-      # -------- Modelos adicionais (tolerantes) --------
       - name: xG Univariado (opcional)
         run: |
           set -e
           if [ -f "scripts/predict_xg_univariate.py" ]; then
             python scripts/predict_xg_univariate.py --rodada "data/out/${RODADA_ID}" --debug || true
-            echo "==== predictions_xg_uni.csv (preview) ===="
             head -n 10 "data/out/${RODADA_ID}/predictions_xg_uni.csv" || true
           else
             echo "[xg-uni] AVISO: scripts/predict_xg_univariate.py não encontrado — pulando."
@@ -209,7 +199,6 @@ PY
           set -e
           if [ -f "scripts/predict_xg_bivariate.py" ]; then
             python scripts/predict_xg_bivariate.py --rodada "data/out/${RODADA_ID}" --debug || true
-            echo "==== predictions_xg_bi.csv (preview) ===="
             head -n 10 "data/out/${RODADA_ID}/predictions_xg_bi.csv" || true
           else
             echo "[xg-bi] AVISO: scripts/predict_xg_bivariate.py não encontrado — pulando."
@@ -220,7 +209,6 @@ PY
           set -e
           if [ -f "scripts/calibrate_probs.py" ]; then
             python scripts/calibrate_probs.py --rodada "data/out/${RODADA_ID}" --debug || true
-            echo "==== predictions_calibrated.csv (preview) ===="
             head -n 10 "data/out/${RODADA_ID}/predictions_calibrated.csv" || true
           else
             echo "[calib] AVISO: scripts/calibrate_probs.py não encontrado — pulando."
@@ -231,14 +219,22 @@ PY
           set -e
           if [ -f "scripts/stack_predictions.py" ]; then
             python scripts/stack_predictions.py --rodada "data/out/${RODADA_ID}" --debug || true
-            echo "==== predictions_stacked.csv (preview) ===="
             head -n 10 "data/out/${RODADA_ID}/predictions_stacked.csv" || true
           else
             echo "[stack] AVISO: scripts/stack_predictions.py não encontrado — pulando."
           fi
 
-      # ---------------- Kelly & Cartão ----------------
-      - name: Publicar Kelly (usa stacked/calibrated/xg/market em fallback)
+      - name: Sanity check (opcional, não bloqueia)
+        run: |
+          set -e
+          if [ -f "scripts/sanity_reality_check.py" ]; then
+            python scripts/sanity_reality_check.py --rodada "data/out/${RODADA_ID}" --strict || true
+          else
+            echo "[reality] AVISO: scripts/sanity_reality_check.py não encontrado — pulando."
+          fi
+
+      # ---------- KELLY & CARTÃO ----------
+      - name: Publicar Kelly
         env:
           BANKROLL: ${{ env.BANKROLL }}
           KELLY_FRACTION: ${{ env.KELLY_FRACTION }}
@@ -248,7 +244,6 @@ PY
         run: |
           set -e
           python scripts/publish_kelly.py --rodada "data/out/${RODADA_ID}" --debug
-          echo "==== kelly_stakes.csv (preview) ===="
           head -n 30 "data/out/${RODADA_ID}/kelly_stakes.csv" || true
 
       - name: Gerar cartão da Loteca (após Kelly)
@@ -258,7 +253,6 @@ PY
           echo "==== loteca_cartao.txt ===="
           cat "data/out/${RODADA_ID}/loteca_cartao.txt" || true
 
-      # ---------------- Artefatos ----------------
       - name: Upload artefatos
         uses: actions/upload-artifact@v4
         with:
