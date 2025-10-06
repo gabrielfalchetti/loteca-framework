@@ -1,18 +1,24 @@
-name: End2End - Odds → Consenso → Predição → Kelly → Cartão
+name: End2End - Odds → Consenso → Predição → Kelly → Cartão (com APIs)
 
 on:
-  workflow_dispatch: {}   # executa manualmente, sem inputs
+  workflow_dispatch: {}
 
 env:
-  # Parâmetros do pipeline (ajuste se quiser)
+  # Parâmetros gerais
   SEASON: "2025"
-  REGIONS: "uk,eu,us,au"
+  REGIONS: "uk,eu,us,au"   # TheOddsAPI
   ODDS_SPORTS: "soccer_brazil_campeonato,soccer_brazil_serie_b,soccer_argentina_primera_division,soccer_argentina_primera_nacional"
+
+  # Kelly
   BANKROLL: "1000"
   KELLY_FRACTION: "0.5"
   KELLY_CAP: "0.1"
   ROUND_TO: "1"
   KELLY_TOP_N: "14"
+
+  # API-Football (defina no repositório em Secrets: X_RAPIDAPI_KEY)
+  # Se quiser filtrar por ligas, liste IDs separados por vírgula (ex: "71,72")
+  APIFOOT_LEAGUE_IDS: ""
 
 jobs:
   end2end:
@@ -32,17 +38,15 @@ jobs:
           pip install -r requirements.txt
           echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
 
-      - name: Preparar diretórios de saída
+      - name: Definir RODADA_ID e OUT_DIR + validar entrada
         id: prep
         shell: bash
         run: |
           set -e
-          # ID único desta execução
           echo "RODADA_ID=${GITHUB_RUN_ID}" >> $GITHUB_ENV
           echo "OUT_DIR=data/out/${GITHUB_RUN_ID}" >> $GITHUB_ENV
           mkdir -p "data/out/${GITHUB_RUN_ID}"
 
-          # Verifica entrada simples
           FILE_IN="data/in/matches_source.csv"
           if [ ! -f "$FILE_IN" ]; then
             echo "::error::Arquivo $FILE_IN não encontrado. Crie-o com as colunas: home,away"
@@ -50,28 +54,133 @@ jobs:
           fi
           echo "Entrada OK: $FILE_IN"
 
+      ######################################################################
+      # COLETA DE ODDS
+      ######################################################################
+
       - name: Coletar odds (TheOddsAPI)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -e
-          python scripts/ingest_odds_theoddsapi_safe.py \
-            --rodada "${OUT_DIR}" \
-            --regions "${REGIONS}" \
-            --sports "${ODDS_SPORTS}" \
-            --debug
+          if [ -z "${THEODDS_API_KEY}" ]; then
+            echo "[theoddsapi] AVISO: THEODDS_API_KEY não definida — pulando."
+          else
+            if [ ! -f "scripts/ingest_odds_theoddsapi_safe.py" ]; then
+              echo "::error::scripts/ingest_odds_theoddsapi_safe.py não encontrado."
+              exit 4
+            fi
+            python scripts/ingest_odds_theoddsapi_safe.py \
+              --rodada "${OUT_DIR}" \
+              --regions "${REGIONS}" \
+              --sports "${ODDS_SPORTS}" \
+              --debug
+          fi
           ls -la "${OUT_DIR}" || true
 
-      - name: Sincronizar OUT_DIR → data/out/$RODADA_ID
+      - name: Coletar odds/fixtures (API-Football via RapidAPI)
+        env:
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+        run: |
+          set -e
+          if [ -z "${X_RAPIDAPI_KEY}" ]; then
+            echo "[apifootball] AVISO: X_RAPIDAPI_KEY não definida — pulando."
+          else
+            if [ -f "scripts/ingest_odds_apifootball_rapidapi.py" ]; then
+              # O script já lida com 403/sem assinatura; não falhar o job.
+              python scripts/ingest_odds_apifootball_rapidapi.py \
+                --rodada "${OUT_DIR}" \
+                --season "${SEASON}" \
+                --leagues "${APIFOOT_LEAGUE_IDS}" \
+                --debug || true
+            else
+              echo "[apifootball] AVISO: scripts/ingest_odds_apifootball_rapidapi.py não encontrado — pulando."
+            fi
+          fi
+          ls -la "${OUT_DIR}" || true
+
+      - name: Sincronizar OUT_DIR → data/out/$RODADA_ID (para o consenso)
         run: |
           set -e
           rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/"
           ls -la "data/out/${RODADA_ID}" || true
 
+      ######################################################################
+      # DADOS AUXILIARES (opcionais) – não quebram o fluxo se ausentes
+      ######################################################################
+
+      - name: Ingestão de News (opcional)
+        env:
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+        run: |
+          set -e
+          if [ -z "${NEWSAPI_KEY}" ]; then
+            echo "[news] AVISO: NEWSAPI_KEY não definida — pulando."
+          else
+            if [ -f "scripts/news_ingest_safe.py" ]; then
+              python scripts/news_ingest_safe.py --rodada "${OUT_DIR}" --debug || true
+            else
+              echo "[news] AVISO: scripts/news_ingest_safe.py não encontrado — pulando."
+            fi
+            rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/" || true
+          fi
+
+      - name: Ingestão de Injuries (API-Football, opcional)
+        env:
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+        run: |
+          set -e
+          if [ -z "${X_RAPIDAPI_KEY}" ]; then
+            echo "[injuries] AVISO: X_RAPIDAPI_KEY não definida — pulando."
+          else
+            if [ -f "scripts/injuries_apifootball_safe.py" ]; then
+              python scripts/injuries_apifootball_safe.py --rodada "${OUT_DIR}" --debug || true
+            else
+              echo "[injuries] AVISO: scripts/injuries_apifootball_safe.py não encontrado — pulando."
+            fi
+            rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/" || true
+          fi
+
+      - name: Ingestão de Weather (opcional)
+        env:
+          WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+        run: |
+          set -e
+          if [ -z "${WEATHER_API_KEY}" ]; then
+            echo "[weather] AVISO: WEATHER_API_KEY não definida — pulando."
+          else
+            if [ -f "scripts/weather_ingest_safe.py" ]; then
+              python scripts/weather_ingest_safe.py --rodada "${OUT_DIR}" --debug || true
+            else
+              echo "[weather] AVISO: scripts/weather_ingest_safe.py não encontrado — pulando."
+            fi
+            rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/" || true
+          fi
+
+      - name: Login no Weights & Biases (opcional)
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: |
+          set -e
+          if [ -z "${WANDB_API_KEY}" ]; then
+            echo "[wandb] AVISO: WANDB_API_KEY não definida — pulando login."
+          else
+            python - <<'PY'
+import os, subprocess, json, pathlib
+key=os.environ.get("WANDB_API_KEY","").strip()
+if key:
+    subprocess.run(["bash","-lc", f'wandb login {key}'], check=False)
+print("[wandb] login executado (se a key estiver correta).")
+PY
+          fi
+
+      ######################################################################
+      # CONSENSO → PREDIÇÃO → KELLY → CARTÃO
+      ######################################################################
+
       - name: Consolidar odds (consensus)
         run: |
           set -e
-          # O módulo de consenso espera SÓ o ID (ele lê data/out/<ID>/...)
           python -m scripts.consensus_odds_safe --rodada "${RODADA_ID}"
           echo "==== odds_consensus.csv (preview) ===="
           head -n 30 "data/out/${RODADA_ID}/odds_consensus.csv" || true
@@ -113,6 +222,9 @@ jobs:
             data/out/${{ env.RODADA_ID }}/unmatched_theoddsapi.csv
             data/out/${{ env.RODADA_ID }}/odds_apifootball.csv
             data/out/${{ env.RODADA_ID }}/unmatched_apifootball.csv
+            data/out/${{ env.RODADA_ID }}/news.csv
+            data/out/${{ env.RODADA_ID }}/weather.csv
+            data/out/${{ env.RODADA_ID }}/injuries.csv
             data/out/${{ env.RODADA_ID }}/odds_consensus.csv
             data/out/${{ env.RODADA_ID }}/predictions_market.csv
             data/out/${{ env.RODADA_ID }}/kelly_stakes.csv
