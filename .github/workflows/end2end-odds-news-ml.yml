@@ -1,34 +1,22 @@
-name: end2end-odds-news-ml
+name: End2End - Odds → Consenso → Predição → Kelly → Cartão
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch: {}   # executa manualmente, sem inputs
+
+env:
+  # Parâmetros do pipeline (ajuste se quiser)
+  SEASON: "2025"
+  REGIONS: "uk,eu,us,au"
+  ODDS_SPORTS: "soccer_brazil_campeonato,soccer_brazil_serie_b,soccer_argentina_primera_division,soccer_argentina_primera_nacional"
+  BANKROLL: "1000"
+  KELLY_FRACTION: "0.5"
+  KELLY_CAP: "0.1"
+  ROUND_TO: "1"
+  KELLY_TOP_N: "14"
 
 jobs:
   end2end:
-    name: End2End - Odds → Consenso → Predição → Cartão
-    runs-on: ubuntu-24.04
-
-    env:
-      # Identificador único da execução
-      RODADA_ID: ${{ github.run_id }}
-      OUT_DIR: data/out/${{ github.run_id }}
-
-      # Parâmetros de modelagem/apostas
-      SEASON: "2025"
-      REGIONS: "uk,eu,us,au"
-      BANKROLL: "1000"
-      KELLY_FRACTION: "0.5"
-      KELLY_CAP: "0.1"
-      ROUND_TO: "1"
-      KELLY_TOP_N: "14"
-      DEBUG: "true"
-
-      # Variáveis opcionais (mantidas para compatibilidade)
-      APIFOOT_LEAGUE_IDS: ""
-      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
-
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,109 +29,80 @@ jobs:
       - name: Instalar dependências
         run: |
           python -m pip install --upgrade pip
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          else
-            pip install pandas requests PyYAML numpy scikit-learn tqdm
-          fi
+          pip install -r requirements.txt
           echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
 
-      - name: Verificar arquivo de jogos (matches_source.csv)
+      - name: Preparar diretórios de saída
+        id: prep
+        shell: bash
         run: |
           set -e
-          FILE="data/in/matches_source.csv"
-          if [ ! -f "$FILE" ]; then
-            echo "::error::Arquivo $FILE não encontrado. Crie-o no repositório antes de rodar."
+          # ID único desta execução
+          echo "RODADA_ID=${GITHUB_RUN_ID}" >> $GITHUB_ENV
+          echo "OUT_DIR=data/out/${GITHUB_RUN_ID}" >> $GITHUB_ENV
+          mkdir -p "data/out/${GITHUB_RUN_ID}"
+
+          # Verifica entrada simples
+          FILE_IN="data/in/matches_source.csv"
+          if [ ! -f "$FILE_IN" ]; then
+            echo "::error::Arquivo $FILE_IN não encontrado. Crie-o com as colunas: home,away"
             exit 2
           fi
-          echo "Entrada OK: $FILE"
-          head -n 20 "$FILE" || true
-
-      - name: Checar secret essencial (TheOddsAPI)
-        env:
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-        run: |
-          set -e
-          if [ -z "${THEODDS_API_KEY}" ]; then
-            echo "::error::SECRET THEODDS_API_KEY ausente."
-            exit 3
-          fi
-          echo "THEODDS_API_KEY: OK"
-
-      - name: Preparar diretórios de saída
-        run: |
-          set -e
-          mkdir -p "${OUT_DIR}"
-          mkdir -p "data/out/${RODADA_ID}"
+          echo "Entrada OK: $FILE_IN"
 
       - name: Coletar odds (TheOddsAPI)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -e
-          if [ ! -f "scripts/ingest_odds_theoddsapi_safe.py" ]; then
-            echo "::error::scripts/ingest_odds_theoddsapi_safe.py não encontrado."
-            exit 4
-          fi
-          # O script usa data/in/matches_source.csv para saber quais jogos buscar
           python scripts/ingest_odds_theoddsapi_safe.py \
             --rodada "${OUT_DIR}" \
             --regions "${REGIONS}" \
+            --sports "${ODDS_SPORTS}" \
             --debug
-
-          echo "Listando ${OUT_DIR}:"
           ls -la "${OUT_DIR}" || true
 
-      - name: Sincronizar OUT_DIR → data/out/${RODADA_ID}
+      - name: Sincronizar OUT_DIR → data/out/$RODADA_ID
         run: |
           set -e
-          if [ ! -f "${OUT_DIR}/odds_theoddsapi.csv" ] && [ ! -f "${OUT_DIR}/odds_apifootball.csv" ]; then
-            echo "::error::Nenhuma odds gerada em ${OUT_DIR}."
-            exit 7
-          fi
-          cp -f "${OUT_DIR}/"*.csv "data/out/${RODADA_ID}/" 2>/dev/null || true
-          echo "Listando data/out/${RODADA_ID}:"
+          rsync -a "${OUT_DIR}/" "data/out/${RODADA_ID}/"
           ls -la "data/out/${RODADA_ID}" || true
 
       - name: Consolidar odds (consensus)
         run: |
           set -e
+          # O módulo de consenso espera SÓ o ID (ele lê data/out/<ID>/...)
           python -m scripts.consensus_odds_safe --rodada "${RODADA_ID}"
           echo "==== odds_consensus.csv (preview) ===="
           head -n 30 "data/out/${RODADA_ID}/odds_consensus.csv" || true
           echo "======================================"
 
-      - name: Predizer resultados a partir das odds
+      - name: Predizer resultados a partir das odds de mercado
         run: |
           set -e
-          if [ ! -f "scripts/predict_from_odds.py" ]; then
-            echo "::error::scripts/predict_from_odds.py não encontrado."
-            exit 11
-          fi
-          python scripts/predict_from_odds.py --rodada "${RODADA_ID}" --debug
+          python scripts/predict_from_odds.py --rodada "data/out/${RODADA_ID}" --debug
           echo "==== predictions_market.csv (preview) ===="
-          head -n 30 "data/out/${RODADA_ID}/predictions_market.csv" || true
-          echo "=========================================="
+          head -n 20 "data/out/${RODADA_ID}/predictions_market.csv" || true
 
-      - name: Gerar cartão da Loteca
+      - name: Publicar Kelly (define picks e coberturas)
+        env:
+          BANKROLL: ${{ env.BANKROLL }}
+          KELLY_FRACTION: ${{ env.KELLY_FRACTION }}
+          KELLY_CAP: ${{ env.KELLY_CAP }}
+          ROUND_TO: ${{ env.ROUND_TO }}
+          KELLY_TOP_N: ${{ env.KELLY_TOP_N }}
         run: |
           set -e
-          if [ ! -f "scripts/build_cartao.py" ]; then
-            echo "::error::scripts/build_cartao.py não encontrado."
-            exit 12
-          fi
-          python scripts/build_cartao.py --rodada "${RODADA_ID}"
+          python scripts/publish_kelly.py --rodada "data/out/${RODADA_ID}" --debug
+          echo "==== kelly_stakes.csv (preview) ===="
+          head -n 30 "data/out/${RODADA_ID}/kelly_stakes.csv" || true
+
+      - name: Gerar cartão da Loteca (após Kelly)
+        run: |
+          set -e
+          python scripts/build_cartao.py --rodada "data/out/${RODADA_ID}"
           echo "==== loteca_cartao.txt ===="
           cat "data/out/${RODADA_ID}/loteca_cartao.txt" || true
-
-      - name: Publicar Kelly (opcional)
-        run: |
-          set -e
-          if [ -f "scripts/publish_kelly.py" ]; then
-            python scripts/publish_kelly.py --rodada "${RODADA_ID}" --debug || true
-          else
-            echo "[kelly] AVISO: scripts/publish_kelly.py não encontrado — pulando."
-          fi
 
       - name: Upload artefatos
         uses: actions/upload-artifact@v4
@@ -151,11 +110,11 @@ jobs:
           name: loteca_full_${{ env.RODADA_ID }}
           path: |
             data/out/${{ env.RODADA_ID }}/odds_theoddsapi.csv
-            data/out/${{ env.RODADA_ID }}/odds_apifootball.csv
             data/out/${{ env.RODADA_ID }}/unmatched_theoddsapi.csv
+            data/out/${{ env.RODADA_ID }}/odds_apifootball.csv
             data/out/${{ env.RODADA_ID }}/unmatched_apifootball.csv
             data/out/${{ env.RODADA_ID }}/odds_consensus.csv
             data/out/${{ env.RODADA_ID }}/predictions_market.csv
-            data/out/${{ env.RODADA_ID }}/loteca_cartao.txt
             data/out/${{ env.RODADA_ID }}/kelly_stakes.csv
-          if-no-files-found: warn
+            data/out/${{ env.RODADA_ID }}/loteca_cartao.txt
+            data/out/${{ env.RODADA_ID }}/debug/**
