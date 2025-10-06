@@ -1,4 +1,4 @@
-name: "End2End - Odds + News + ML (SAFE-MIN)"
+name: "End2End - Odds + News + ML (SAFE)"
 
 on:
   workflow_dispatch:
@@ -13,7 +13,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      # ===== parâmetros =====
       SEASON: ${{ inputs.SEASON }}
       REGIONS: uk,eu,us,au
       BANKROLL: 1000
@@ -23,61 +22,52 @@ jobs:
       KELLY_TOP_N: 14
       DEBUG: "true"
 
-      # ===== chaves/segredos =====
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
 
-      # ===== ligas API-Football (ajuste se quiser) =====
+      # Ajuste se quiser incluir mais ligas da API-Football
       APIFOOT_LEAGUE_IDS: "71,72"
 
-      # ===== saída única desta execução =====
+      # Pasta única de saída por execução
       OUT_DIR: data/out/${{ github.run_id }}
 
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "Setup Python"
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: "Install dependencies"
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: "Configure env"
+      - name: Configure env/path
         run: |
           echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
           mkdir -p "${OUT_DIR}"
 
-      - name: "Prepare matches_source (formato simples)"
+      - name: Prepare matches_source (formato simples)
         run: |
           set -e
-          SIMPLE="data/in/matches_source.csv"
-          DEST_DIR="data/in/${OUT_DIR}"
-          DEST_FILE="${DEST_DIR}/matches_source.csv"
-
-          if [ -f "$SIMPLE" ]; then
-            mkdir -p "$DEST_DIR"
-            cp "$SIMPLE" "$DEST_FILE"
-            echo "Copiado: $SIMPLE -> $DEST_FILE"
-          fi
-
-          if [ ! -f "$DEST_FILE" ]; then
-            echo "::error::Arquivo ${DEST_FILE} não encontrado. Crie data/in/matches_source.csv com colunas: home,away"
+          SRC="data/in/matches_source.csv"
+          DST_DIR="data/in/${OUT_DIR}"
+          DST="${DST_DIR}/matches_source.csv"
+          if [ -f "$SRC" ]; then
+            mkdir -p "$DST_DIR"
+            cp "$SRC" "$DST"
+            echo "Copiado: $SRC -> $DST"
+          else
+            echo "::error::Crie $SRC com cabeçalho: home,away"
             exit 2
           fi
 
-          python -c "import sys,pandas as pd; f='${DEST_FILE}'; df=pd.read_csv(f); need={'home','away'}; miss=[c for c in need if c not in df.columns]; 
-if miss: 
-  raise SystemExit(f'Header inválido em {f}. Faltando: {miss}')
-print('matches_source OK:', f)"
-
-      - name: "W&B login (opcional)"
+      - name: W&B login (opcional)
         run: |
           if [ -n "${WANDB_API_KEY}" ]; then
             wandb login "${WANDB_API_KEY}" || true
@@ -86,14 +76,14 @@ print('matches_source OK:', f)"
           fi
 
       # ================= INGEST =================
-      - name: "Ingest odds - TheOddsAPI (SAFE)"
+      - name: Ingest odds - TheOddsAPI (SAFE)
         run: |
           python scripts/ingest_odds_theoddsapi_safe.py \
             --rodada "${OUT_DIR}" \
             --regions "${REGIONS}" \
             --debug
 
-      - name: "Ingest odds - API-Football RapidAPI (SAFE)"
+      - name: Ingest odds - API-Football RapidAPI (SAFE)
         run: |
           python -m scripts.ingest_odds_apifootball_rapidapi \
             --rodada "${OUT_DIR}" \
@@ -103,44 +93,45 @@ print('matches_source OK:', f)"
             --leagues "${APIFOOT_LEAGUE_IDS}" \
             --debug || echo "[apifootball-safe] prosseguindo (pode estar vazio)"
 
-      - name: "Build consensus odds (SAFE)"
+      - name: Build consensus odds (SAFE)
         run: |
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}"
 
       # ================= PREVISÃO =================
-      - name: "Predict from market odds"
+      - name: Predict from market odds
         run: |
           python scripts/predict_from_odds.py --rodada "${OUT_DIR}" --debug
 
-      - name: "xG/Calib/Stack (opcional)"
+      - name: xG/Calib/Stack (opcional)
         continue-on-error: true
         run: |
-          for f in scripts/predict_xg_uni.py scripts/predict_xg_bi.py scripts/calibrate_predictions.py scripts/stack_predictions.py; do
-            [ -f "$f" ] && python "$f" --rodada "${OUT_DIR}" --debug || true
-          done
+          if [ -f scripts/predict_xg_uni.py ]; then python scripts/predict_xg_uni.py --rodada "${OUT_DIR}" --debug || true; fi
+          if [ -f scripts/predict_xg_bi.py ]; then python scripts/predict_xg_bi.py --rodada "${OUT_DIR}" --debug || true; fi
+          if [ -f scripts/calibrate_predictions.py ]; then python scripts/calibrate_predictions.py --rodada "${OUT_DIR}" --debug || true; fi
+          if [ -f scripts/stack_predictions.py ]; then python scripts/stack_predictions.py --rodada "${OUT_DIR}" --debug || true; fi
 
       # ================= NEWS/INJURIES =================
-      - name: "News (opcional)"
+      - name: News (opcional)
         continue-on-error: true
         run: |
-          [ -f scripts/news_ingest_safe.py ] && python scripts/news_ingest_safe.py || true
+          if [ -f scripts/news_ingest_safe.py ]; then python scripts/news_ingest_safe.py || true; fi
 
-      - name: "Injuries (opcional)"
+      - name: Injuries (opcional)
         continue-on-error: true
         run: |
-          [ -f scripts/injuries_apifootball_safe.py ] && python scripts/injuries_apifootball_safe.py || true
+          if [ -f scripts/injuries_apifootball_safe.py ]; then python scripts/injuries_apifootball_safe.py || true; fi
 
       # ================= CARTÃO / KELLY =================
-      - name: "Build Cartão Loteca"
+      - name: Build Cartão Loteca
         run: |
           python scripts/build_cartao.py --rodada "${OUT_DIR}"
 
-      - name: "Publicar Kelly stakes"
+      - name: Publicar Kelly stakes
         run: |
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" --debug
 
       # ================= ARTEFATOS =================
-      - name: "Upload artifacts"
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: loteca_full_${{ github.run_id }}
