@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      # Identificador estável por execução
+      # Identificador único da execução
       RODADA_ID: ${{ github.run_id }}
       OUT_DIR: data/out/${{ github.run_id }}
 
@@ -22,9 +22,6 @@ jobs:
       ROUND_TO: "1"
       KELLY_TOP_N: "14"
       DEBUG: "true"
-
-      # Esportes/ligas do TheOddsAPI (ajuste conforme necessidade)
-      ODDS_SPORTS: "soccer_argentina_primera_division,soccer_argentina_primera_nacional"
 
       # Variáveis opcionais (mantidas para compatibilidade)
       APIFOOT_LEAGUE_IDS: ""
@@ -47,7 +44,6 @@ jobs:
           if [ -f "requirements.txt" ]; then
             pip install -r requirements.txt
           else
-            # fallback mínimo (se necessário)
             pip install pandas requests PyYAML numpy scikit-learn tqdm
           fi
           echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
@@ -61,10 +57,9 @@ jobs:
             exit 2
           fi
           echo "Entrada OK: $FILE"
-          echo "Prévia:"
           head -n 20 "$FILE" || true
 
-      - name: Checar secrets essenciais
+      - name: Checar secret essencial (TheOddsAPI)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
@@ -86,15 +81,14 @@ jobs:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -e
-          echo "[theoddsapi] usando esportes: ${ODDS_SPORTS}"
           if [ ! -f "scripts/ingest_odds_theoddsapi_safe.py" ]; then
             echo "::error::scripts/ingest_odds_theoddsapi_safe.py não encontrado."
             exit 4
           fi
+          # O script usa data/in/matches_source.csv para saber quais jogos buscar
           python scripts/ingest_odds_theoddsapi_safe.py \
             --rodada "${OUT_DIR}" \
             --regions "${REGIONS}" \
-            --sports "${ODDS_SPORTS}" \
             --debug
 
           echo "Listando ${OUT_DIR}:"
@@ -105,22 +99,16 @@ jobs:
           set -e
           if [ ! -f "${OUT_DIR}/odds_theoddsapi.csv" ] && [ ! -f "${OUT_DIR}/odds_apifootball.csv" ]; then
             echo "::error::Nenhuma odds gerada em ${OUT_DIR}."
-            echo "Cheque a etapa de coleta e o data/in/matches_source.csv"
             exit 7
           fi
-
-          # O consenso e os demais scripts leem por convenção em data/out/<RODADA_ID>/
           cp -f "${OUT_DIR}/"*.csv "data/out/${RODADA_ID}/" 2>/dev/null || true
-
           echo "Listando data/out/${RODADA_ID}:"
           ls -la "data/out/${RODADA_ID}" || true
 
       - name: Consolidar odds (consensus)
         run: |
           set -e
-          # O módulo espera SOMENTE o ID, pq ele próprio monta data/out/<ID> internamente
           python -m scripts.consensus_odds_safe --rodada "${RODADA_ID}"
-
           echo "==== odds_consensus.csv (preview) ===="
           head -n 30 "data/out/${RODADA_ID}/odds_consensus.csv" || true
           echo "======================================"
@@ -132,9 +120,7 @@ jobs:
             echo "::error::scripts/predict_from_odds.py não encontrado."
             exit 11
           fi
-
           python scripts/predict_from_odds.py --rodada "${RODADA_ID}" --debug
-
           echo "==== predictions_market.csv (preview) ===="
           head -n 30 "data/out/${RODADA_ID}/predictions_market.csv" || true
           echo "=========================================="
