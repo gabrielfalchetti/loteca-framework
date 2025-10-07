@@ -19,7 +19,6 @@ Saídas:
 import os
 import sys
 import csv
-import json
 import argparse
 import pandas as pd
 from typing import List, Dict, Any
@@ -42,7 +41,6 @@ def read_matches(path: str) -> pd.DataFrame:
     for c in REQ_COLUMNS:
         if c not in df.columns:
             die(f"coluna obrigatória ausente em {path}: {c}")
-    # normaliza strings
     for c in ["home","away"]:
         df[c] = df[c].astype(str).str.strip().str.lower()
     return df
@@ -59,7 +57,6 @@ def write_csv(path: str, rows: List[Dict[str, Any]]):
             w.writerow(r)
 
 def best_fixture_match(fixtures: List[Dict[str,Any]], home: str, away: str) -> Dict[str,Any]:
-    # match “best effort” por nome (semelhante ao que já fazemos)
     def norm(s: str) -> str:
         return str(s or "").strip().lower()
     cand = []
@@ -97,28 +94,22 @@ def main():
     fixtures_rows, odds_rows, lineups_rows = [], [], []
     inj_rows, h2h_rows, stand_rows, tstats_rows, fstats_rows = [], [], [], [], []
 
-    # para standings por liga (evita repetir)
     seen_stand = set()
-    # caching por (league, team_id) em teams_stats
     seen_tstats = set()
 
-    # Fazemos loop por liga → data(s) inferidas
-    # Se o CSV tiver coluna date, usamos por linha; se não, opcionalmente --date; se nada: falha
     has_date_col = "date" in dfm.columns
     if not has_date_col and not args.date:
         die("Data dos jogos não informada (adicione coluna 'date' no matches_source.csv ou use --date YYYY-MM-DD)")
 
     for league_id in leagues:
-        # standings uma vez por liga
         if league_id not in seen_stand:
             st = standings(league_id, int(args.season), debug=args.debug)
             table = st.get("response", [])
             for block in table:
-                league = block.get("league", {})
                 for group in block.get("league", {}).get("standings", []):
                     for row in group:
                         stand_rows.append({
-                            "league_id": league.get("id"),
+                            "league_id": league_id,
                             "team_id": row["team"]["id"],
                             "team": row["team"]["name"],
                             "rank": row.get("rank"),
@@ -129,11 +120,10 @@ def main():
                         })
             seen_stand.add(league_id)
 
-        # Loop nos matches dessa liga
         for _, r in dfm.iterrows():
             home = r["home"]; away = r["away"]
             date_str = r["date"] if has_date_col else args.date
-            # busca fixtures do dia naquela liga
+
             fx_all = fixtures_by_date(date_str, league_id, int(args.season), debug=args.debug).get("response", [])
             sleep_rl()
             if not fx_all:
@@ -158,11 +148,9 @@ def main():
                 "city": fx["fixture"]["venue"]["city"]
             })
 
-            # odds 1X2
             od = odds_by_fixture(fixture_id, debug=args.debug).get("response", [])
             sleep_rl()
             for book in od:
-                # escolhemos o mercado 'Match Winner' (1X2); estrutura varia por book
                 for b in book.get("bookmakers", []):
                     for m in b.get("bets", []):
                         if m.get("name","").lower() in ("match winner","1x2","match_winner"):
@@ -179,7 +167,6 @@ def main():
                             if {"odds_home","odds_draw","odds_away"} <= kv.keys():
                                 odds_rows.append(kv)
 
-            # lineups
             lu = lineups_by_fixture(fixture_id, debug=args.debug).get("response", [])
             sleep_rl()
             for side in lu:
@@ -192,7 +179,6 @@ def main():
                     "confirmed": side.get("team",{}).get("update") is not None
                 })
 
-            # injuries (por data/league)
             inj = injuries_by_date_league(date_str, league_id, int(args.season), debug=args.debug).get("response", [])
             sleep_rl()
             for it in inj:
@@ -207,7 +193,6 @@ def main():
                     "reason": it["player"].get("reason")
                 })
 
-            # h2h
             hh = h2h(team_home_id, team_away_id, debug=args.debug).get("response", [])
             sleep_rl()
             for g in hh[:10]:
@@ -221,7 +206,6 @@ def main():
                     "date": g["fixture"]["date"][:10]
                 })
 
-            # team stats (forma etc.) para cada time, cacheando
             for tid in (team_home_id, team_away_id):
                 key = (league_id, tid)
                 if key not in seen_tstats:
@@ -242,7 +226,6 @@ def main():
                         })
                     seen_tstats.add(key)
 
-            # fixture stats (se o jogo já ocorreu ou tem prévia)
             fs = fixture_stats(fixture_id, debug=args.debug).get("response", [])
             sleep_rl()
             for side in fs:
@@ -261,7 +244,6 @@ def main():
                     "red": stats.get("Red Cards")
                 })
 
-    # Escrita dos CSVs
     if not fixtures_rows:
         die("Nenhuma fixture casada com matches_source.csv (confira nomes, liga e data).")
     write_csv(os.path.join(args.out_dir, "apifoot_fixtures.csv"), fixtures_rows)
