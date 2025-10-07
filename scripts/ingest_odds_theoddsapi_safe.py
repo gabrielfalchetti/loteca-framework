@@ -1,205 +1,209 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Coletor seguro da TheOddsAPI com suporte a --sports.
-- Lê data/in/matches_source.csv (colunas obrigatórias: home,away).
-- Busca odds h2h nos esportes passados via --sports (se omitido, usa um default).
-- Faz matching (normalizado + fuzzy) entre jogos do arquivo e eventos da API.
-- Salva:
-  <out_dir>/odds_theoddsapi.csv
-  <out_dir>/unmatched_theoddsapi.csv
-Compatível com o pipeline de consenso que lê data/out/<RODADA_ID>/...
+Coleta de odds H2H na TheOddsAPI com “modo seguro”.
+
+- Lê o arquivo de jogos reais (CSV) para casar os eventos e evitar times/ligas errados:
+  * Por padrão usa MATCHES_PATH (env) ou --matches (override)
+  * Formato mínimo: home,away[,date]
+    - home/away em texto; date opcional (YYYY-MM-DD)
+- Aceita lista de esportes via --sports (ex.: soccer_argentina_primera_division,soccer_brazil_campeonato).
+  Se omitida, usa um conjunto razoável de soccer.
+
+Saídas em OUT_DIR (argumento --rodada):
+  - odds_theoddsapi.csv         (casados com o matches_source)
+  - unmatched_theoddsapi.csv    (coletados mas não casados)
 """
 
-import argparse
 import os
 import sys
+import csv
 import json
-from typing import List, Tuple
-
-import pandas as pd
+import time
+import argparse
+from typing import Dict, Any, List
 import requests
-from rapidfuzz import fuzz, process
-from unidecode import unidecode
+import pandas as pd
 
-# -------- utilidades simples -------- #
+DEFAULT_SPORTS = [
+    "soccer_brazil_campeonato",
+    "soccer_brazil_serie_b",
+    "soccer_argentina_primera_division",
+    "soccer_argentina_primera_nacional"
+]
+
+def die(msg: str, code: int = 2):
+    print(f"[theoddsapi-safe] ERRO: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+def info(msg: str):
+    print(f"[theoddsapi-safe] {msg}")
+
+def get_api_key() -> str:
+    k = os.getenv("THEODDS_API_KEY", "").strip()
+    if not k:
+        die("THEODDS_API_KEY ausente (defina nos Secrets).")
+    return k
+
+def read_matches(path: str) -> pd.DataFrame:
+    if not os.path.isfile(path):
+        die(f"{path} não encontrado")
+    df = pd.read_csv(path)
+    for c in ("home", "away"):
+        if c not in df.columns:
+            die(f"coluna ausente em {path}: {c}")
+    # normalização
+    for c in ("home", "away"):
+        df[c] = df[c].astype(str).str.strip().str.lower()
+    return df
 
 def norm(s: str) -> str:
-    return " ".join(unidecode(str(s)).lower().strip().split())
+    return str(s or "").strip().lower()
 
-def make_key(home: str, away: str) -> str:
+def match_key(home: str, away: str) -> str:
     return f"{norm(home)}__vs__{norm(away)}"
 
-def must_cols(df: pd.DataFrame, cols: List[str], path: str):
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        print(f"[theoddsapi-safe] ERRO: coluna(s) ausente(s) em {path}: {', '.join(missing)}", file=sys.stderr)
-        sys.exit(2)
-
-# -------- coleta TheOddsAPI -------- #
-
-def fetch_odds_for_sport(api_key: str, sport_key: str, regions: str, debug: bool=False) -> list:
+def fetch_odds_for_sport(api_key: str, sport_key: str, regions: str, debug: bool=False) -> List[Dict[str, Any]]:
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {"apiKey": api_key, "regions": regions, "markets": "h2h"}
     if debug:
         print(f"[theoddsapi-safe][DEBUG] GET {url} {params}")
     r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
+    if r.status_code != 200:
+        print(f"[theoddsapi-safe] AVISO: {sport_key} -> HTTP {r.status_code} {r.text[:200]}")
+        return []
     try:
         return r.json()
     except Exception:
         return []
 
-def flatten_events(json_list: list) -> pd.DataFrame:
-    rows = []
-    for ev in json_list:
-        try:
-            home = ev["home_team"]
-            away = ev["away_team"]
-            bookmakers = ev.get("bookmakers") or []
-            # procura o primeiro book com odds h2h
-            o_home = o_draw = o_away = None
-            for bk in bookmakers:
-                mkts = bk.get("markets") or []
-                for mk in mkts:
-                    if mk.get("key") == "h2h":
-                        outcomes = mk.get("outcomes") or []
-                        # outcomes podem vir em qualquer ordem
-                        for oc in outcomes:
-                            name = oc.get("name")
-                            price = oc.get("price")
-                            if name == home:
-                                o_home = price
-                            elif name == away:
-                                o_away = price
-                            elif name and name.lower() in ("draw", "empate"):
-                                o_draw = price
+def flatten_event(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """Retorna dict simples com home/away e odds médias (h2h)."""
+    # cada bookmaker tem markets -> outcomes [{name: 'Home/Away/Draw', price: float}]
+    # outcomes de h2h: HOME, DRAW (se houver), AWAY
+    home_name, away_name = "", ""
+    odds_home, odds_draw, odds_away = None, None, None
+
+    # participantes
+    try:
+        comps = ev.get("bookmakers", [])
+        # alguns payloads trazem "home_team"/"away_team" direto:
+        home_name = ev.get("home_team") or ""
+        away_name = ev.get("away_team") or ""
+        # se vazio, tenta derived de outcomes do primeiro bookmaker:
+        if not home_name or not away_name:
+            for b in comps:
+                for m in b.get("markets", []):
+                    if m.get("key") == "h2h":
+                        names = [o.get("name","") for o in m.get("outcomes", [])]
+                        if len(names) >= 2:
+                            # heurística
+                            home_name = names[0]
+                            away_name = names[-1]
                         break
-                if o_home or o_away or o_draw:
+                if home_name and away_name:
                     break
-            rows.append({
-                "team_home": home,
-                "team_away": away,
-                "odds_home": o_home,
-                "odds_draw": o_draw,
-                "odds_away": o_away
-            })
-        except Exception:
-            continue
-    return pd.DataFrame(rows)
+    except Exception:
+        pass
 
-def fuzzy_pair_match(src_home: str, src_away: str, cand_df: pd.DataFrame, thresh: int=90) -> Tuple[int, pd.Series]:
-    """
-    Retorna (score_medio, linha_candidata) ou (0, None)
-    """
-    if cand_df.empty:
-        return 0, None
-    h = norm(src_home)
-    a = norm(src_away)
+    # odds (média simples entre bookmakers)
+    oh, od, oa, nh, nd, na = 0.0, 0.0, 0.0, 0, 0, 0
+    for b in ev.get("bookmakers", []):
+        for m in b.get("markets", []):
+            if m.get("key") == "h2h":
+                vals = {o.get("name","").strip().upper(): o.get("price") for o in m.get("outcomes", [])}
+                # tentar mapear nomes comumente usados
+                for lbl, price in vals.items():
+                    if price is None:
+                        continue
+                    if lbl in ("HOME", home_name.upper()):
+                        oh += float(price); nh += 1
+                    elif lbl in ("DRAW","EMPATE","X"):
+                        od += float(price); nd += 1
+                    elif lbl in ("AWAY", away_name.upper()):
+                        oa += float(price); na += 1
+    if nh > 0: odds_home = oh / nh
+    if nd > 0: odds_draw = od / nd
+    if na > 0: odds_away = oa / na
 
-    best_idx = None
-    best_score = 0
-    for idx, row in cand_df.iterrows():
-        ch = norm(row["team_home"])
-        ca = norm(row["team_away"])
-        # checa nas duas ordens (só por segurança)
-        s1 = (fuzz.token_sort_ratio(h, ch) + fuzz.token_sort_ratio(a, ca)) // 2
-        s2 = (fuzz.token_sort_ratio(h, ca) + fuzz.token_sort_ratio(a, ch)) // 2
-        s = max(s1, s2)
-        if s > best_score:
-            best_score = s
-            best_idx = idx
-    if best_idx is None or best_score < thresh:
-        return 0, None
-    return best_score, cand_df.loc[best_idx]
+    return {
+        "team_home": home_name,
+        "team_away": away_name,
+        "odds_home": odds_home,
+        "odds_draw": odds_draw,
+        "odds_away": odds_away
+    }
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--rodada", required=True, help="Diretório de saída (OUT_DIR) ou ID (o workflow sincroniza depois).")
-    parser.add_argument("--regions", default="uk,eu,us,au")
-    parser.add_argument("--sports", default="", help="Lista de esportes TheOddsAPI separados por vírgula. Ex: soccer_argentina_primera_division,soccer_argentina_primera_nacional")
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True, help="OUT_DIR (ex: data/out/123456)")
+    ap.add_argument("--regions", default=os.getenv("REGIONS","uk,eu,us,au"))
+    ap.add_argument("--sports", default=os.getenv("ODDS_SPORTS",""))
+    ap.add_argument("--matches", default=os.getenv("MATCHES_PATH","data/in/matches_source.csv"))
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
 
     out_dir = args.rodada
     os.makedirs(out_dir, exist_ok=True)
 
-    api_key = os.environ.get("THEODDS_API_KEY", "")
-    if not api_key:
-        print("[theoddsapi-safe] ERRO: THEODDS_API_KEY não definido.", file=sys.stderr)
-        sys.exit(2)
+    api_key = get_api_key()
+    # jogos reais
+    dfm = read_matches(args.matches)
 
-    src_path = "data/in/matches_source.csv"
-    if not os.path.isfile(src_path):
-        print(f"[theoddsapi-safe] ERRO: {src_path} não encontrado", file=sys.stderr)
-        sys.exit(2)
-
-    src_df = pd.read_csv(src_path)
-    must_cols(src_df, ["home", "away"], src_path)
-    src_df["match_key"] = src_df.apply(lambda r: make_key(r["home"], r["away"]), axis=1)
-
-    # Esportes
     sports = [s.strip() for s in (args.sports or "").split(",") if s.strip()]
     if not sports:
-        # default seguro (BR + AR). Ajuste conforme seu uso
-        sports = [
-            "soccer_brazil_campeonato",
-            "soccer_brazil_serie_b",
-            "soccer_argentina_primera_division",
-            "soccer_argentina_primera_nacional",
-        ]
+        sports = DEFAULT_SPORTS
 
-    # Coleta
-    all_events = []
-    for sp in sports:
-        try:
-            data = fetch_odds_for_sport(api_key, sp, args.regions, debug=args.debug)
-            df = flatten_events(data)
-            if not df.empty:
-                all_events.append(df)
-        except Exception as e:
-            if args.debug:
-                print(f"[theoddsapi-safe][DEBUG] Falha em {sp}: {e}")
+    collected: List[Dict[str, Any]] = []
+    for sk in sports:
+        evs = fetch_odds_for_sport(api_key, sk, args.regions, debug=args.debug)
+        for e in evs:
+            flat = flatten_event(e)
+            if flat["team_home"] and flat["team_away"]:
+                flat["match_key"] = match_key(flat["team_home"], flat["team_away"])
+                collected.append(flat)
+        time.sleep(0.2)
 
-    if not all_events:
-        # ainda assim escrevemos arquivos vazios para o pipeline se comportar bem
-        pd.DataFrame(columns=["match_key","team_home","team_away","odds_home","odds_draw","odds_away"]).to_csv(
-            os.path.join(out_dir, "odds_theoddsapi.csv"), index=False
-        )
-        pd.DataFrame(columns=["match_key","home","away"]).to_csv(
-            os.path.join(out_dir, "unmatched_theoddsapi.csv"), index=False
-        )
-        print("[theoddsapi-safe] AVISO: nenhum evento retornado pelos esportes solicitados.")
-        sys.exit(0)
+    # agora casamos com dfm (home/away) — tolerância básica de contains
+    valid_rows, unmatched_rows = [], []
+    if collected:
+        # normaliza um mapa possível de chaves do CSV
+        dfm["_mk"] = dfm.apply(lambda r: match_key(r["home"], r["away"]), axis=1)
+        want_keys = set(dfm["_mk"].unique())
 
-    events_df = pd.concat(all_events, ignore_index=True).drop_duplicates()
+        for row in collected:
+            mk = match_key(row["team_home"], row["team_away"])
+            if mk in want_keys and all(row.get(k) for k in ("odds_home","odds_away")):
+                valid_rows.append({
+                    "match_key": mk,
+                    "team_home": row["team_home"],
+                    "team_away": row["team_away"],
+                    "odds_home": row["odds_home"],
+                    "odds_draw": row["odds_draw"],
+                    "odds_away": row["odds_away"]
+                })
+            else:
+                unmatched_rows.append(row)
 
-    # Matching
-    matched_rows = []
-    unmatched_rows = []
+    # escreve arquivos
+    def write_csv(path: str, rows: List[Dict[str, Any]]):
+        cols = sorted({k for r in rows for k in r.keys()}) if rows else []
+        with open(path,"w",newline="",encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
 
-    for _, r in src_df.iterrows():
-        score, ev = fuzzy_pair_match(r["home"], r["away"], events_df, thresh=90)
-        if ev is None:
-            unmatched_rows.append({"match_key": r["match_key"], "home": r["home"], "away": r["away"]})
-        else:
-            matched_rows.append({
-                "match_key": r["match_key"],
-                "team_home": ev["team_home"],
-                "team_away": ev["team_away"],
-                "odds_home": ev["odds_home"],
-                "odds_draw": ev["odds_draw"],
-                "odds_away": ev["odds_away"]
-            })
+    out_ok = os.path.join(out_dir, "odds_theoddsapi.csv")
+    out_unm = os.path.join(out_dir, "unmatched_theoddsapi.csv")
+    write_csv(out_ok, valid_rows)
+    write_csv(out_unm, unmatched_rows)
 
-    valid = pd.DataFrame(matched_rows)
-    unmatched = pd.DataFrame(unmatched_rows)
+    print(f"[theoddsapi-safe] linhas -> {json.dumps({os.path.basename(out_ok): len(valid_rows), os.path.basename(out_unm): len(unmatched_rows)})}")
 
-    valid.to_csv(os.path.join(out_dir, "odds_theoddsapi.csv"), index=False)
-    unmatched.to_csv(os.path.join(out_dir, "unmatched_theoddsapi.csv"), index=False)
-
-    print(f"[theoddsapi-safe] linhas -> {json.dumps({ 'odds_theoddsapi.csv': int(valid.shape[0]), 'unmatched_theoddsapi.csv': int(unmatched.shape[0])})}")
+    # se nada válido, ainda assim saímos com erro 2 para o consenso saber que só terá API-Football
+    if not valid_rows:
+        die("nenhuma linha válida (odds_theoddsapi.csv vazio).", code=2)
 
 if __name__ == "__main__":
     main()
