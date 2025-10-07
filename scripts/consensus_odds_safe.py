@@ -1,283 +1,205 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Consenso de odds entre múltiplas fontes (TheOddsAPI, API-Football) com:
-- normalização automática de esquema (home/away e odds 1X2)
-- junção opcional com data/in/matches_source.csv via match_key
-- geração de odds_consensus.csv em data/out/<RODADA_ID>/
-Falha forte se nenhuma fonte válida for encontrada ou se não gerar saída.
+consensus_odds_safe.py
+----------------------
+Gera odds_consensus.csv em esquema padronizado para o pipeline:
+
+Saída: data/out/<RODADA>/odds_consensus.csv com colunas:
+  - match_id
+  - team_home
+  - team_away
+  - odds_home
+  - odds_draw
+  - odds_away
+  - source
+
+Entrada (opcional, usa as que existirem):
+  - data/out/<RODADA>/odds_theoddsapi.csv
+  - data/out/<RODADA>/odds_apifootball.csv
 
 Uso:
-  python -m scripts.consensus_odds_safe --rodada <RODADA_ID>
-  # onde <RODADA_ID> é só o ID numérico usado para compor data/out/<ID>/...
+  python -m scripts.consensus_odds_safe --rodada <ID_ou_PATH> [--debug]
 """
 
-import argparse
 import os
-import sys
-import json
-import unicodedata
-from typing import List, Tuple
+import re
+import argparse
+import math
+import numpy as np
 import pandas as pd
 
-DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
+# --------- CLI ----------
+def parse_args():
+    p = argparse.ArgumentParser(description="Consenso de odds com padronização de esquema")
+    p.add_argument("--rodada", required=True, help="ID da rodada (ex: 1829...) OU caminho data/out/<ID>")
+    p.add_argument("--debug", action="store_true")
+    return p.parse_args()
 
-# ---------- utils ----------
+# --------- Utils ----------
+def _is_id_like(s: str) -> bool:
+    return bool(re.fullmatch(r"[0-9]{6,}", str(s)))
 
-def log(msg: str):
-    print(f"[consensus-safe] {msg}")
+def _out_dir(rodada: str) -> str:
+    return rodada if rodada.startswith("data/") else os.path.join("data", "out", str(rodada))
 
-def die(code: int, msg: str):
-    log(f"ERRO: {msg}")
-    sys.exit(code)
+def _log(debug, *msg):
+    if debug:
+        print("[consensus]", *msg)
 
-def _strip_accents_lower(s: str) -> str:
-    if pd.isna(s):
-        return ""
-    s = str(s).strip()
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    return s.lower()
+def _first_present(*paths):
+    for p in paths:
+        if p and os.path.exists(p):
+            return p
+    return None
 
-def make_key(home: str, away: str) -> str:
-    return f"{_strip_accents_lower(home)}__vs__{_strip_accents_lower(away)}"
-
-def load_csv_safe(path: str) -> pd.DataFrame:
+def _to_float(x):
     try:
-        if not os.path.exists(path):
-            log(f"AVISO: arquivo não encontrado: {path}")
-            return pd.DataFrame()
-        # pandas levanta se vazio/sem colunas
-        df = pd.read_csv(path)
-        if df.shape[0] == 0 or df.shape[1] == 0:
-            log(f"AVISO: arquivo vazio: {path}")
-            return pd.DataFrame()
-        return df
+        return float(x)
+    except Exception:
+        return np.nan
+
+def _harmonic_mean(arr):
+    arr = np.array([_to_float(a) for a in arr if _to_float(a) > 0], dtype=float)
+    if arr.size == 0 or np.any(arr <= 0) or np.any(~np.isfinite(arr)):
+        return np.nan
+    return len(arr) / np.sum(1.0 / arr)
+
+def _std_columns(df: pd.DataFrame, debug=False, source_name="") -> pd.DataFrame:
+    """
+    Normaliza qualquer esquema de odds para:
+      team_home, team_away, odds_home, odds_draw, odds_away, source
+    Regras de mapeamento tentam cobrir variações comuns.
+    """
+    cols_lower = {c.lower(): c for c in df.columns}
+
+    def pick(names):
+        for n in names:
+            if n in cols_lower:
+                return cols_lower[n]
+        return None
+
+    # times
+    c_home = pick(["team_home", "home", "home_team", "time_mandante", "mandante"])
+    c_away = pick(["team_away", "away", "away_team", "time_visitante", "visitante"])
+
+    # odds
+    c_oh = pick(["odds_home", "home_odds", "price_home", "h2h_home", "homeprice", "homeprice_decimal"])
+    c_od = pick(["odds_draw", "draw_odds", "price_draw", "h2h_draw", "drawprice", "drawprice_decimal", "empate_odds"])
+    c_oa = pick(["odds_away", "away_odds", "price_away", "h2h_away", "awayprice", "awayprice_decimal"])
+
+    # alguns arquivos trazem apenas 'odds' em nested markets; tentar colunas genéricas
+    # se não achou, tentar nomes curtos
+    if c_oh is None: c_oh = pick(["home_price", "homeodd", "odd_home"])
+    if c_od is None: c_od = pick(["draw_price", "drawodd", "odd_draw", "x_price", "x_odds"])
+    if c_oa is None: c_oa = pick(["away_price", "awayodd", "odd_away"])
+
+    # se ainda faltar algo essencial, abortar com erro informativo
+    missing = []
+    if c_home is None: missing.append("team_home (home/home_team)")
+    if c_away is None: missing.append("team_away (away/away_team)")
+    if c_oh is None:   missing.append("odds_home")
+    if c_od is None:   missing.append("odds_draw")
+    if c_oa is None:   missing.append("odds_away")
+    if missing:
+        raise ValueError(f"[consensus] fonte '{source_name}' sem colunas necessárias: {missing}")
+
+    out = pd.DataFrame({
+        "team_home": df[c_home].astype(str).str.strip(),
+        "team_away": df[c_away].astype(str).str.strip(),
+        "odds_home": pd.to_numeric(df[c_oh], errors="coerce"),
+        "odds_draw": pd.to_numeric(df[c_od], errors="coerce"),
+        "odds_away": pd.to_numeric(df[c_oa], errors="coerce"),
+    })
+    out["source"] = source_name or "unknown"
+    # descartando linhas inválidas
+    out = out.dropna(subset=["team_home", "team_away", "odds_home", "odds_draw", "odds_away"])
+    return out
+
+def _read_flex_csv(path, source_name, debug=False):
+    if not path or not os.path.exists(path):
+        return pd.DataFrame(columns=["team_home","team_away","odds_home","odds_draw","odds_away","source"])
+    try:
+        raw = pd.read_csv(path)
+        if raw.empty:
+            _log(debug, f"arquivo vazio: {path}")
+            return pd.DataFrame(columns=["team_home","team_away","odds_home","odds_draw","odds_away","source"])
+        std = _std_columns(raw, debug=debug, source_name=source_name)
+        _log(debug, f"{source_name} -> linhas válidas: {len(std)}")
+        return std
     except Exception as e:
-        log(f"ERRO ao ler {path}: {e}")
-        return pd.DataFrame()
+        _log(debug, f"falha lendo {source_name}: {e}")
+        return pd.DataFrame(columns=["team_home","team_away","odds_home","odds_draw","odds_away","source"])
 
-# ---------- normalização de esquemas ----------
-
-HOME_ALIASES = ["home", "team_home", "home_team", "mandante"]
-AWAY_ALIASES = ["away", "team_away", "away_team", "visitante"]
-
-# odds 1X2
-OH_ALIASES   = ["odds_home", "home_odds", "odd_home", "o1", "price_home", "h2h_home"]
-OD_ALIASES   = ["odds_draw", "draw_odds", "odd_draw", "ox", "price_draw", "h2h_draw"]
-OA_ALIASES   = ["odds_away", "away_odds", "odd_away", "o2", "price_away", "h2h_away"]
-
-def first_col(df: pd.DataFrame, candidates: List[str]) -> str:
-    cols = {c.lower(): c for c in df.columns}
-    for cand in candidates:
-        lc = cand.lower()
-        if lc in cols:
-            return cols[lc]
-    # tenta por contains leve
-    for c in df.columns:
-        lc = c.lower()
-        for cand in candidates:
-            if cand.lower() in lc:
-                return c
-    return ""
-
-def normalize_schema(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
-    """Retorna DF com colunas padronizadas: home, away, odd_home, odd_draw, odd_away, source"""
-
+def _consolidate(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Consolida múltiplas linhas do mesmo jogo/fonte. Estratégia:
+      - agrupa por (team_home, team_away, source)
+      - odds = média harmônica (mais adequada para preços)
+      - depois agrupa por (team_home, team_away) cruzando fontes -> média harmônica novamente
+    """
     if df.empty:
         return df
 
-    ch = first_col(df, HOME_ALIASES)
-    ca = first_col(df, AWAY_ALIASES)
+    lvl1 = (df
+            .groupby(["team_home","team_away","source"], as_index=False)
+            .agg({
+                "odds_home": _harmonic_mean,
+                "odds_draw": _harmonic_mean,
+                "odds_away": _harmonic_mean
+            }))
 
-    # alguns dumps trazem 'home_team'/'away_team' como dicts/ids; tentamos fallback
-    if not ch or not ca:
-        # heurística: procura colunas com textos de time
-        text_like = [c for c in df.columns if df[c].dtype == object]
-        if len(text_like) >= 2:
-            ch, ca = text_like[0], text_like[1]
+    # agora agregando across fontes (mantendo 'source' como 'consensus' na saída final)
+    lvl2 = (lvl1
+            .groupby(["team_home","team_away"], as_index=False)
+            .agg({
+                "odds_home": _harmonic_mean,
+                "odds_draw": _harmonic_mean,
+                "odds_away": _harmonic_mean
+            }))
+    lvl2["source"] = "consensus"
+    return lvl2[["team_home","team_away","odds_home","odds_draw","odds_away","source"]]
 
-    if not ch or not ca:
-        log(f"AVISO: não encontrei colunas de times (home/away) em {source_name}. Colunas: {list(df.columns)}")
-        return pd.DataFrame()
-
-    oh = first_col(df, OH_ALIASES)
-    od = first_col(df, OD_ALIASES)
-    oa = first_col(df, OA_ALIASES)
-
-    # às vezes a fonte traz odds 1X2 em largura diferente; tentamos detectar por nomes genéricos
-    if not (oh and od and oa):
-        # tenta detectar por 3 colunas numéricas que parecem odds (>=1.01)
-        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        candidates = []
-        for c in numeric_cols:
-            s = df[c].dropna()
-            if not s.empty and (s >= 1.01).mean() > 0.7 and (s <= 1000).mean() > 0.95:
-                candidates.append(c)
-        if len(candidates) >= 3:
-            oh, od, oa = candidates[:3]
-
-    out = pd.DataFrame()
-    out["home"] = df[ch].astype(str)
-    out["away"] = df[ca].astype(str)
-
-    # zera odds inválidas
-    def safe_num(s):
-        try:
-            x = float(s)
-            return x if x > 1.0001 else float("nan")
-        except:
-            return float("nan")
-
-    if oh in df.columns:
-        out["odd_home"] = df[oh].apply(safe_num)
-    else:
-        out["odd_home"] = float("nan")
-
-    if od in df.columns:
-        out["odd_draw"] = df[od].apply(safe_num)
-    else:
-        out["odd_draw"] = float("nan")
-
-    if oa in df.columns:
-        out["odd_away"] = df[oa].apply(safe_num)
-    else:
-        out["odd_away"] = float("nan")
-
-    out["source"] = source_name
-    out["match_key"] = out.apply(lambda r: make_key(r["home"], r["away"]), axis=1)
-
-    # filtra linhas que têm pelo menos uma odd válida
-    mask_valid = out[["odd_home", "odd_draw", "odd_away"]].notna().any(axis=1)
-    out = out[mask_valid].copy()
-    out.reset_index(drop=True, inplace=True)
-    return out
-
-# ---------- consenso ----------
-
-def consensus(dfs: List[pd.DataFrame]) -> pd.DataFrame:
-    if not dfs:
-        return pd.DataFrame()
-    base = pd.concat(dfs, ignore_index=True)
-    if base.empty:
-        return base
-
-    # agrega por match_key
-    grp = base.groupby("match_key", as_index=False).agg({
-        "home": "first",
-        "away": "first",
-        "odd_home": "mean",
-        "odd_draw": "mean",
-        "odd_away": "mean"
-    })
-
-    # prob. implícitas (normalizadas para overround)
-    for col in ["odd_home", "odd_draw", "odd_away"]:
-        grp[f"imp_{col[4:]}"] = 1.0 / grp[col]
-
-    # normaliza overround
-    s = grp[["imp_home", "imp_draw", "imp_away"]].sum(axis=1)
-    for k in ["imp_home", "imp_draw", "imp_away"]:
-        grp[k] = grp[k] / s
-
-    # ordena por chave para determinismo
-    grp = grp.sort_values(["home", "away"]).reset_index(drop=True)
-    return grp
-
-# ---------- matches_source join ----------
-
-def try_join_matches(cons: pd.DataFrame) -> pd.DataFrame:
-    """Se existir data/in/matches_source.csv, tenta casar e carregar match_id/source."""
-    path = os.path.join("data", "in", "matches_source.csv")
-    if not os.path.exists(path):
-        log("AVISO: data/in/matches_source.csv não encontrado para join (seguindo sem match_id).")
-        return cons
-
-    try:
-        ms = pd.read_csv(path)
-    except Exception as e:
-        log(f"AVISO: falha ao ler matches_source.csv: {e} (seguindo sem join).")
-        return cons
-
-    # exige colunas mínimas
-    needed = {"match_id", "home", "away"}
-    if not needed.issubset(set(c.lower() for c in ms.columns)):
-        # tenta normalizar cabeçalhos
-        cols_map = {c.lower(): c for c in ms.columns}
-        miss = needed - set(cols_map.keys())
-        if miss:
-            log(f"AVISO: matches_source.csv sem colunas {miss} (seguindo sem join).")
-            return cons
-
-    # harmoniza nomes reais preservando maiúsculas do arquivo
-    cols_map = {c.lower(): c for c in ms.columns}
-    mh = cols_map["home"]; ma = cols_map["away"]; mid = cols_map["match_id"]
-    tmp = ms[[mid, mh, ma]].copy()
-    tmp["match_key"] = tmp.apply(lambda r: make_key(r[mh], r[ma]), axis=1)
-
-    out = cons.merge(tmp[[mid, "match_key"]], on="match_key", how="left")
-    # reordena (se existir match_id)
-    if mid in out.columns:
-        out = out[[mid, "home", "away", "odd_home", "odd_draw", "odd_away",
-                   "imp_home", "imp_draw", "imp_away", "match_key"]]
-        out = out.rename(columns={mid: "match_id"})
-    return out
-
-# ---------- main ----------
-
+# --------- Main ----------
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="ID numérico da rodada (pasta em data/out/<ID>/)")
-    args = ap.parse_args()
+    args = parse_args()
+    out_dir = _out_dir(args.rodada)
+    os.makedirs(out_dir, exist_ok=True)
 
-    rid = str(args.rodada).strip()
-    out_dir = os.path.join("data", "out", rid)
-    if not os.path.isdir(out_dir):
-        die(2, f"diretório de saída não existe: {out_dir}")
+    path_theodds = os.path.join(out_dir, "odds_theoddsapi.csv")
+    path_apifoot = os.path.join(out_dir, "odds_apifootball.csv")
 
-    # entradas esperadas
-    odds_theodds = os.path.join(out_dir, "odds_theoddsapi.csv")
-    odds_apifoot = os.path.join(out_dir, "odds_apifootball.csv")
+    _log(args.debug, "rodada:", out_dir)
+    _log(args.debug, "buscando fontes:", path_theodds, path_apifoot)
 
-    df1 = load_csv_safe(odds_theodds)
-    if not df1.empty:
-        df1n = normalize_schema(df1, "theoddsapi")
-    else:
-        df1n = pd.DataFrame()
+    df_t = _read_flex_csv(path_theodds, "theoddsapi", debug=args.debug)
+    df_a = _read_flex_csv(path_apifoot, "apifootball", debug=args.debug)
 
-    df2 = load_csv_safe(odds_apifoot)
-    if not df2.empty:
-        df2n = normalize_schema(df2, "apifootball")
-    else:
-        df2n = pd.DataFrame()
+    # se nenhuma fonte disponível, erro controlado:
+    if df_t.empty and df_a.empty:
+        print("[consensus] AVISO: arquivo não encontrado: ", path_apifoot)
+        raise SystemExit("[consensus] ERRO: nenhuma fonte de odds disponível.")
 
-    dfs = [d for d in [df1n, df2n] if not d.empty]
-    if not dfs:
-        die(1, "nenhuma fonte de odds disponível.")
+    df_all = pd.concat([df_t, df_a], ignore_index=True)
+    df_all = df_all.dropna(subset=["team_home","team_away","odds_home","odds_draw","odds_away"])
 
-    cons = consensus(dfs)
-    if cons.empty:
-        die(1, "consenso gerou DF vazio.")
+    # consolidar
+    df_cons = _consolidate(df_all)
+    if df_cons.empty:
+        raise SystemExit("[consensus] ERRO: após consolidação, não há odds válidas.")
 
-    cons = try_join_matches(cons)
+    # construir match_id padronizado
+    df_cons["match_id"] = (df_cons["team_home"].str.strip() + "__" + df_cons["team_away"].str.strip())
+
+    # ordena para ficar previsível
+    df_cons = df_cons[["match_id","team_home","team_away","odds_home","odds_draw","odds_away","source"]]
+    df_cons = df_cons.sort_values(by=["team_home","team_away"]).reset_index(drop=True)
 
     out_path = os.path.join(out_dir, "odds_consensus.csv")
-    cons.to_csv(out_path, index=False)
-    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-        die(1, "odds_consensus.csv não gerado.")
-
-    # também gera um pequeno JSON resumo
-    resume = {
-        "total_matches": int(cons.shape[0]),
-        "source_files": {
-            "theoddsapi": os.path.exists(odds_theodds),
-            "apifootball": os.path.exists(odds_apifoot)
-        }
-    }
-    with open(os.path.join(out_dir, "odds_consensus_meta.json"), "w", encoding="utf-8") as f:
-        json.dump(resume, f, ensure_ascii=False, indent=2)
-
-    log(f"OK -> {out_path} ({cons.shape[0]} jogos)")
+    df_cons.to_csv(out_path, index=False)
+    print(f"[consensus] OK -> {out_path}")
+    if args.debug:
+        print(df_cons.head(20))
 
 if __name__ == "__main__":
     main()
