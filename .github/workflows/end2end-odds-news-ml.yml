@@ -40,7 +40,6 @@ on:
 permissions:
   contents: read
   packages: read
-  metadata: read
 
 jobs:
   loteca:
@@ -125,7 +124,7 @@ jobs:
           test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv não gerado"; exit 4; }
           head -n 10 "${OUT_DIR}/odds_theoddsapi.csv" || true
 
-      # 2) ODDS – API-FOOTBALL via RapidAPI (opcional; se faltar key, segue)
+      # 2) ODDS – API-FOOTBALL via RapidAPI (opcional)
       - name: Ingest API-FOOTBALL (RapidAPI) - odds
         shell: bash
         continue-on-error: true
@@ -229,7 +228,7 @@ jobs:
           test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv não gerado"; exit 22; }
           head -n 10 "${OUT_DIR}/features_bivariado.csv" || true
 
-      # 10) BLEND de modelos (usa market + features se disponíveis)
+      # 10) BLEND de modelos
       - name: Blend de modelos
         shell: bash
         run: |
@@ -259,7 +258,7 @@ jobs:
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
           head -n 20 "${OUT_DIR}/kelly_stakes.csv" || true
 
-      # 13) CARTÃO LOTECA (sempre por último)
+      # 13) CARTÃO LOTECA
       - name: Construir Cartão Loteca
         shell: bash
         run: |
@@ -271,7 +270,7 @@ jobs:
           cat "${OUT_DIR}/loteca_cartao.txt" || true
           echo "========================"
 
-      # 14) SANITY / reality check do pipeline
+      # 14) SANITY / reality check
       - name: Sanity / Reality Check
         shell: bash
         run: |
