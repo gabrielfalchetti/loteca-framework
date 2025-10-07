@@ -1,4 +1,4 @@
-name: End2End - Odds + API-Football + News + Kelly
+lname: End2End - Odds + API-Football + News + Kelly
 
 on:
   workflow_dispatch:
