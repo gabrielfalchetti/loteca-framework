@@ -1,227 +1,332 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Cria features univariadas a partir de odds de consenso.
+features_univariado.py
+----------------------
+Gera features univariadas a partir de odds/market para cada jogo.
 
-Entrada obrigatória:
-  <OUT_DIR>/odds_consensus.csv
-  Colunas aceitas (aliases normalizados internamente):
-    Teams:   home | away  (aceita team_home/home_team/mandante e team_away/away_team/visitante)
-    Odds:    odd_home | odd_draw | odd_away  (aceita odds_home/odds_draw/odds_away etc.)
-    Probs:   imp_home | imp_draw | imp_away  (opcional; se ausente, calcula de 1/odds com overround)
+Entradas (usa o que existir):
+- data/out/<rodada>/predictions_market.csv   (preferencial)
+  colunas esperadas: match_key,home,away,odd_home,odd_draw,odd_away[,p_home,p_draw,p_away]
+- data/out/<rodada>/odds_consensus.csv       (fallback)
+  colunas esperadas: team_home,team_away,odds_home,odds_draw,odds_away[,match_key]
 
 Saída:
-  <OUT_DIR>/features_univariado.csv
+- data/out/<rodada>/features_univariado.csv
+
+Colunas de saída:
+match_key,home,away,odd_home,odd_draw,odd_away,
+imp_home,imp_draw,imp_away,overround,
+fair_p_home,fair_p_draw,fair_p_away,
+gap_home_away,gap_top_second,
+logit_imp_home,logit_imp_draw,logit_imp_away,
+fav_label,entropy_bits,
+value_home,value_draw,value_away,
+has_probs,has_all_odds
 """
 
-import argparse, os, sys, json, unicodedata
-from typing import List, Tuple
+import argparse
+import csv
+import math
+import os
+from typing import Tuple
+
 import pandas as pd
-import numpy as np
 
-DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 
-HOME_ALIASES = ["home","team_home","home_team","mandante"]
-AWAY_ALIASES = ["away","team_away","away_team","visitante"]
-OH_ALIASES   = ["odd_home","odds_home","home_odds","o1","price_home","h2h_home"]
-OD_ALIASES   = ["odd_draw","odds_draw","draw_odds","ox","price_draw","h2h_draw"]
-OA_ALIASES   = ["odd_away","odds_away","away_odds","o2","price_away","h2h_away"]
-PH_ALIASES   = ["imp_home","p_home","prob_home"]
-PD_ALIASES   = ["imp_draw","p_draw","prob_draw"]
-PA_ALIASES   = ["imp_away","p_away","prob_away"]
+def log(msg: str, debug: bool = False):
+    if debug:
+        print(f"[univariado] {msg}", flush=True)
 
-def log(msg:str): print(f"[univariado] {msg}")
-def die(code:int,msg:str):
-    log(msg); sys.exit(code)
 
-def first_col(df: pd.DataFrame, cands: List[str]) -> str:
-    lower = {c.lower(): c for c in df.columns}
-    for k in cands:
-        if k.lower() in lower: return lower[k.lower()]
-    # por substring
-    for c in df.columns:
-        for k in cands:
-            if k.lower() in c.lower(): return c
-    return ""
+def resolve_out_dir(rodada_arg: str) -> str:
+    """Aceita tanto um ID (ex.: '17598...') quanto o caminho 'data/out/<id>'."""
+    if os.path.isdir(rodada_arg):
+        return rodada_arg
+    candidate = os.path.join("data", "out", str(rodada_arg))
+    if os.path.isdir(candidate):
+        return candidate
+    # cria se ainda não existir (permite rodar local)
+    os.makedirs(candidate, exist_ok=True)
+    return candidate
 
-def strip_accents_lower(s:str) -> str:
-    if pd.isna(s): return ""
-    s = str(s).strip()
-    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
-    return s.lower()
 
-def make_key(h:str,a:str)->str: return f"{strip_accents_lower(h)}__vs__{strip_accents_lower(a)}"
+def norm_team(s):
+    if s is None:
+        return ""
+    return str(s).strip()
 
-def load_consensus(path:str)->pd.DataFrame:
-    if not os.path.exists(path): die(21,f"arquivo não encontrado: {path}")
+
+def build_match_key(home: str, away: str) -> str:
+    h = (home or "").strip().lower().replace(" ", "-")
+    a = (away or "").strip().lower().replace(" ", "-")
+    return f"{h}__vs__{a}"
+
+
+def implied(odd: float) -> float:
     try:
-        df = pd.read_csv(path)
-        if df.empty or df.shape[1]==0: die(21,f"arquivo vazio/sem colunas: {path}")
-        return df
-    except Exception as e:
-        die(21,f"falha ao ler {path}: {e}")
+        odd = float(odd)
+        return 0.0 if odd <= 0 else 1.0 / odd
+    except Exception:
+        return float("nan")
 
-def normalize(df: pd.DataFrame)->Tuple[pd.DataFrame,dict]:
-    ch = first_col(df, HOME_ALIASES); ca = first_col(df, AWAY_ALIASES)
-    if not ch or not ca: die(21,"colunas de times (home/away) não identificadas")
 
-    oh = first_col(df, OH_ALIASES); od = first_col(df, OD_ALIASES); oa = first_col(df, OA_ALIASES)
-    if not (oh and od and oa):
-        # odds são obrigatórias (sem elas não calculamos nada)
-        die(21,"colunas de odds (odd_home/odd_draw/odd_away) não identificadas")
+def entropy_bits(p_home: float, p_draw: float, p_away: float) -> float:
+    vals = [p_home, p_draw, p_away]
+    e = 0.0
+    for p in vals:
+        if p is None or not (p > 0.0):
+            continue
+        e -= p * math.log2(p)
+    return e
 
-    ph = first_col(df, PH_ALIASES); pd_ = first_col(df, PD_ALIASES); pa = first_col(df, PA_ALIASES)
 
-    out = pd.DataFrame()
-    out["home"] = df[ch].astype(str)
-    out["away"] = df[ca].astype(str)
-
-    def fodd(x):
-        try:
-            v = float(x)
-            return v if v>1.0001 else np.nan
-        except: return np.nan
-
-    out["odd_home"] = df[oh].map(fodd)
-    out["odd_draw"] = df[od].map(fodd)
-    out["odd_away"] = df[oa].map(fodd)
-
-    # probs implícitas (opcional)
-    if ph: out["imp_home"] = pd.to_numeric(df[ph], errors="coerce")
-    if pd_: out["imp_draw"] = pd.to_numeric(df[pd_], errors="coerce")
-    if pa: out["imp_away"] = pd.to_numeric(df[pa], errors="coerce")
-
-    out["match_key"] = out.apply(lambda r: make_key(r["home"], r["away"]), axis=1)
-    keep = out[["odd_home","odd_draw","odd_away"]].notna().all(axis=1)
-    out = out[keep].reset_index(drop=True)
-    if out.empty: die(21,"nenhuma linha válida após normalização")
-
-    used = {"home":ch,"away":ca,"odd_home":oh,"odd_draw":od,"odd_away":oa,"imp_home":ph,"imp_draw":pd_,"imp_away":pa}
-    return out, used
-
-def probs_from_odds(df: pd.DataFrame) -> pd.DataFrame:
-    has_imp = df.filter(regex=r"^imp_").notna().any(axis=None)
-    if not has_imp:
-        inv = pd.DataFrame({
-            "h": 1.0/df["odd_home"],
-            "x": 1.0/df["odd_draw"],
-            "a": 1.0/df["odd_away"],
-        })
-        s = inv.sum(axis=1)
-        df["imp_home"] = inv["h"]/s
-        df["imp_draw"] = inv["x"]/s
-        df["imp_away"] = inv["a"]/s
-    else:
-        # completa faltantes com 1/odds normalizado
-        inv = pd.DataFrame({
-            "h": 1.0/df["odd_home"],
-            "x": 1.0/df["odd_draw"],
-            "a": 1.0/df["odd_away"],
-        })
-        s = inv.sum(axis=1)
-        for tgt,src in [("imp_home","h"),("imp_draw","x"),("imp_away","a")]:
-            if tgt not in df.columns: df[tgt]=np.nan
-            miss = df[tgt].isna()
-            df.loc[miss, tgt] = (inv[src]/s)[miss]
-    return df
-
-def add_univariate_features(df: pd.DataFrame)->pd.DataFrame:
-    # overround e fair odds
-    inv_sum = (1/df["odd_home"]) + (1/df["odd_draw"]) + (1/df["odd_away"])
-    df["overround"] = inv_sum
-    df["fair_p_home"] = (1/df["odd_home"]) / inv_sum
-    df["fair_p_draw"] = (1/df["odd_draw"]) / inv_sum
-    df["fair_p_away"] = (1/df["odd_away"]) / inv_sum
-
-    # gaps e skew
-    df["gap_home_away"] = df["imp_home"] - df["imp_away"]
-    df["gap_top_second"] = (df[["imp_home","imp_draw","imp_away"]].max(axis=1) -
-                            df[["imp_home","imp_draw","imp_away"]].apply(
-                                lambda r: r.sort_values(ascending=False).iloc[1], axis=1))
-
-    # log-odds (logit) — estabilidade numérica
+def safe_logit(p: float) -> float:
+    # logit(p) = ln(p / (1-p)) com estabilização
     eps = 1e-9
-    for col in ["imp_home","imp_draw","imp_away"]:
-        df[f"logit_{col}"] = np.log((df[col].clip(eps,1-eps))/(1-df[col].clip(eps,1-eps)))
+    try:
+        p = float(p)
+    except Exception:
+        return float("nan")
+    p = max(eps, min(1.0 - eps, p))
+    return math.log(p / (1.0 - p))
 
-    # favoritos
-    df["fav_label"] = df[["imp_home","imp_draw","imp_away"]].idxmax(axis=1).map(
-        {"imp_home":"1","imp_draw":"X","imp_away":"2"}
-    )
 
-    # entropia (incerteza)
-    p = df[["imp_home","imp_draw","imp_away"]].clip(1e-12,1)
-    df["entropy_bits"] = -(p*np.log2(p)).sum(axis=1)
+def compute_from_odds_row(home: str, away: str, odd_h: float, odd_d: float, odd_a: float) -> dict:
+    # probabilidades implícitas
+    imp_h = implied(odd_h)
+    imp_d = implied(odd_d)
+    imp_a = implied(odd_a)
+    s_imp = imp_h + imp_d + imp_a
 
-    # sinal de valor bruto: p_implícita - fair_p
-    df["value_home"] = df["imp_home"] - df["fair_p_home"]
-    df["value_draw"] = df["imp_draw"] - df["fair_p_draw"]
-    df["value_away"] = df["imp_away"] - df["fair_p_away"]
+    # overround (soma de implícitas)
+    over = s_imp if s_imp > 0 else float("nan")
 
-    # controles
-    df["has_probs"] = df[["imp_home","imp_draw","imp_away"]].notna().all(axis=1).astype(int)
-    df["has_all_odds"] = df[["odd_home","odd_draw","odd_away"]].notna().all(axis=1).astype(int)
+    # probabilidades "justas" (normalizadas)
+    if s_imp > 0:
+        fair_h = imp_h / s_imp
+        fair_d = imp_d / s_imp
+        fair_a = imp_a / s_imp
+    else:
+        fair_h = fair_d = fair_a = float("nan")
 
-    return df
+    # gaps/métricas simples
+    gap_home_away = (fair_h - fair_a) if (not math.isnan(fair_h) and not math.isnan(fair_a)) else float("nan")
+
+    # top vs second para margem
+    probs = [("home", fair_h), ("draw", fair_d), ("away", fair_a)]
+    probs_sorted = sorted(probs, key=lambda x: x[1] if x[1] == x[1] else -1, reverse=True)  # NaN fica por último
+    if all(not math.isnan(v[1]) for v in probs_sorted):
+        top = probs_sorted[0][1]
+        second = probs_sorted[1][1]
+        gap_top_second = top - second
+        fav_label = {"home": 1, "draw": 0, "away": 2}[probs_sorted[0][0]]
+    else:
+        gap_top_second = float("nan")
+        fav_label = ""
+
+    # logits das implícitas (antes de normalizar)
+    logit_h = safe_logit(imp_h / s_imp) if s_imp > 0 else float("nan")
+    logit_d = safe_logit(imp_d / s_imp) if s_imp > 0 else float("nan")
+    logit_a = safe_logit(imp_a / s_imp) if s_imp > 0 else float("nan")
+
+    # entropia das fair probs
+    ent = entropy_bits(fair_h, fair_d, fair_a)
+
+    # (placeholders) value bets – podem ser calculadas quando houver projeções próprias
+    value_home = 0.0
+    value_draw = 0.0
+    value_away = 0.0
+
+    return {
+        "home": home,
+        "away": away,
+        "odd_home": odd_h,
+        "odd_draw": odd_d,
+        "odd_away": odd_a,
+        "imp_home": imp_h if s_imp > 0 else float("nan"),
+        "imp_draw": imp_d if s_imp > 0 else float("nan"),
+        "imp_away": imp_a if s_imp > 0 else float("nan"),
+        "overround": over,
+        "fair_p_home": fair_h,
+        "fair_p_draw": fair_d,
+        "fair_p_away": fair_a,
+        "gap_home_away": gap_home_away,
+        "gap_top_second": gap_top_second,
+        "logit_imp_home": logit_h,
+        "logit_imp_draw": logit_d,
+        "logit_imp_away": logit_a,
+        "fav_label": fav_label,
+        "entropy_bits": ent,
+        "value_home": value_home,
+        "value_draw": value_draw,
+        "value_away": value_away,
+    }
+
+
+def load_market_first(out_dir: str, debug: bool = False) -> pd.DataFrame:
+    """
+    Tenta carregar predictions_market.csv (preferido).
+    Fallback: odds_consensus.csv -> renomeia colunas e constrói match_key.
+    """
+    fp_market = os.path.join(out_dir, "predictions_market.csv")
+    if os.path.isfile(fp_market):
+        df = pd.read_csv(fp_market)
+        log(f"usando predictions_market.csv ({fp_market})", debug)
+
+        # garantir nomes/colunas
+        ren = {}
+        if "team_home" in df.columns and "home" not in df.columns:
+            ren["team_home"] = "home"
+        if "team_away" in df.columns and "away" not in df.columns:
+            ren["team_away"] = "away"
+        if ren:
+            df = df.rename(columns=ren)
+
+        # odds podem estar com nomes "odd_*" já corretos; se vierem como "odds_*", alinhar
+        r2 = {}
+        if "odds_home" in df.columns and "odd_home" not in df.columns:
+            r2["odds_home"] = "odd_home"
+        if "odds_draw" in df.columns and "odd_draw" not in df.columns:
+            r2["odds_draw"] = "odd_draw"
+        if "odds_away" in df.columns and "odd_away" not in df.columns:
+            r2["odds_away"] = "odd_away"
+        if r2:
+            df = df.rename(columns=r2)
+
+        # construir match_key se necessário
+        if "match_key" not in df.columns:
+            df["match_key"] = df.apply(lambda r: build_match_key(str(r.get("home","")), str(r.get("away",""))), axis=1)
+        else:
+            df["match_key"] = df["match_key"].fillna("").astype(str).str.strip()
+            mk_empty = df["match_key"].eq("")
+            if mk_empty.any():
+                df.loc[mk_empty, "match_key"] = df.loc[mk_empty].apply(
+                    lambda r: build_match_key(str(r.get("home","")), str(r.get("away",""))), axis=1
+                )
+
+        # tipagem básica
+        for c in ["odd_home", "odd_draw", "odd_away"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        # flags
+        df["has_probs"] = ((df.get("p_home").notna()) & (df.get("p_draw").notna()) & (df.get("p_away").notna())).astype(int)
+        df["has_all_odds"] = ((df.get("odd_home").notna()) & (df.get("odd_draw").notna()) & (df.get("odd_away").notna())).astype(int)
+
+        # manter apenas colunas de interesse nessa fase
+        keep = ["match_key", "home", "away", "odd_home", "odd_draw", "odd_away", "p_home", "p_draw", "p_away", "has_probs", "has_all_odds"]
+        for k in keep:
+            if k not in df.columns:
+                df[k] = pd.NA
+        return df[keep].copy()
+
+    # fallback: consensus
+    fp_cons = os.path.join(out_dir, "odds_consensus.csv")
+    if not os.path.isfile(fp_cons):
+        raise FileNotFoundError("[univariado] Nenhum dos arquivos encontrados: predictions_market.csv nem odds_consensus.csv")
+
+    dfc = pd.read_csv(fp_cons)
+    log(f"fallback em odds_consensus.csv ({fp_cons})", debug)
+
+    ren = {}
+    if "team_home" in dfc.columns and "home" not in dfc.columns:
+        ren["team_home"] = "home"
+    if "team_away" in dfc.columns and "away" not in dfc.columns:
+        ren["team_away"] = "away"
+    if ren:
+        dfc = dfc.rename(columns=ren)
+
+    r2 = {}
+    if "odds_home" in dfc.columns and "odd_home" not in dfc.columns:
+        r2["odds_home"] = "odd_home"
+    if "odds_draw" in dfc.columns and "odd_draw" not in dfc.columns:
+        r2["odds_draw"] = "odd_draw"
+    if "odds_away" in dfc.columns and "odd_away" not in dfc.columns:
+        r2["odds_away"] = "odd_away"
+    if r2:
+        dfc = dfc.rename(columns=r2)
+
+    # match_key
+    if "match_key" not in dfc.columns:
+        dfc["match_key"] = dfc.apply(lambda r: build_match_key(str(r.get("home","")), str(r.get("away",""))), axis=1)
+    else:
+        dfc["match_key"] = dfc["match_key"].fillna("").astype(str).str.strip()
+        mk_empty = dfc["match_key"].eq("")
+        if mk_empty.any():
+            dfc.loc[mk_empty, "match_key"] = dfc.loc[mk_empty].apply(
+                lambda r: build_match_key(str(r.get("home","")), str(r.get("away",""))), axis=1
+            )
+
+    # tipagem básica
+    for c in ["odd_home", "odd_draw", "odd_away"]:
+        if c in dfc.columns:
+            dfc[c] = pd.to_numeric(dfc[c], errors="coerce")
+
+    dfc["has_probs"] = 0  # não há p_* no consensus
+    dfc["has_all_odds"] = ((dfc.get("odd_home").notna()) & (dfc.get("odd_draw").notna()) & (dfc.get("odd_away").notna())).astype(int)
+
+    keep = ["match_key", "home", "away", "odd_home", "odd_draw", "odd_away", "has_probs", "has_all_odds"]
+    for k in keep:
+        if k not in dfc.columns:
+            dfc[k] = pd.NA
+    return dfc[keep].copy()
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Diretório da rodada: ex. data/out/<RID>")
-    ap.add_argument("--season", required=False, help="(Opcional) temporada para meta", default="")
-    ap.add_argument("--debug", action="store_true", default=False)
+    ap.add_argument("--rodada", required=True, help="ID da rodada OU caminho data/out/<id>")
+    ap.add_argument("--season", required=False, help="temporada (não usada diretamente aqui, mantida por consistência)")
+    ap.add_argument("--debug", action="store_true", help="Imprime logs detalhados")
     args = ap.parse_args()
 
-    out_dir = args.rodada
-    if not os.path.isdir(out_dir): die(21,f"OUT_DIR inexistente: {out_dir}")
+    out_dir = resolve_out_dir(args.rodada)
+    df_base = load_market_first(out_dir, args.debug)
 
-    in_p = os.path.join(out_dir, "odds_consensus.csv")
-    df_raw = load_consensus(in_p)
-    df, used = normalize(df_raw)
-    df = probs_from_odds(df)
-    df = add_univariate_features(df)
+    rows = []
+    for _, r in df_base.iterrows():
+        mk = str(r.get("match_key", "") or "").strip()
+        home = norm_team(r.get("home"))
+        away = norm_team(r.get("away"))
+        oh = r.get("odd_home")
+        od = r.get("odd_draw")
+        oa = r.get("odd_away")
 
-    # colunas finais
-    cols = [
-        "match_key","home","away",
-        "odd_home","odd_draw","odd_away",
-        "imp_home","imp_draw","imp_away",
-        "overround","fair_p_home","fair_p_draw","fair_p_away",
-        "gap_home_away","gap_top_second",
-        "logit_imp_home","logit_imp_draw","logit_imp_away",  # nomes harmonizados
-        "fav_label","entropy_bits",
-        "value_home","value_draw","value_away",
-        "has_probs","has_all_odds"
-    ]
-    # renomeia logits conforme add_univariate
-    rename_map = {
-        "logit_imp_home":"logit_imp_home",
-        "logit_imp_draw":"logit_imp_draw",
-        "logit_imp_away":"logit_imp_away",
-    }
-    # já estão com esses nomes; apenas garante presença
-    for c in cols:
-        if c not in df.columns: df[c]=np.nan
+        # calcula features a partir das odds
+        feats = compute_from_odds_row(home, away, oh, od, oa)
+        feats["match_key"] = mk
 
-    out_p = os.path.join(out_dir, "features_univariado.csv")
-    df[cols].to_csv(out_p, index=False)
+        # flags/auxiliares
+        feats["has_probs"] = int(r.get("has_probs", 0)) if pd.notna(r.get("has_probs", pd.NA)) else 0
+        feats["has_all_odds"] = int(r.get("has_all_odds", 0)) if pd.notna(r.get("has_all_odds", pd.NA)) else 0
 
-    if not os.path.exists(out_p) or os.path.getsize(out_p)==0:
-        die(21,"features_univariado.csv não gerado")
+        rows.append(feats)
 
-    # meta
-    meta = {
-        "rows": int(df.shape[0]),
-        "season": args.season,
-        "source": os.path.relpath(in_p),
-        "used_columns": used
-    }
-    with open(os.path.join(out_dir,"features_univariado_meta.json"),"w",encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
+    out_df = pd.DataFrame(rows, columns=[
+        "match_key",
+        "home", "away",
+        "odd_home", "odd_draw", "odd_away",
+        "imp_home", "imp_draw", "imp_away",
+        "overround",
+        "fair_p_home", "fair_p_draw", "fair_p_away",
+        "gap_home_away", "gap_top_second",
+        "logit_imp_home", "logit_imp_draw", "logit_imp_away",
+        "fav_label", "entropy_bits",
+        "value_home", "value_draw", "value_away",
+        "has_probs", "has_all_odds",
+    ])
 
-    log(f"OK -> {out_p} ({df.shape[0]} jogos)")
-    if args.debug or DEBUG:
-        print(df.head(10).to_string(index=False))
+    # ordena por entropia (jogos "mais definidos" primeiro) apenas para visual
+    out_df = out_df.sort_values(by=["entropy_bits"], ascending=True, na_position="last").reset_index(drop=True)
+
+    out_path = os.path.join(out_dir, "features_univariado.csv")
+    out_df.to_csv(out_path, index=False, quoting=csv.QUOTE_MINIMAL)
+
+    log(f"OK -> {out_path} ({len(out_df)} jogos)", args.debug)
+    if args.debug and len(out_df) > 0:
+        print(out_df.head(10).to_string(index=False))
+        print(out_df.head(10).to_csv(index=False))
+
 
 if __name__ == "__main__":
     main()
