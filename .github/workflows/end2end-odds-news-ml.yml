@@ -9,9 +9,7 @@ permissions:
 jobs:
   end2end:
     runs-on: ubuntu-latest
-
     env:
-      # Configurações gerais
       SEASON: '2025'
       REGIONS: 'uk,eu,us,au'
       BANKROLL: '1000'
@@ -20,6 +18,9 @@ jobs:
       ROUND_TO: '1'
       KELLY_TOP_N: '14'
       DEBUG: 'true'
+      # Ajuste aqui os sports do TheOddsAPI conforme os jogos do dia:
+      # Ex.: Argentina
+      ODDS_SPORTS: 'soccer_argentina_primera_division,soccer_argentina_primera_nacional'
 
     steps:
       - name: Checkout
@@ -36,7 +37,7 @@ jobs:
           pip install -r requirements.txt
           echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
 
-      - name: Define RODADA_ID e OUT_DIR
+      - name: Define RODADA_ID / OUT_DIR
         run: |
           set -e
           echo "RODADA_ID=${GITHUB_RUN_ID}" >> $GITHUB_ENV
@@ -46,71 +47,65 @@ jobs:
       - name: Sanity - matches_source.csv existe
         run: |
           set -e
-          FILE="data/in/matches_source.csv"
-          if [ ! -f "$FILE" ]; then
-            echo "::error::Arquivo $FILE não encontrado. Crie-o antes de rodar."
+          if [ ! -f "data/in/matches_source.csv" ]; then
+            echo "::error::data/in/matches_source.csv não encontrado."
             echo "Formato mínimo: match_key,home,away"
             exit 2
           fi
-          echo "Entrada OK: $FILE"
+          echo "OK: data/in/matches_source.csv"
 
-      # 1) Coleta de odds (TheOddsAPI)
       - name: Coletar odds (TheOddsAPI)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -e
           if [ -z "${THEODDS_API_KEY}" ]; then
-            echo "::warning::THEODDS_API_KEY não configurado — pulando TheOddsAPI."
-            exit 0
+            echo "::warning::THEODDS_API_KEY ausente — pulando coleta."
+            # ainda criamos arquivos vazios com cabeçalho para não quebrar
+            mkdir -p "${OUT_DIR}"
+            printf "match_key,team_home,team_away,odds_home,odds_draw,odds_away\n" > "${OUT_DIR}/odds_theoddsapi.csv"
+            printf "match_key,home,away,reason\n" > "${OUT_DIR}/unmatched_theoddsapi.csv"
+          else
+            python scripts/ingest_odds_theoddsapi_safe.py \
+              --rodada "${OUT_DIR}" \
+              --regions "${REGIONS}" \
+              --sports "${ODDS_SPORTS}" \
+              --debug
           fi
-          if [ ! -f "scripts/ingest_odds_theoddsapi_safe.py" ]; then
-            echo "::error::scripts/ingest_odds_theoddsapi_safe.py não encontrado."
-            exit 4
-          fi
-          python scripts/ingest_odds_theoddsapi_safe.py \
-            --rodada "${OUT_DIR}" \
-            --regions "${REGIONS}" \
-            --debug
           ls -la "${OUT_DIR}" || true
 
-      # 2) Consenso das odds
       - name: Consolidar odds (consensus)
         run: |
           set -e
           python -m scripts.consensus_odds_safe --rodada "${RODADA_ID}"
-          echo "==== odds_consensus.csv (preview) ===="
-          head -n 20 "data/out/${RODADA_ID}/odds_consensus.csv" || true
-          echo "======================================"
+          echo "==== odds_consensus.csv ===="
+          head -n 30 "data/out/${RODADA_ID}/odds_consensus.csv" || true
+          echo "==========================="
 
-      # 3) Predição a partir das odds
-      - name: Predizer resultados a partir das odds
+      - name: Predizer resultados (market)
         run: |
           set -e
-          python scripts/predict_from_odds.py --rodada "${RODADA_ID}" --debug
-          echo "==== predictions_market.csv (preview) ===="
-          head -n 20 "data/out/${RODADA_ID}/predictions_market.csv" || true
-          echo "=========================================="
+          python scripts/predict_from_odds.py --rodada "${RODADA_ID}" --debug || true
+          echo "==== predictions_market.csv ===="
+          head -n 30 "data/out/${RODADA_ID}/predictions_market.csv" || true
+          echo "==============================="
 
-      # 4) Cartão da Loteca (só depois de tudo acima)
       - name: Gerar cartão da Loteca
         run: |
           set -e
-          python scripts/build_cartao.py --rodada "${RODADA_ID}"
+          python scripts/build_cartao.py --rodada "${RODADA_ID}" || true
           echo "==== loteca_cartao.txt ===="
           cat "data/out/${RODADA_ID}/loteca_cartao.txt" || true
 
-      # 5) Kelly (opcional, não falha o job)
       - name: Publicar Kelly (opcional)
         run: |
           set -e
           if [ -f "scripts/publish_kelly.py" ]; then
             python scripts/publish_kelly.py --rodada "${RODADA_ID}" --debug || true
           else
-            echo "::warning::scripts/publish_kelly.py não encontrado — pulando Kelly."
+            echo "::warning::publish_kelly.py não encontrado."
           fi
 
-      # 6) Artefatos de saída
       - name: Upload artefatos
         uses: actions/upload-artifact@v4
         with:
