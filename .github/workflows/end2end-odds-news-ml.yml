@@ -1,19 +1,19 @@
-name: end2end-odds-news-ml
+name: end2end-odds-news-ml (STRICT)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   push:
     paths:
       - ".github/workflows/end2end-odds-news-ml.yml"
       - "scripts/**"
-      - "data/in/matches_source.csv"
-      - "requirements.txt"
+      - "data/in/**"
 
 jobs:
   end2end:
     runs-on: ubuntu-latest
+
     env:
-      # === Configs padrão (ajuste se quiser) ===
+      # ========= Configs gerais =========
       SEASON: "2025"
       REGIONS: "uk,eu,us,au"
       BANKROLL: "1000"
@@ -22,76 +22,112 @@ jobs:
       ROUND_TO: "1"
       KELLY_TOP_N: "14"
       DEBUG: "true"
-      # habilite/desabilite as integrações (true/false)
-      APIFOOT_ENABLED: "true"
-      NEWS_ENABLED: "true"
-      INJURIES_ENABLED: "true"
+
+      # IDs e diretórios (gerados no job)
+      RODADA_ID: ""
+      OUT_DIR: ""
+
+      # ======== Chaves obrigatórias ========
+      # -> Se alguma estiver faltando, o job falha logo no começo.
+      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+
+      # (opcional para tracking; mas aqui não é opcional: se definir, vamos logar)
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -e
+          miss=0
+          for key in THEODDS_API_KEY X_RAPIDAPI_KEY NEWSAPI_KEY; do
+            if [ -z "${!key}" ]; then
+              echo "::error::Secret $key ausente. Configure em Settings > Secrets."
+              miss=1
+            fi
+          done
+          if [ "$miss" -ne 0 ]; then
+            exit 2
+          fi
+          echo "Todos os secrets obrigatórios estão presentes."
+
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
+        shell: bash
         run: |
           set -e
           python -m pip install --upgrade pip
+          # Mantemos uma base robusta; se houver requirements.txt no repo, ele será usado também.
+          pip install pandas numpy scipy scikit-learn requests python-dateutil pytz matplotlib
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Garantias mínimas
-          pip install pandas numpy requests scikit-learn
 
-      - name: Prepare run IDs and folders
+      - name: Prepare output id and folders
         id: prep
+        shell: bash
         run: |
           set -e
-          # Um ID estável por execução
-          export RODADA_ID="${GITHUB_RUN_ID}"
-          export OUT_DIR="data/out/${RODADA_ID}"
-          echo "RODADA_ID=${RODADA_ID}" >> $GITHUB_ENV
-          echo "OUT_DIR=${OUT_DIR}" >> $GITHUB_ENV
+          RID="$(date +%s%N | cut -b1-11)"
+          echo "RID=$RID"
+          echo "RODADA_ID=$RID" >> $GITHUB_ENV
+          echo "OUT_DIR=data/out/$RID" >> $GITHUB_ENV
+          mkdir -p "data/in" "data/out/$RID"
+          echo "data/out/$RID" > data/out/latest_dir.txt
 
-          mkdir -p "${OUT_DIR}"
-          echo "Saída: ${OUT_DIR}"
-
-          # matches_source centralizado (sem subpasta por rodada)
-          FILE_IN="data/in/matches_source.csv"
-          if [ ! -f "${FILE_IN}" ]; then
-            echo "::error::Arquivo obrigatório não encontrado: ${FILE_IN}"
-            exit 2
-          fi
-          echo "Entrada OK: ${FILE_IN}"
-
-      - name: Optional login to Weights & Biases
-        if: env.WANDB_API_KEY != ''
-        env:
-          WANDB_API_KEY: ${{ env.WANDB_API_KEY }}
+      - name: Validate input (data/in/matches_source.csv)
+        shell: bash
         run: |
           set -e
-          echo "W&B login..."
-          python - << 'PY'
-import os, subprocess
-key=os.environ.get("WANDB_API_KEY")
-raise SystemExit(0) if not key else subprocess.run(["wandb","login",key], check=False)
-PY
-
-      # =========================
-      # 1) COLETA DE ODDS
-      # =========================
-      - name: Ingest TheOddsAPI
-        env:
-          THEODDS_API_KEY: ${{ env.THEODDS_API_KEY }}
-        run: |
-          set -e
-          if [ -z "${THEODDS_API_KEY}" ]; then
-            echo "::error::THEODDS_API_KEY não definido."
+          FILE="data/in/matches_source.csv"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Entrada $FILE não encontrada. Crie com cabeçalho: match_id,home,away,source"
             exit 3
           fi
+          # Checa cabeçalhos essenciais
+          header_ok=$(head -n1 "$FILE" | tr -d '\r' | grep -i -E '(^|,)match_id(,|$)' | wc -l)
+          [ "$header_ok" -eq 1 ] || { echo "::error::Cabeçalho 'match_id' ausente em $FILE"; exit 3; }
+          for col in home away source; do
+            if ! head -n1 "$FILE" | tr -d '\r' | grep -qiE "(^|,)$col(,|$)"; then
+              echo "::error::Cabeçalho '$col' ausente em $FILE"
+              exit 3
+            fi
+          done
+          echo "Entrada OK."
+
+      - name: Optional login to Weights & Biases (não falha)
+        if: env.WANDB_API_KEY != ''
+        shell: bash
+        run: |
+          set -e
+          python - << 'PY'
+          import os, subprocess, sys
+          key=os.getenv("WANDB_API_KEY")
+          if not key:
+              sys.exit(0)
+          # login silencioso
+          subprocess.check_call([sys.executable, "-m", "wandb", "login", key])
+          PY
+
+      # ================== COLETA DE DADOS ==================
+
+      - name: Ingest TheOddsAPI (STRICT)
+        shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
+          REGIONS: ${{ env.REGIONS }}
+        run: |
+          set -e
           if [ ! -f "scripts/ingest_odds_theoddsapi_safe.py" ]; then
             echo "::error::scripts/ingest_odds_theoddsapi_safe.py não encontrado."
             exit 4
@@ -100,84 +136,76 @@ PY
             --rodada "${OUT_DIR}" \
             --regions "${REGIONS}" \
             --debug
+          test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv vazio/ausente"; exit 4; }
 
-          test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv não gerado."; exit 5; }
-
-      - name: Ingest API-Football (enabled only if APIFOOT_ENABLED=true)
-        if: env.APIFOOT_ENABLED == 'true'
+      - name: Ingest API-Football (STRICT via RapidAPI)
+        shell: bash
         env:
-          X_RAPIDAPI_KEY: ${{ env.X_RAPIDAPI_KEY }}
+          OUT_DIR: ${{ env.OUT_DIR }}
+          SEASON: ${{ env.SEASON }}
         run: |
           set -e
-          echo "[apifootball] enabled=${APIFOOT_ENABLED}"
-          if [ -z "${X_RAPIDAPI_KEY}" ]; then
-            echo "::error::X_RAPIDAPI_KEY não definido (API-Football)."
-            exit 6
-          fi
           if [ ! -f "scripts/ingest_odds_apifootball_rapidapi.py" ]; then
             echo "::error::scripts/ingest_odds_apifootball_rapidapi.py não encontrado."
-            exit 7
+            exit 5
           fi
-          # OBS: este script NÃO aceita --leagues; usa janela/fuzzy/aliases internos
           python -m scripts.ingest_odds_apifootball_rapidapi \
             --rodada "${OUT_DIR}" \
             --season "${SEASON}" \
-            --debug || { echo "::warning::Falha API-Football odds. Continuando com fontes disponíveis."; }
+            --debug
+          # Permite que odds_apifootball.csv exista com zero linhas se a API não retornar jogos,
+          # mas exige pelo menos a presença do arquivo e cabeçalho.
+          [ -f "${OUT_DIR}/odds_apifootball.csv" ] || { echo "::error::odds_apifootball.csv não gerado"; exit 5; }
 
-      - name: API-Football disabled notice
-        if: env.APIFOOT_ENABLED != 'true'
-        run: echo "[notice] API-Football desabilitado por configuração."
-
-      # =========================
-      # 2) CONSOLIDAÇÃO DE ODDS
-      # =========================
-      - name: Consensus Odds
-        run: |
-          set -e
-          python -m scripts.consensus_odds_safe --rodada "${RODADA_ID}"
-          test -s "data/out/${RODADA_ID}/odds_consensus.csv" || { echo "::error::odds_consensus.csv não gerado."; exit 8; }
-          head -n 20 "data/out/${RODADA_ID}/odds_consensus.csv" || true
-
-      # =========================
-      # 3) SINAIS EXTERNOS (ANTES DE PREVER)
-      # =========================
-      - name: Ingest News (optional)
-        if: env.NEWS_ENABLED == 'true'
+      - name: Injuries via API-Football (STRICT)
+        shell: bash
         env:
-          NEWSAPI_KEY: ${{ env.NEWSAPI_KEY }}
-        run: |
-          set -e
-          if [ ! -f "scripts/news_ingest_safe.py" ]; then
-            echo "::warning::news_ingest_safe.py ausente — pulando news."
-            exit 0
-          fi
-          if [ -z "${NEWSAPI_KEY}" ]; then
-            echo "::warning::NEWSAPI_KEY ausente — pulando news."
-            exit 0
-          fi
-          python scripts/news_ingest_safe.py --out-dir "${OUT_DIR}" || echo "::warning::Falha news — continuando"
-          ls -la "${OUT_DIR}" || true
-
-      - name: Injuries via API-Football (optional)
-        if: env.INJURIES_ENABLED == 'true'
-        env:
-          X_RAPIDAPI_KEY: ${{ env.X_RAPIDAPI_KEY }}
+          OUT_DIR: ${{ env.OUT_DIR }}
+          SEASON: ${{ env.SEASON }}
         run: |
           set -e
           if [ ! -f "scripts/apifootball_injuries_safe.py" ]; then
-            echo "::warning::apifootball_injuries_safe.py ausente — pulando injuries."
-            exit 0
+            echo "::error::scripts/apifootball_injuries_safe.py não encontrado."
+            exit 6
           fi
-          if [ -z "${X_RAPIDAPI_KEY}" ]; then
-            echo "::warning::X_RAPIDAPI_KEY ausente — pulando injuries."
-            exit 0
-          fi
-          python scripts/apifootball_injuries_safe.py --out-dir "${OUT_DIR}" || echo "::warning::Falha injuries — continuando"
+          python scripts/apifootball_injuries_safe.py --out-dir "${OUT_DIR}" --season "${SEASON}" --debug
+          test -f "${OUT_DIR}/injuries.csv" || { echo "::error::injuries.csv não gerado"; exit 6; }
 
-      # =========================
-      # 4) PREVISÃO + KELLY
-      # =========================
-      - name: Predict from Market Odds
+      - name: Ingest News (STRICT)
+        shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
+        run: |
+          set -e
+          if [ ! -f "scripts/news_ingest_safe.py" ]; then
+            echo "::error::scripts/news_ingest_safe.py não encontrado."
+            exit 7
+          fi
+          python scripts/news_ingest_safe.py --out-dir "${OUT_DIR}"
+          test -s "${OUT_DIR}/news.csv" || { echo "::error::news.csv vazio/ausente"; exit 7; }
+
+      # ================ CONSENSO + PREDIÇÕES =================
+
+      - name: Consensus Odds (STRICT)
+        shell: bash
+        env:
+          RODADA_ID: ${{ env.RODADA_ID }}
+          OUT_DIR: ${{ env.OUT_DIR }}
+        run: |
+          set -e
+          if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('scripts.consensus_odds_safe') else 1)"; then
+            echo "::error::módulo scripts.consensus_odds_safe não encontrado."
+            exit 8
+          fi
+          python -m scripts.consensus_odds_safe --rodada "${RODADA_ID}"
+          test -s "data/out/${RODADA_ID}/odds_consensus.csv" || { echo "::error::odds_consensus.csv vazio/ausente"; exit 8; }
+          # Sincroniza para OUT_DIR por conveniência
+          cp -f "data/out/${RODADA_ID}/odds_consensus.csv" "${OUT_DIR}/odds_consensus.csv"
+
+      - name: Predict from Market Odds (STRICT)
+        shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -e
           if [ ! -f "scripts/predict_from_odds.py" ]; then
@@ -185,34 +213,100 @@ PY
             exit 9
           fi
           python scripts/predict_from_odds.py --rodada "${OUT_DIR}" --debug
-          test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado."; exit 10; }
+          test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv vazio/ausente"; exit 9; }
 
-      - name: Kelly publish
+      # ================ MODELAGEM XG (UNIVARIADO & BIVARIADO) ================
+
+      - name: XG Univariado (STRICT)
+        shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
+        run: |
+          set -e
+          if [ ! -f "scripts/model_xg_univariate.py" ]; then
+            echo "::error::scripts/model_xg_univariate.py não encontrado."
+            exit 10
+          fi
+          python scripts/model_xg_univariate.py --rodada "${OUT_DIR}" --debug
+          test -s "${OUT_DIR}/predictions_xg_univariate.csv" || { echo "::error::predictions_xg_univariate.csv vazio/ausente"; exit 10; }
+
+      - name: XG Bivariado (STRICT)
+        shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
+        run: |
+          set -e
+          if [ ! -f "scripts/model_xg_bivariate.py" ]; then
+            echo "::error::scripts/model_xg_bivariate.py não encontrado."
+            exit 11
+          fi
+          python scripts/model_xg_bivariate.py --rodada "${OUT_DIR}" --debug
+          test -s "${OUT_DIR}/predictions_xg_bivariate.csv" || { echo "::error::predictions_xg_bivariate.csv vazio/ausente"; exit 11; }
+
+      - name: Calibração de Probabilidades (STRICT)
+        shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
+        run: |
+          set -e
+          if [ ! -f "scripts/calibrate_predictions.py" ]; then
+            echo "::error::scripts/calibrate_predictions.py não encontrado."
+            exit 12
+          fi
+          python scripts/calibrate_predictions.py --rodada "${OUT_DIR}" --debug
+          test -s "${OUT_DIR}/predictions_calibrated.csv" || { echo "::error::predictions_calibrated.csv vazio/ausente"; exit 12; }
+
+      # ===================== KELLY & CARTÃO =====================
+
+      - name: Kelly publish (STRICT)
+        shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
+          BANKROLL: ${{ env.BANKROLL }}
+          KELLY_FRACTION: ${{ env.KELLY_FRACTION }}
+          KELLY_CAP: ${{ env.KELLY_CAP }}
+          ROUND_TO: ${{ env.ROUND_TO }}
+          KELLY_TOP_N: ${{ env.KELLY_TOP_N }}
+          DEBUG: ${{ env.DEBUG }}
         run: |
           set -e
           if [ ! -f "scripts/publish_kelly.py" ]; then
             echo "::error::scripts/publish_kelly.py não encontrado."
-            exit 11
+            exit 13
           fi
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" --debug
-          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado."; exit 12; }
+          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv vazio/ausente"; exit 13; }
 
-      # =========================
-      # 5) SANITY / REALIDADE (antes do cartão)
-      # =========================
-      - name: Sanity and Reality Check
+      - name: Sanity and Reality Check (STRICT)
+        shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
+          RODADA_ID: ${{ env.RODADA_ID }}
         run: |
           set -e
-          python scripts/sanity_reality_check.py --rodada "${OUT_DIR}"
-          # hard guard: todos os artefatos essenciais precisam existir
-          for f in odds_theoddsapi.csv odds_consensus.csv predictions_market.csv kelly_stakes.csv; do
-            test -s "${OUT_DIR}/${f}" || { echo "::error::Arquivo obrigatório ausente: ${OUT_DIR}/${f}"; exit 14; }
+          # Verifica todos os artefatos críticos
+          for f in \
+            "${OUT_DIR}/odds_theoddsapi.csv" \
+            "${OUT_DIR}/odds_apifootball.csv" \
+            "data/out/${RODADA_ID}/odds_consensus.csv" \
+            "${OUT_DIR}/predictions_market.csv" \
+            "${OUT_DIR}/predictions_xg_univariate.csv" \
+            "${OUT_DIR}/predictions_xg_bivariate.csv" \
+            "${OUT_DIR}/predictions_calibrated.csv" \
+            "${OUT_DIR}/injuries.csv" \
+            "${OUT_DIR}/news.csv" \
+            "${OUT_DIR}/kelly_stakes.csv"
+          do
+            test -s "$f" || { echo "::error::Arquivo crítico ausente/vazio: $f"; exit 14; }
           done
+          if [ -f "scripts/sanity_reality_check.py" ]; then
+            python scripts/sanity_reality_check.py --rodada "${OUT_DIR}"
+          fi
 
-      # =========================
-      # 6) CARTÃO
-      # =========================
-      - name: Build Loteca Card
+      - name: Build Loteca Card (STRICT)
+        shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -e
           if [ ! -f "scripts/build_cartao.py" ]; then
@@ -220,16 +314,21 @@ PY
             exit 15
           fi
           python scripts/build_cartao.py --rodada "${OUT_DIR}"
-          test -s "${OUT_DIR}/loteca_cartao.txt" || { echo "::error::loteca_cartao.txt não gerado."; exit 16; }
-          echo "==== CARTÃO ===="
-          cat "${OUT_DIR}/loteca_cartao.txt" || true
-          echo "================"
+          test -s "${OUT_DIR}/loteca_cartao.txt" || { echo "::error::loteca_cartao.txt ausente/vazio"; exit 15; }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: loteca_full_${{ env.RODADA_ID }}
           path: |
-            ${{ env.OUT_DIR }}/*.csv
-            ${{ env.OUT_DIR }}/*.txt
-          if-no-files-found: error
+            data/out/${{ env.RODADA_ID }}/odds_consensus.csv
+            ${{ env.OUT_DIR }}/odds_theoddsapi.csv
+            ${{ env.OUT_DIR }}/odds_apifootball.csv
+            ${{ env.OUT_DIR }}/predictions_market.csv
+            ${{ env.OUT_DIR }}/predictions_xg_univariate.csv
+            ${{ env.OUT_DIR }}/predictions_xg_bivariate.csv
+            ${{ env.OUT_DIR }}/predictions_calibrated.csv
+            ${{ env.OUT_DIR }}/injuries.csv
+            ${{ env.OUT_DIR }}/news.csv
+            ${{ env.OUT_DIR }}/kelly_stakes.csv
+            ${{ env.OUT_DIR }}/loteca_cartao.txt
