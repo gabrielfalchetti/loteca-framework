@@ -5,16 +5,22 @@ calibrate_probs.py
 ------------------
 Etapa de calibração de probabilidades no pipeline Loteca v4.3.RC1+
 
-Esta etapa aplica calibração de previsões (1X2) — por Platt Scaling, Isotonic Regression
-ou Dirichlet Calibration — conforme disponibilidade dos pacotes. É essencial para corrigir
-viés de probabilidade bruta vinda das odds.
+Fluxo:
+1) Tenta ler data/out/<RODADA_ID>/predictions_market.csv com colunas:
+   [match_id, prob_home, prob_draw, prob_away]
+2) Se estiver ausente ou sem essas colunas, cai em fallback:
+   - Lê data/out/<RODADA_ID>/odds_consensus.csv
+   - Requer colunas: [team_home, team_away, odds_home, odds_draw, odds_away]
+   - Converte odds -> probabilidades implícitas (normalizadas)
+   - Gera match_id = "<home>__<away>" e o CSV intermediário em memória
+3) Aplica calibração (Dirichlet; fallback para Isotonic)
+4) Salva data/out/<RODADA_ID>/calibrated_probs.csv
 
-Entradas esperadas:
-  data/out/<rodada_id>/predictions_market.csv   (probabilidades brutas)
-Saídas:
-  data/out/<rodada_id>/calibrated_probs.csv     (probabilidades calibradas)
+Uso:
+  python scripts/calibrate_probs.py --rodada data/out/<ID> [--history ...] [--model_path ...] [--debug]
 
-Autor: Framework Loteca v4.3.RC1+ (Master Patch)
+Saída:
+  data/out/<ID>/calibrated_probs.csv
 """
 
 import os
@@ -22,116 +28,148 @@ import argparse
 import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.calibration import CalibratedClassifierCV
 
-# ------------------------------------------------------------
-# Função para parsing de argumentos
-# ------------------------------------------------------------
+# -------------------- CLI --------------------
 def parse_args():
     p = argparse.ArgumentParser(description="Calibração de probabilidades (Loteca Framework v4.3.RC1+)")
     p.add_argument("--rodada", required=True, help="Diretório de saída da rodada (ex: data/out/<ID>)")
-    p.add_argument("--history", default=None, help="Caminho opcional para CSV histórico de calibração")
-    p.add_argument("--model_path", default=None, help="Caminho opcional para salvar ou carregar modelo")
-    p.add_argument("--debug", action="store_true", help="Ativa modo detalhado de depuração e logs extras")
+    p.add_argument("--history", default=None, help="(Opcional) CSV com histórico para calibração")
+    p.add_argument("--model_path", default=None, help="(Opcional) caminho p/ salvar/carregar modelo")
+    p.add_argument("--debug", action="store_true", help="Ativa logs detalhados")
     return p.parse_args()
 
-# ------------------------------------------------------------
-# Funções auxiliares
-# ------------------------------------------------------------
+# -------------------- Helpers --------------------
+def _log(debug, msg):
+    if debug:
+        print(msg)
 
-def platt_scaling(y_prob):
-    """Aplica Platt Scaling (logistic)."""
-    eps = 1e-9
-    y_prob = np.clip(y_prob, eps, 1 - eps)
-    log_odds = np.log(y_prob / (1 - y_prob))
-    mean, std = np.mean(log_odds), np.std(log_odds)
-    scaled = 1 / (1 + np.exp(-(log_odds - mean) / (std + eps)))
-    return scaled
+def _require_cols(df, cols):
+    return [c for c in cols if c not in df.columns]
 
-def dirichlet_calibration(probs):
-    """Simulação simples de calibração Dirichlet (sem modelo externo)."""
+def _from_odds_to_probs(df, debug=False):
+    """Converte odds para probabilidades implícitas e normaliza por linha."""
+    for c in ["odds_home", "odds_draw", "odds_away"]:
+        if c not in df.columns:
+            raise ValueError(f"[calibrate] Faltou coluna em odds_consensus.csv: {c}")
+
+    odds = df[["odds_home", "odds_draw", "odds_away"]].astype(float).values
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inv = 1.0 / np.clip(odds, 1e-9, None)
+    inv[np.isnan(inv)] = 0.0
+    row_sum = inv.sum(axis=1, keepdims=True)
+    row_sum = np.clip(row_sum, 1e-9, None)
+    probs = inv / row_sum
+
+    out = pd.DataFrame({
+        "match_id": (df["team_home"].astype(str).str.strip() + "__" +
+                     df["team_away"].astype(str).str.strip()),
+        "prob_home": probs[:, 0],
+        "prob_draw": probs[:, 1],
+        "prob_away": probs[:, 2],
+    })
+    _log(debug, f"[calibrate] Fallback probs (odds→probs) gerado para {len(out)} jogos.")
+    return out
+
+def _dirichlet_calibration(probs):
+    """Heurística simples tipo Dirichlet (sem modelo externo)."""
     probs = np.maximum(probs, 1e-8)
     probs = probs / probs.sum(axis=1, keepdims=True)
     mean = probs.mean(axis=0)
     adjusted = probs ** (1.0 / (mean + 1e-6))
-    adjusted /= adjusted.sum(axis=1, keepdims=True)
+    adjusted = adjusted / adjusted.sum(axis=1, keepdims=True)
     return adjusted
 
-def isotonic_calibration(probs, debug=False):
-    """Aplica Isotonic Regression 1D em cada saída."""
+def _isotonic_calibration(probs, debug=False):
+    """Isotonic 1D independente por coluna (fallback)."""
     calibrated = np.zeros_like(probs)
+    n = probs.shape[0]
+    x = np.linspace(0, 1, n)
     for i in range(probs.shape[1]):
-        x = np.linspace(0, 1, len(probs))
         y = np.sort(probs[:, i])
         ir = IsotonicRegression(out_of_bounds="clip")
         calibrated[:, i] = ir.fit_transform(x, y)
-        if debug:
-            print(f"[debug] isotonic col{i}: input={np.mean(probs[:, i]):.3f}, output={np.mean(calibrated[:, i]):.3f}")
+        _log(debug, f"[debug] isotonic col{i}: in_mean={np.mean(probs[:, i]):.3f} -> out_mean={np.mean(calibrated[:, i]):.3f}")
+    # renormaliza por segurança
+    s = calibrated.sum(axis=1, keepdims=True)
+    s = np.clip(s, 1e-9, None)
+    calibrated = calibrated / s
     return calibrated
 
-# ------------------------------------------------------------
-# Pipeline principal
-# ------------------------------------------------------------
+# -------------------- Main --------------------
 def main():
     args = parse_args()
     out_dir = args.rodada
     os.makedirs(out_dir, exist_ok=True)
 
-    if args.debug:
-        print("===================================================")
-        print("[calibrate] INICIANDO CALIBRAÇÃO DE PROBABILIDADES")
-        print(f"[calibrate] Diretório de rodada : {out_dir}")
-        if args.history:
-            print(f"[calibrate] Histórico externo    : {args.history}")
-        if args.model_path:
-            print(f"[calibrate] Caminho modelo       : {args.model_path}")
-        print("===================================================")
+    print("===================================================")
+    print("[calibrate] INICIANDO CALIBRAÇÃO DE PROBABILIDADES")
+    print(f"[calibrate] Diretório de rodada : {out_dir}")
+    if args.history:   print(f"[calibrate] Histórico extern.: {args.history}")
+    if args.model_path:print(f"[calibrate] Modelo (path)    : {args.model_path}")
+    print("===================================================")
 
-    input_path = os.path.join(out_dir, "predictions_market.csv")
-    if not os.path.exists(input_path):
-        raise FileNotFoundError(f"[calibrate] Arquivo não encontrado: {input_path}")
+    # 1) Tenta ler predictions_market.csv
+    pred_path = os.path.join(out_dir, "predictions_market.csv")
+    df_pred = None
+    if os.path.exists(pred_path):
+        try:
+            df_pred = pd.read_csv(pred_path)
+            miss = _require_cols(df_pred, ["match_id", "prob_home", "prob_draw", "prob_away"])
+            if miss:
+                _log(args.debug, f"[calibrate] predictions_market.csv sem colunas {miss}. Usando fallback por odds.")
+                df_pred = None
+        except Exception as e:
+            _log(args.debug, f"[calibrate] falha lendo predictions_market.csv: {e}. Usando fallback por odds.")
+            df_pred = None
+    else:
+        _log(args.debug, "[calibrate] predictions_market.csv não existe. Usando fallback por odds.")
 
-    df = pd.read_csv(input_path)
-    required_cols = ["match_id", "prob_home", "prob_draw", "prob_away"]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"[calibrate] Faltam colunas obrigatórias: {missing}")
+    # 2) Fallback: odds_consensus.csv
+    if df_pred is None:
+        odds_path = os.path.join(out_dir, "odds_consensus.csv")
+        if not os.path.exists(odds_path):
+            raise FileNotFoundError(
+                "[calibrate] Nenhuma fonte válida: "
+                "predictions_market.csv ausente/sem colunas E odds_consensus.csv não existe."
+            )
+        df_odds = pd.read_csv(odds_path)
+        miss_odds = _require_cols(df_odds, ["team_home", "team_away", "odds_home", "odds_draw", "odds_away"])
+        if miss_odds:
+            raise ValueError(f"[calibrate] odds_consensus.csv está sem colunas obrigatórias: {miss_odds}")
+        df_pred = _from_odds_to_probs(df_odds, debug=args.debug)
 
-    probs = df[["prob_home", "prob_draw", "prob_away"]].values
+    # 3) Prepara matriz de probabilidades
+    probs = df_pred[["prob_home", "prob_draw", "prob_away"]].astype(float).values
     probs = np.clip(probs, 1e-8, 1 - 1e-8)
     probs = probs / probs.sum(axis=1, keepdims=True)
 
-    # Método principal de calibração — Dirichlet + fallback isotônico
+    # 4) Calibração: Dirichlet com fallback Isotonic
     try:
-        calibrated = dirichlet_calibration(probs)
+        calibrated = _dirichlet_calibration(probs)
         method = "Dirichlet"
     except Exception as e:
-        if args.debug:
-            print(f"[warn] Falha na Dirichlet Calibration: {e}")
-            print("[info] Aplicando fallback: Isotonic Regression")
-        calibrated = isotonic_calibration(probs, debug=args.debug)
+        _log(args.debug, f"[warn] Dirichlet falhou: {e}. Aplicando Isotonic Regression.")
+        calibrated = _isotonic_calibration(probs, debug=args.debug)
         method = "Isotonic"
 
-    df_out = df.copy()
-    df_out["calib_method"] = method
-    df_out["calib_home"] = calibrated[:, 0]
-    df_out["calib_draw"] = calibrated[:, 1]
-    df_out["calib_away"] = calibrated[:, 2]
+    # 5) Monta saída
+    df_out = pd.DataFrame({
+        "match_id": df_pred["match_id"],
+        "calib_method": method,
+        "calib_home": calibrated[:, 0],
+        "calib_draw": calibrated[:, 1],
+        "calib_away": calibrated[:, 2],
+    })
 
     out_path = os.path.join(out_dir, "calibrated_probs.csv")
     df_out.to_csv(out_path, index=False)
 
     if args.debug:
         print(f"[calibrate] Método usado: {method}")
-        print(f"[calibrate] Arquivo salvo em: {out_path}")
+        print(f"[calibrate] Salvo em: {out_path}")
         print(df_out.head(10))
 
     print("[ok] Calibração concluída com sucesso.")
 
-# ------------------------------------------------------------
-# Execução principal
-# ------------------------------------------------------------
 if __name__ == "__main__":
     main()
