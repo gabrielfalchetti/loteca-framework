@@ -1,10 +1,10 @@
-home,away
-Amazonas,Criciuma
-Goias,CRB
-Botafogo-SP,Paysandu
-Atletico-MG,Sport
-Cuiabá,Novorizontino
-Operário-PR,Athletic Club (MG)
-Mirassol,Fluminense
-Avaí,Volta Redonda
-America-MG,Vila Nova
+match_id,home,away,source
+001,Amazonas,Criciuma,manual
+002,Goias,CRB,manual
+003,Botafogo-SP,Paysandu,manual
+004,Atletico-MG,Sport,manual
+005,Cuiaba,Novorizontino,manual
+006,Operario-PR,Athletic Club,manual
+007,Mirassol,Fluminense,manual
+008,Avai,Volta Redonda,manual
+009,America-MG,Vila Nova,manual
