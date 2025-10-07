@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 Cliente fino para API-Football via RapidAPI.
-Uso interno pelos scripts de ingestão. Falha "alto e claro" se a resposta vier vazia/erro.
 """
 
 import os
@@ -58,5 +57,4 @@ def fixture_stats(fixture_id: int, debug: bool=False) -> Dict[str, Any]:
     return _get("fixtures/statistics", {"fixture": fixture_id}, debug)
 
 def sleep_rl():
-    # simples “throttle” para respeitar rate-limit
     time.sleep(0.35)
