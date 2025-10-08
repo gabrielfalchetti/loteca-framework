@@ -1,175 +1,197 @@
-# scripts/match_whitelist.py
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Gera data/out/<RID>/matches_whitelist.csv a partir de data/in/matches_source.csv,
-aplicando aliases (se existir data/in/team_aliases.csv) e criando um match_key estável.
+Gera data/out/<RODADA_ID>/matches_whitelist.csv a partir de data/in/matches_source.csv.
 
-Saída: columns = [match_id, team_home, team_away, match_key]
+Entrada obrigatória (data/in/matches_source.csv):
+  match_id,home,away,source,lat,lon
 
-Uso:
-  python -m scripts.match_whitelist --rodada data/out/<RID> [--debug]
+Saída (OUT_DIR/matches_whitelist.csv):
+  match_id,match_key,team_home,team_away,source
 
-Requisitos: pandas
+- Normaliza nomes (remove acentos, espaços -> hífen, caixa-baixa, mantém dígitos e letras).
+- match_key: "<slug(home)>__vs__<slug(away)>"
+- Faz logs verbosos quando DEBUG=true
 """
-from __future__ import annotations
+
 import argparse
 import csv
 import os
 import sys
 import unicodedata
+from typing import Optional
+
 import pandas as pd
-from datetime import datetime
 
-REQUIRED_COLS = ["match_id", "home", "away", "source", "lat", "lon"]
+def log(msg: str):
+    print(f"[whitelist] {msg}", flush=True)
 
-def log(msg: str, level: str = "INFO") -> None:
-    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-    print(f"[whitelist][{level}] {msg}", flush=True)
+def err(msg: str):
+    print(f"##[error][whitelist] {msg}", flush=True)
+    sys.exit(6)
 
-def die(msg: str, code: int = 6) -> None:
-    log(msg, "ERROR")
-    sys.exit(code)
+def getenv_bool(name: str, default: bool=False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in {"1","true","yes","y","on"}
 
-def strip_accents(s: str) -> str:
-    if not isinstance(s, str):
-        return s
-    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+DEBUG = getenv_bool("DEBUG", False)
 
-def norm_team(s: str) -> str:
+def debug(msg: str):
+    if DEBUG:
+        print(f"[whitelist][DEBUG] {msg}", flush=True)
+
+def slugify_team(name: str) -> str:
     """
-    Normaliza para chave estável (lowercase, sem acento, pontuação e espaços -> '-').
+    Normaliza nome do time para slug (similar ao observado no pipeline):
+    - remove acentos
+    - to lower
+    - substitui espaços e underscores por hífen
+    - mantém letras, dígitos e hífens; remove demais caracteres
+    - compacta hífens repetidos
     """
-    if s is None:
+    if name is None:
         return ""
-    s = s.strip()
-    s = strip_accents(s)
+    s = str(name).strip()
+    # remove acentos
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
     s = s.lower()
-    # troca separadores comuns por espaço
-    for ch in [",", ";", "/", "\\", "|", "_"]:
-        s = s.replace(ch, " ")
-    # compacta espaços e troca por hífen
-    s = "-".join([t for t in s.split() if t])
+    # separadores básicos -> hífen
+    s = s.replace("_", "-").replace(" ", "-")
+    # mantém letras/dígitos/hífen
+    keep = []
+    for ch in s:
+        if ch.isalnum() or ch == "-":
+            keep.append(ch)
+    s = "".join(keep)
+    # remove hífens duplicados
+    while "--" in s:
+        s = s.replace("--", "-")
+    # remove hífens nas pontas
+    s = s.strip("-")
     return s
 
-def load_alias_map(path_alias: str) -> dict[str, str]:
-    """
-    Lê data/in/team_aliases.csv (se existir) no formato:
-      alias,canonical
-    e retorna {alias_normalizado: canonical_exato}
-    """
-    alias_map: dict[str, str] = {}
-    if not os.path.isfile(path_alias):
-        log(f"Arquivo de aliases não encontrado (opcional): {path_alias}", "DEBUG")
-        return alias_map
-
-    try:
-        df = pd.read_csv(path_alias)
-    except Exception as e:
-        log(f"Falha lendo aliases '{path_alias}': {e}", "WARN")
-        return alias_map
-
-    want = {"alias", "canonical"}
-    missing = want - set(c.lower() for c in df.columns)
-    if missing:
-        log(f"Colunas ausentes em aliases ({path_alias}): {missing} — ignorando.", "WARN")
-        return alias_map
-
-    # garantir nomes coerentes
-    cols_lower = {c.lower(): c for c in df.columns}
-    alias_col = cols_lower["alias"]
-    canon_col = cols_lower["canonical"]
-
-    for _, row in df.iterrows():
-        a = str(row.get(alias_col, "") or "").strip()
-        c = str(row.get(canon_col, "") or "").strip()
-        if a and c:
-            alias_map[norm_team(a)] = c
-    log(f"Aliases carregados: {len(alias_map)}", "DEBUG")
-    return alias_map
-
-def apply_alias(name: str, alias_map: dict[str, str]) -> str:
-    key = norm_team(name)
-    return alias_map.get(key, name)
-
 def build_match_key(home: str, away: str) -> str:
-    return f"{norm_team(home)}__vs__{norm_team(away)}"
+    return f"{slugify_team(home)}__vs__{slugify_team(away)}"
 
 def main():
-    ap = argparse.ArgumentParser(description="Gera matches_whitelist.csv a partir de matches_source.csv")
-    ap.add_argument("--rodada", required=True, help="Diretório de saída da rodada (ex.: data/out/17598...)")
-    ap.add_argument("--debug", action="store_true", help="Ativa logs de depuração")
-    args = ap.parse_args()
-
-    out_dir = args.rodada
-    src_matches = os.path.join("data", "in", "matches_source.csv")
-    src_aliases = os.path.join("data", "in", "team_aliases.csv")
-    out_file = os.path.join(out_dir, "matches_whitelist.csv")
+    parser = argparse.ArgumentParser(description="Gera matches_whitelist.csv a partir de matches_source.csv")
+    parser.add_argument("--rodada", required=True, help="Diretório de saída da rodada (ex.: data/out/17598...)")
+    parser.add_argument("--in", dest="infile", default="data/in/matches_source.csv", help="CSV de entrada com os jogos")
+    parser.add_argument("--aliases", dest="aliases", default=None, help="(opcional) CSV de aliases (colunas: canonical,alias)")
+    parser.add_argument("--debug", action="store_true", help="Força debug verbose independente da env DEBUG")
+    args = parser.parse_args()
 
     if args.debug:
-        log(f"RODADA DIR  : {out_dir}", "DEBUG")
-        log(f"MATCHES SRC : {src_matches}", "DEBUG")
-        log(f"ALIASES SRC : {src_aliases}", "DEBUG")
-        log(f"OUT FILE    : {out_file}", "DEBUG")
+        global DEBUG
+        DEBUG = True
 
+    out_dir = args.rodada
+    infile = args.infile
+    aliases_file: Optional[str] = args.aliases
+
+    log("===================================================")
+    log("GERANDO MATCHES WHITELIST")
+    log(f"Rodada (OUT_DIR): {out_dir}")
+    log(f"Entrada: {infile}")
+    if aliases_file:
+        log(f"Aliases: {aliases_file}")
+    log("===================================================")
+
+    # Validar existência de OUT_DIR
     if not os.path.isdir(out_dir):
-        die(f"Diretório de rodada inexistente: {out_dir}")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as e:
+            err(f"Falha ao criar OUT_DIR '{out_dir}': {e}")
 
-    if not os.path.isfile(src_matches):
-        die(f"Entrada não encontrada: {src_matches}")
+    # Ler matches_source
+    if not os.path.isfile(infile):
+        err(f"Arquivo de entrada não encontrado: {infile}")
 
     try:
-        df = pd.read_csv(src_matches)
+        df = pd.read_csv(infile, dtype=str).fillna("")
     except Exception as e:
-        die(f"Falha lendo {src_matches}: {e}")
+        err(f"Falha ao ler {infile}: {e}")
 
-    # valida colunas
-    cols_lower = {c.lower(): c for c in df.columns}
-    missing = [c for c in REQUIRED_COLS if c not in cols_lower]
+    # Validar colunas
+    required = ["match_id","home","away","source","lat","lon"]
+    missing = [c for c in required if c not in df.columns]
     if missing:
-        die(f"matches_source.csv sem colunas obrigatórias: {missing}")
+        err(f"Colunas obrigatórias ausentes em {infile}: {missing}")
 
-    # normaliza nomes das colunas (acesso pelos originais mapeados)
-    c_id = cols_lower["match_id"]
-    c_home = cols_lower["home"]
-    c_away = cols_lower["away"]
+    # Opcional: aliases
+    alias_map = {}
+    if aliases_file and os.path.isfile(aliases_file):
+        try:
+            da = pd.read_csv(aliases_file, dtype=str).fillna("")
+            need = {"canonical","alias"}
+            if not need.issubset(set(da.columns)):
+                log(f"Aviso: arquivo de aliases não contém colunas {need}. Ignorando.")
+            else:
+                # prioriza mapeamento alias->canonical minúsculo normalizado (sem acento para comparação)
+                def norm_key(s: str) -> str:
+                    s2 = unicodedata.normalize("NFKD", s or "")
+                    s2 = "".join(c for c in s2 if not unicodedata.combining(c)).lower().strip()
+                    return s2
+                for _, r in da.iterrows():
+                    alias_map[norm_key(r["alias"])] = r["canonical"]
+                debug(f"Aliases carregados: {len(alias_map)}")
+        except Exception as e:
+            log(f"Aviso: falha ao ler aliases '{aliases_file}': {e}")
 
-    # aplica aliases (opcional)
-    alias_map = load_alias_map(src_aliases)
-    df[c_home] = df[c_home].astype(str).map(lambda s: apply_alias(s, alias_map))
-    df[c_away] = df[c_away].astype(str).map(lambda s: apply_alias(s, alias_map))
+    def maybe_alias(s: str) -> str:
+        if not alias_map:
+            return s
+        # normaliza para chave
+        s2 = unicodedata.normalize("NFKD", s or "")
+        s2 = "".join(c for c in s2 if not unicodedata.combining(c)).lower().strip()
+        return alias_map.get(s2, s)
 
-    # monta whitelist enxuta
-    out_rows = []
+    # Normalização e geração do match_key
+    rows = []
     for _, r in df.iterrows():
-        match_id = r[c_id]
-        home = (r[c_home] or "").strip()
-        away = (r[c_away] or "").strip()
-        if not home or not away:
-            log(f"Ignorando linha sem times válidos: match_id={match_id}", "WARN")
+        match_id = str(r.get("match_id","")).strip()
+        home_raw = str(r.get("home","")).strip()
+        away_raw = str(r.get("away","")).strip()
+        source = str(r.get("source","")).strip()
+
+        if not match_id or not home_raw or not away_raw:
+            log(f"Aviso: linha ignorada (match_id/home/away vazios): {r.to_dict()}")
             continue
-        mk = build_match_key(home, away)
-        out_rows.append(
-            {
-                "match_id": match_id,
-                "team_home": home,
-                "team_away": away,
-                "match_key": mk,
-            }
-        )
 
-    if not out_rows:
-        die("Nenhum jogo válido encontrado em matches_source.csv")
+        home = maybe_alias(home_raw)
+        away = maybe_alias(away_raw)
+        mkey = build_match_key(home, away)
 
-    os.makedirs(out_dir, exist_ok=True)
-    pd.DataFrame(out_rows, columns=["match_id", "team_home", "team_away", "match_key"])\
-      .to_csv(out_file, index=False, quoting=csv.QUOTE_MINIMAL)
+        rows.append({
+            "match_id": match_id,
+            "match_key": mkey,
+            "team_home": home,
+            "team_away": away,
+            "source": source,
+        })
 
-    log(f"OK -> {out_file} (linhas={len(out_rows)})")
-    # preview
+    if not rows:
+        err("Nenhuma linha válida após normalização. Verifique o arquivo de entrada e aliases.")
+
+    out_file = os.path.join(out_dir, "matches_whitelist.csv")
     try:
-        prev = pd.read_csv(out_file).head(10)
-        with pd.option_context('display.max_columns', None, 'display.width', 200):
-            log("Preview whitelist:\n" + prev.to_string(index=False), "DEBUG")
+        pd.DataFrame(rows, columns=["match_id","match_key","team_home","team_away","source"])\
+          .to_csv(out_file, index=False, quoting=csv.QUOTE_MINIMAL)
+    except Exception as e:
+        err(f"Falha ao salvar {out_file}: {e}")
+
+    log(f"OK -> {out_file} (linhas={len(rows)})")
+
+    # Preview
+    try:
+        prev = pd.read_csv(out_file, dtype=str).fillna("")
+        debug("Preview (até 10 linhas):")
+        debug(prev.head(10).to_string(index=False))
     except Exception:
         pass
 
