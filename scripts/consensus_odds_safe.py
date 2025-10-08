@@ -1,231 +1,119 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-consensus_odds_safe.py
-----------------------
-Lê múltiplas fontes de odds já salvas em data/out/<rodada> e produz
-um consenso por partida.
+Gera odds_consensus.csv a partir de odds_theoddsapi.csv e/ou odds_apifootball.csv,
+FILTRANDO estritamente pelos jogos definidos em data/in/matches_whitelist.csv.
 
-Entrada (se existirem):
-- odds_theoddsapi.csv
-  colunas esperadas: team_home, team_away, match_key, odds_home, odds_draw, odds_away, ...
-- odds_apifootball.csv
-  colunas esperadas: team_home, team_away, match_key, odds_home, odds_draw, odds_away
-- odds_manual.csv (opcional)
-  colunas esperadas: team_home, team_away, match_key, odds_home, odds_draw, odds_away
+Saída: data/out/<RODADA_ID>/odds_consensus.csv com:
+match_id,team_home,team_away,odds_home,odds_draw,odds_away,source
 
-Saída:
-- odds_consensus.csv com colunas:
-  match_id, match_key, team_home, team_away, odds_home, odds_draw, odds_away, source=consensus
-
-Observações:
-- Tolerante a arquivos ausentes ou vazios.
-- Normaliza nomes (strip), cria match_key quando ausente e match_id no formato "Home__Away".
-- Agrega por (team_home, team_away, match_key) tirando a MÉDIA das odds.
+Coloque este arquivo em: scripts/consensus_odds_safe.py
 """
 
+import csv
 import os
 import sys
-import csv
-import argparse
+from pathlib import Path
 import pandas as pd
 
+from _common_norm import match_key_from_teams
 
-REQ_COLS = ["team_home", "team_away", "match_key", "odds_home", "odds_draw", "odds_away"]
+def fail(msg, code=6):
+    print(f"::error::{msg}")
+    sys.exit(code)
 
+def must_have_columns(df, cols, name):
+    miss = [c for c in cols if c not in df.columns]
+    if miss:
+        fail(f"[consensus] {name} sem colunas {miss}")
 
-def log(msg: str):
-    print(f"[consensus] {msg}", flush=True)
-
-
-def norm_team(s):
-    if s is None:
-        return ""
-    return str(s).strip()
-
-
-def build_match_key(home: str, away: str) -> str:
-    h = (home or "").strip().lower().replace(" ", "-")
-    a = (away or "").strip().lower().replace(" ", "-")
-    return f"{h}__vs__{a}"
-
-
-def build_match_id(home: str, away: str) -> str:
-    return f"{(home or '').strip()}__{(away or '').strip()}"
-
-
-def ensure_numeric(df: pd.DataFrame, cols):
-    for c in cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
-
-
-def normalize_df(df_raw: pd.DataFrame, source_name: str) -> pd.DataFrame:
-    """
-    Padroniza colunas, cria match_key se ausente e mantém apenas REQ_COLS.
-    """
-    if df_raw is None or df_raw.empty:
-        return pd.DataFrame(columns=REQ_COLS)
-
-    df = df_raw.copy()
-
-    # Renomeações tolerantes
-    ren = {}
-    # Suporte a "home"/"away"
-    if "home" in df.columns and "team_home" not in df.columns:
-        ren["home"] = "team_home"
-    if "away" in df.columns and "team_away" not in df.columns:
-        ren["away"] = "team_away"
-    # odds podem vir como odd_*
-    if "odd_home" in df.columns and "odds_home" not in df.columns:
-        ren["odd_home"] = "odds_home"
-    if "odd_draw" in df.columns and "odds_draw" not in df.columns:
-        ren["odd_draw"] = "odds_draw"
-    if "odd_away" in df.columns and "odds_away" not in df.columns:
-        ren["odd_away"] = "odds_away"
-
-    df = df.rename(columns=ren)
-
-    # Garante teams normalizados
-    for col in ["team_home", "team_away"]:
-        if col in df.columns:
-            df[col] = df[col].map(norm_team)
-
-    # Cria match_key se não existir
-    if "match_key" not in df.columns:
-        df["match_key"] = df.apply(
-            lambda r: build_match_key(r.get("team_home", ""), r.get("team_away", "")),
-            axis=1
-        )
-    else:
-        # normaliza match_key
-        df["match_key"] = df["match_key"].fillna("").map(str).str.strip()
-        # se vier vazio, recomputa
-        mask_empty = df["match_key"].eq("")
-        if mask_empty.any():
-            df.loc[mask_empty, "match_key"] = df.loc[mask_empty].apply(
-                lambda r: build_match_key(r.get("team_home", ""), r.get("team_away", "")),
-                axis=1
-            )
-
-    # Garante numéricos nas odds
-    df = ensure_numeric(df, ["odds_home", "odds_draw", "odds_away"])
-
-    # Mantém só o que interessa
-    keep = [c for c in REQ_COLS if c in df.columns]
-    df = df[keep].copy()
-
-    # Preenche itens faltantes para não quebrar concat
-    for c in REQ_COLS:
-        if c not in df.columns:
-            df[c] = pd.NA
-
-    # Remove linhas sem equipes ou sem odds válidas
-    df = df[
-        (df["team_home"].astype(str).str.len() > 0) &
-        (df["team_away"].astype(str).str.len() > 0)
-    ].copy()
-
-    any_odds = df[["odds_home", "odds_draw", "odds_away"]].notna().any(axis=1)
-    df = df[any_odds].copy()
-
-    df["__source"] = source_name
-    return df
-
-
-def read_optional(csv_path: str, source_name: str) -> pd.DataFrame:
-    if not os.path.isfile(csv_path):
-        return pd.DataFrame(columns=REQ_COLS)
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        log(f"AVISO: erro ao ler {csv_path}: {e}")
-        return pd.DataFrame(columns=REQ_COLS)
-    return normalize_df(df, source_name)
-
-
-def resolve_out_dir(rodada_arg: str) -> str:
-    # aceita tanto "data/out/<id>" quanto apenas "<id>"
-    if os.path.isdir(rodada_arg):
-        return rodada_arg
-    candidate = os.path.join("data", "out", str(rodada_arg))
-    if os.path.isdir(candidate):
-        return candidate
-    # se não existir, cria
-    os.makedirs(candidate, exist_ok=True)
-    return candidate
-
+def read_csv_safe(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    return pd.read_csv(path)
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="ID da rodada OU caminho data/out/<id>")
-    args = ap.parse_args()
+    rodada_id = os.environ.get("RODADA_ID", "").strip()
+    if not rodada_id:
+        fail("[consensus] RODADA_ID ausente no ambiente")
 
-    out_dir = resolve_out_dir(args.rodada)
+    out_dir = Path(f"data/out/{rodada_id}")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # caminhos de entrada
-    fp_theodds = os.path.join(out_dir, "odds_theoddsapi.csv")
-    fp_apifoot = os.path.join(out_dir, "odds_apifootball.csv")
-    fp_manual  = os.path.join(out_dir, "odds_manual.csv")  # opcional
+    wl_path = Path("data/in/matches_whitelist.csv")
+    if not wl_path.exists():
+        fail("[consensus] matches_whitelist.csv ausente. Rode scripts/match_whitelist.py antes.")
 
-    df_t = read_optional(fp_theodds, "theoddsapi")
-    df_a = read_optional(fp_apifoot, "apifootball")
-    df_m = read_optional(fp_manual,  "manual")
+    wl = pd.read_csv(wl_path)
+    must_have_columns(wl, ["match_id", "home", "away", "match_key"], "matches_whitelist.csv")
 
-    # Concatena apenas os não vazios
-    dfs = [d for d in (df_t, df_a, df_m) if not d.empty]
-    if len(dfs) == 0:
-        # nada para agregar; salva esqueleto vazio com colunas finais
-        out_cols = ["match_id", "match_key", "team_home", "team_away",
-                    "odds_home", "odds_draw", "odds_away", "source"]
-        out_path = os.path.join(out_dir, "odds_consensus.csv")
-        pd.DataFrame(columns=out_cols).to_csv(out_path, index=False)
-        log(f"AVISO: nenhuma fonte de odds encontrada. Gerado vazio -> {out_path}")
-        return
+    # Carrega odds de fontes
+    p_theodds = out_dir / "odds_theoddsapi.csv"
+    p_apifoot = out_dir / "odds_apifootball.csv"
 
-    df_all = pd.concat(dfs, ignore_index=True)
+    df_t = read_csv_safe(p_theodds)
+    df_a = read_csv_safe(p_apifoot)
 
-    # Agrega (média) por partida
-    grp_cols = ["team_home", "team_away", "match_key"]
-    for c in grp_cols:
-        if c not in df_all.columns:
-            df_all[c] = pd.NA
+    # Normaliza nomes + gera match_key nas fontes (se presentes)
+    def add_key(df):
+        if df.empty:
+            return df
+        # tenta colunas padronizadas (team_home/team_away) ou (home/away)
+        th = "team_home" if "team_home" in df.columns else ("home" if "home" in df.columns else None)
+        ta = "team_away" if "team_away" in df.columns else ("away" if "away" in df.columns else None)
+        if th and ta:
+            df = df.copy()
+            df["__mk"] = [match_key_from_teams(h, a) for h, a in zip(df[th], df[ta])]
+        else:
+            df["__mk"] = None
+        return df
 
-    df_all = df_all.dropna(subset=["team_home", "team_away", "match_key"])
-    # garante string
-    for c in grp_cols:
-        df_all[c] = df_all[c].astype(str)
+    df_t = add_key(df_t)
+    df_a = add_key(df_a)
 
-    # média ignorando NaNs
-    agg_df = (
-        df_all
-        .groupby(grp_cols, as_index=False)[["odds_home", "odds_draw", "odds_away"]]
-        .mean()
-    )
+    # Combina e filtra SÓ whitelist
+    df_all = pd.concat([df_t, df_a], ignore_index=True)
+    if df_all.empty:
+        fail("[consensus] Não há odds de entrada (theoddsapi/apifootball)")
 
-    # Cria match_id e fonte
-    agg_df["match_id"] = agg_df.apply(lambda r: build_match_id(r["team_home"], r["team_away"]), axis=1)
-    agg_df["source"] = "consensus"
+    # Espera-se colunas de odds (nomes mais comuns)
+    odds_cols = [("odds_home", "odds_draw", "odds_away"),
+                 ("odd_home", "odd_draw", "odd_away")]  # fallback de alguns scripts
 
-    # Reordena colunas
-    out = agg_df[[
-        "match_id", "match_key", "team_home", "team_away",
-        "odds_home", "odds_draw", "odds_away", "source"
-    ]].copy()
+    have = None
+    for trio in odds_cols:
+        if all(c in df_all.columns for c in trio):
+            have = trio
+            break
+    if have is None:
+        fail("[consensus] Não encontrei colunas de odds (odds_home/odds_draw/odds_away ou odd_*) nas fontes")
 
-    # Salva
-    out_path = os.path.join(out_dir, "odds_consensus.csv")
-    os.makedirs(out_dir, exist_ok=True)
-    out.to_csv(out_path, index=False, quoting=csv.QUOTE_MINIMAL)
+    oh, od, oa = have
+    # filtra pelas chaves da whitelist
+    keep_keys = set(wl["match_key"].astype(str))
+    df_all = df_all[df_all["__mk"].isin(keep_keys)].copy()
+    if df_all.empty:
+        fail("[consensus] Após filtro pela whitelist, não sobraram partidas. Confira os nomes/capitalização em matches_source.csv")
 
-    log(f"OK -> {out_path}")
-    try:
-        # amostra para logs
-        print(out.head(10).to_csv(index=False))
-    except Exception:
-        pass
+    # Agrupa por match_key e faz média das odds
+    grp = df_all.groupby("__mk", as_index=False)[[oh, od, oa]].mean()
 
+    # Monta df final com nomes certos e match_id
+    wl_small = wl[["match_id", "home", "away", "match_key"]].rename(columns={
+        "home": "team_home",
+        "away": "team_away"
+    })
+
+    final = grp.merge(wl_small, left_on="__mk", right_on="match_key", how="left")
+    final = final[["match_id", "team_home", "team_away", oh, od, oa]].rename(columns={
+        oh: "odds_home",
+        od: "odds_draw",
+        oa: "odds_away"
+    })
+    final["source"] = "consensus"
+
+    out_file = out_dir / "odds_consensus.csv"
+    final.to_csv(out_file, index=False, quoting=csv.QUOTE_MINIMAL)
+    print(f"[consensus] OK -> {out_file}")
 
 if __name__ == "__main__":
     main()
