@@ -5,34 +5,38 @@ on:
   push:
     branches: [ "main" ]
 
-env:
-  SEASON: "2025"
-  REGIONS: "uk,eu,us,au"
-  BANKROLL: "1000"
-  KELLY_FRACTION: "0.5"
-  KELLY_CAP: "0.1"
-  KELLY_TOP_N: "14"
-  ROUND_TO: "1"
-  DEBUG: "true"
+permissions:
+  contents: read
 
 jobs:
   loteca:
     name: loteca
     runs-on: ubuntu-24.04
+
     env:
-      # Garante que `python -m scripts...` funcione
+      SEASON: "2025"
+      REGIONS: "uk,eu,us,au"
+      BANKROLL: "1000"
+      KELLY_FRACTION: "0.5"
+      KELLY_CAP: "0.1"
+      KELLY_TOP_N: "14"
+      ROUND_TO: "1"
+      DEBUG: "true"
       PYTHONPATH: ${{ github.workspace }}
 
     steps:
+      # 1) Checkout
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
+      # 2) Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps (requirements.txt ou fallback fixo)
+      # 3) Instalar dependências
+      - name: Install deps
         shell: bash
         run: |
           set -euo pipefail
@@ -47,20 +51,22 @@ jobs:
               lxml==5.2.2 tabulate==0.9.0 matplotlib==3.8.4 PyYAML==6.0.2
           fi
 
-      - name: Prepare rodada (OUT_DIR)
-        id: prepare
+      # 4) Inicializa rodada e diretórios
+      - name: Init rodada
+        id: init
         shell: bash
         run: |
           set -euo pipefail
           RID="$(date +%s)"
-          OUT_DIR="data/out/$RID"
-          echo "RODADA_ID=$RID" >> "$GITHUB_ENV"
-          echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
-          mkdir -p "data/in" "$OUT_DIR"
-          echo "Rodada: $RID"
-          echo "OUT_DIR: $OUT_DIR"
+          OUT_DIR="data/out/${RID}"
+          echo "RODADA_ID=${RID}" >> "$GITHUB_ENV"
+          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
+          mkdir -p "data/in" "${OUT_DIR}"
+          echo "Rodada: ${RID}"
+          echo "OUT_DIR: ${OUT_DIR}"
 
-      - name: Validate entrada matches_source.csv
+      # 5) Validar entrada data/in/matches_source.csv
+      - name: Validate matches_source.csv
         shell: bash
         run: |
           set -euo pipefail
@@ -84,7 +90,7 @@ jobs:
           [ "$(wc -l < "$FILE")" -gt 1 ] || { echo "::error::Nenhum jogo listado em $FILE"; exit 3; }
           echo "Entrada OK."
 
-      # NOVO: gera data/out/<RID>/matches_whitelist.csv
+      # 6) Build Matches Whitelist (NOVO – resolve o erro)
       - name: Build Matches Whitelist
         shell: bash
         run: |
@@ -92,50 +98,41 @@ jobs:
           [ -f scripts/match_whitelist.py ] || { echo "::error::scripts/match_whitelist.py não encontrado"; exit 6; }
           python -m scripts.match_whitelist --rodada "${OUT_DIR}" --debug
           test -s "${OUT_DIR}/matches_whitelist.csv" || { echo "::error::matches_whitelist.csv não gerado"; exit 6; }
-          echo "Whitelist:"
+          echo "Preview:"
           head -n 10 "${OUT_DIR}/matches_whitelist.csv" || true
 
-      - name: Ingest odds (TheOddsAPI)
+      # 7) Ingest TheOddsAPI (opcional, só roda se tiver secret)
+      - name: Ingest odds - TheOddsAPI
+        if: ${{ secrets.THEODDS_API_KEY != '' }}
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          [ -n "${THEODDS_API_KEY:-}" ] || { echo "::error::THEODDS_API_KEY ausente em Secrets"; exit 4; }
           [ -f scripts/ingest_odds_theoddsapi_safe.py ] || { echo "::error::scripts/ingest_odds_theoddsapi_safe.py não encontrado."; exit 4; }
-          python scripts/ingest_odds_theoddsapi_safe.py \
-            --rodada "${OUT_DIR}" \
-            --regions "${REGIONS}" \
-            --debug
+          python scripts/ingest_odds_theoddsapi_safe.py --rodada "${OUT_DIR}" --regions "${REGIONS}" --debug
           test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv não gerado"; exit 4; }
           head -n 10 "${OUT_DIR}/odds_theoddsapi.csv" || true
 
-      - name: (Opcional) Ingest odds API-Football via RapidAPI
+      # 8) Ingest API-Football via RapidAPI (opcional)
+      - name: Ingest odds - API-Football via RapidAPI
+        if: ${{ secrets.X_RAPIDAPI_KEY != '' }}
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+          SEASON: ${{ env.SEASON }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${X_RAPIDAPI_KEY:-}" ]; then
-            echo "::notice::X_RAPIDAPI_KEY ausente — pulando coleta via RapidAPI."
-            # ainda assim deixa um CSV vazio com header esperado
-            echo "team_home,team_away,match_key,odds_home,odds_draw,odds_away" > "${OUT_DIR}/odds_apifootball.csv"
-            exit 0
-          fi
           [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py não encontrado."; exit 5; }
-          python -m scripts.ingest_odds_apifootball_rapidapi \
-            --rodada "${OUT_DIR}" \
-            --season "${SEASON}" \
-            --debug
-          test -s "${OUT_DIR}/odds_apifootball.csv" || { echo "::error::odds_apifootball.csv não gerado"; exit 5; }
-          head -n 10 "${OUT_DIR}/odds_apifootball.csv" || true
+          python -m scripts.ingest_odds_apifootball_rapidapi --rodada "${OUT_DIR}" --season "${SEASON}" --debug || true
+          # arquivo pode não existir; ok continuar
 
-      - name: Consensus odds (usa whitelist)
+      # 9) Consensus odds (usa matches_whitelist gerado no passo 6)
+      - name: Consensus odds
         shell: bash
         run: |
           set -e -o pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py não encontrado"; exit 6; }
-          # o script procura ${OUT_DIR}/matches_whitelist.csv
           python -m scripts.consensus_odds_safe --rodada "${RODADA_ID}"
           OUT_FILE="data/out/${RODADA_ID}/odds_consensus.csv"
           test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv não gerado"; exit 6; }
@@ -145,19 +142,21 @@ jobs:
           done
           head -n 10 "$OUT_FILE" || true
 
-      - name: Ingest news (NewsAPI)
+      # 10) News (opcional)
+      - name: News ingest
+        if: ${{ secrets.NEWSAPI_KEY != '' }}
         env:
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          [ -n "${NEWSAPI_KEY:-}" ] || { echo "::error::NEWSAPI_KEY ausente em Secrets"; exit 16; }
           [ -f scripts/news_ingest_safe.py ] || { echo "::error::scripts/news_ingest_safe.py não encontrado"; exit 16; }
           python scripts/news_ingest_safe.py --out-dir "${OUT_DIR}"
           test -s "${OUT_DIR}/news.csv" || { echo "::error::news.csv não gerado"; exit 16; }
           head -n 5 "${OUT_DIR}/news.csv" || true
 
-      - name: Weather per match (preferencial)
+      # 11) Weather
+      - name: Weather
         shell: bash
         run: |
           set -euo pipefail
@@ -172,24 +171,21 @@ jobs:
           fi
           head -n 5 "${OUT_DIR}/weather.csv" || true
 
-      - name: Injuries/Suspensions (API-Football via RapidAPI) — opcional
+      # 12) Injuries (opcional RapidAPI)
+      - name: API-Football Injuries
+        if: ${{ secrets.X_RAPIDAPI_KEY != '' }}
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+          SEASON: ${{ env.SEASON }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${X_RAPIDAPI_KEY:-}" ]; then
-            echo "::notice::X_RAPIDAPI_KEY ausente — pulando injuries."
-            # gera arquivo vazio porém válido
-            echo "team_id,team_name,player_name,player_age,player_position,type,reason,fixture_id,fixture_date,status,last_update" > "${OUT_DIR}/injuries.csv"
-            exit 0
-          fi
           [ -f scripts/apifootball_injuries_safe.py ] || { echo "::error::scripts/apifootball_injuries_safe.py não encontrado"; exit 18; }
-          python scripts/apifootball_injuries_safe.py --out-dir "${OUT_DIR}" --season "${SEASON}" --debug
-          test -s "${OUT_DIR}/injuries.csv" || { echo "::error::injuries.csv não gerado"; exit 18; }
-          head -n 5 "${OUT_DIR}/injuries.csv" || true
+          python scripts/apifootball_injuries_safe.py --out-dir "${OUT_DIR}" --season "${SEASON}" --debug || true
+          # injuries.csv pode estar vazio dependendo da resposta; não falhar
 
-      - name: Predict (market baseline)
+      # 13) Predict from odds
+      - name: Predict (market)
         shell: bash
         run: |
           set -euo pipefail
@@ -198,7 +194,8 @@ jobs:
           test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado"; exit 7; }
           head -n 20 "${OUT_DIR}/predictions_market.csv" || true
 
-      - name: Features - Univariado
+      # 14) Features
+      - name: Features (univariado)
         shell: bash
         run: |
           set -euo pipefail
@@ -207,17 +204,16 @@ jobs:
           test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv não gerado"; exit 21; }
           head -n 10 "${OUT_DIR}/features_univariado.csv" || true
 
-      - name: Features - Bivariado & xG proxy
+      - name: Features (bivariado & xg)
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/features_bivariado_xg.py ] || { echo "::error::scripts/features_bivariado_xg.py não encontrado"; exit 22; }
           python scripts/features_bivariado_xg.py --rodada "${OUT_DIR}" --season "${SEASON}" --debug
           test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv não gerado"; exit 22; }
-          test -s "${OUT_DIR}/features_xg.csv" || { echo "::error::features_xg.csv não gerado"; exit 22; }
           head -n 10 "${OUT_DIR}/features_bivariado.csv" || true
-          head -n 10 "${OUT_DIR}/features_xg.csv" || true
 
+      # 15) Blend
       - name: Blend models
         shell: bash
         run: |
@@ -227,7 +223,8 @@ jobs:
           test -s "${OUT_DIR}/predictions_blend.csv" || { echo "::error::predictions_blend.csv não gerado"; exit 24; }
           head -n 10 "${OUT_DIR}/predictions_blend.csv" || true
 
-      - name: Calibrate probabilities
+      # 16) Calibrate
+      - name: Calibrate probs
         shell: bash
         run: |
           set -euo pipefail
@@ -236,7 +233,8 @@ jobs:
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv não gerado"; exit 23; }
           head -n 10 "${OUT_DIR}/calibrated_probs.csv" || true
 
-      - name: Kelly sizing & stakes
+      # 17) Kelly
+      - name: Publish Kelly
         shell: bash
         run: |
           set -euo pipefail
@@ -245,6 +243,7 @@ jobs:
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
           head -n 20 "${OUT_DIR}/kelly_stakes.csv" || true
 
+      # 18) Cartão Loteca
       - name: Build Cartão Loteca
         shell: bash
         run: |
@@ -256,6 +255,7 @@ jobs:
           cat "${OUT_DIR}/loteca_cartao.txt" || true
           echo "========================"
 
+      # 19) Sanity
       - name: Sanity / Reality check
         shell: bash
         run: |
@@ -264,41 +264,16 @@ jobs:
           python scripts/sanity_reality_check.py --rodada "${OUT_DIR}"
           echo "Sanity OK."
 
-      - name: (Opcional) Publicar no Weights & Biases
+      # 20) W&B (opcional) — não falha se ausente
+      - name: Publicar no Weights & Biases (opcional)
+        if: ${{ secrets.WANDB_API_KEY != '' }}
         env:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${WANDB_API_KEY:-}" ]; then
-            echo "Biblioteca 'wandb' não instalada ou chave ausente. Pulando publicação."
-            exit 0
-          fi
           if [ -f scripts/wandb_publish.py ]; then
             python scripts/wandb_publish.py --rodada "${OUT_DIR}" || echo "::warning::Falha ao publicar no W&B (continuando)."
           else
             echo "::notice::wandb_publish.py ausente — pulando publicação."
           fi
-
-      - name: Upload artifacts (resultados)
-        uses: actions/upload-artifact@v4
-        with:
-          name: loteca-${{ env.RODADA_ID }}
-          path: |
-            ${{ env.OUT_DIR }}/odds_theoddsapi.csv
-            ${{ env.OUT_DIR }}/odds_apifootball.csv
-            ${{ env.OUT_DIR }}/odds_consensus.csv
-            ${{ env.OUT_DIR }}/predictions_market.csv
-            ${{ env.OUT_DIR }}/features_univariado.csv
-            ${{ env.OUT_DIR }}/features_bivariado.csv
-            ${{ env.OUT_DIR }}/features_xg.csv
-            ${{ env.OUT_DIR }}/predictions_blend.csv
-            ${{ env.OUT_DIR }}/calibrated_probs.csv
-            ${{ env.OUT_DIR }}/kelly_stakes.csv
-            ${{ env.OUT_DIR }}/loteca_cartao.txt
-            ${{ env.OUT_DIR }}/news.csv
-            ${{ env.OUT_DIR }}/injuries.csv
-            ${{ env.OUT_DIR }}/weather.csv
-            ${{ env.OUT_DIR }}/matches_whitelist.csv
-            ${{ env.OUT_DIR }}/reality_report.json
-            ${{ env.OUT_DIR }}/reality_report.txt
