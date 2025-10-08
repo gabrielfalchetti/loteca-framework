@@ -1,0 +1,385 @@
+from,to
+Manchester Utd,Manchester United
+Man United,Manchester United
+Man Utd,Manchester United
+Manchester United FC,Manchester United
+Manchester City,Manchester City
+Man City,Manchester City
+Manchester City FC,Manchester City
+Liverpool FC,Liverpool
+Liverpool,Liverpool
+Chelsea FC,Chelsea
+Chelsea,Chelsea
+Arsenal FC,Arsenal
+Arsenal,Arsenal
+Tottenham Hotspur,Tottenham
+Tottenham,Tottenham
+Spurs,Tottenham
+West Ham United,West Ham
+West Ham,West Ham
+Aston Villa FC,Aston Villa
+Aston Villa,Aston Villa
+Newcastle Utd,Newcastle United
+Newcastle United FC,Newcastle United
+Nottingham Forest,Nottingham Forest
+Nottm Forest,Nottingham Forest
+Brighton & Hove Albion,Brighton
+Brighton,Brighton
+Crystal Palace,Crystal Palace
+Everton FC,Everton
+Everton,Everton
+Wolverhampton,Wolves
+Wolves,Wolverhampton
+Fulham FC,Fulham
+Fulham,Fulham
+Leicester City,Leicester
+Leicester,Leicester City
+Leeds United,Leeds
+Leeds Utd,Leeds
+Southampton,Southampton
+Burnley FC,Burnley
+Burnley,Burnley
+Bournemouth,AFC Bournemouth
+AFC Bournemouth,AFC Bournemouth
+Sheffield United,Sheffield Utd
+Sheffield Utd,Sheffield United
+Brentford,Brentford
+Luton Town,Luton
+Luton,Luton Town
+Norwich City,Norwich
+Watford,Watford
+Blackburn Rovers,Blackburn
+Middlesbrough,Middlesbrough
+West Bromwich Albion,West Brom
+West Brom,West Bromwich Albion
+Stoke City,Stoke
+Swansea City,Swansea
+Cardiff City,Cardiff
+Sunderland,Sunderland
+Hull City,Hull
+Coventry City,Coventry
+Preston North End,Preston
+QPR,Queens Park Rangers
+Queens Park Rangers,QPR
+Bristol City,Bristol City
+Birmingham City,Birmingham
+Huddersfield Town,Huddersfield
+Reading,Reading
+Millwall,Millwall
+Plymouth Argyle,Plymouth
+Ipswich Town,Ipswich
+Derby County,Derby
+Bolton Wanderers,Bolton
+Portsmouth,Portsmouth
+Oxford United,Oxford Utd
+Peterborough United,Peterborough
+Barnsley,Barnsley
+Charlton Athletic,Charlton
+Shrewsbury Town,Shrewsbury
+Blackpool,Blackpool
+Wycombe Wanderers,Wycombe
+Lincoln City,Lincoln
+Exeter City,Exeter
+Cambridge United,Cambridge
+Leyton Orient,Leyton Orient
+Carlisle United,Carlisle
+Stevenage,Stevenage
+Wigan Athletic,Wigan
+Fleetwood Town,Fleetwood
+Northampton Town,Northampton
+Cheltenham Town,Cheltenham
+Reading FC,Reading
+
+Real Madrid,Real Madrid
+Real Madrid CF,Real Madrid
+FC Barcelona,Barcelona
+Barcelona,Barcelona
+Barça,Barcelona
+Atletico Madrid,Atletico Madrid
+Atlético de Madrid,Atletico Madrid
+Atleti,Atletico Madrid
+Sevilla,Sevilla
+Sevilla FC,Sevilla
+Real Betis,Real Betis
+Villarreal,Villarreal
+Villarreal CF,Villarreal
+Valencia CF,Valencia
+Valencia,Valencia
+Real Sociedad,Real Sociedad
+Athletic Club Bilbao,Athletic Bilbao
+Athletic Bilbao,Athletic Bilbao
+Celta de Vigo,Celta Vigo
+Celta Vigo,Celta Vigo
+Osasuna,Osasuna
+Mallorca,Mallorca
+Rayo Vallecano,Rayo Vallecano
+Getafe,Getafe
+Granada CF,Granada
+Alaves,Deportivo Alaves
+Deportivo Alavés,Deportivo Alaves
+Las Palmas,Las Palmas
+Girona,Girona FC
+Espanyol,Espanyol
+Real Valladolid,Real Valladolid
+Levante,Levante
+Eibar,SD Eibar
+
+Juventus,Juventus
+Juventus FC,Juventus
+AC Milan,Milan
+Milan,AC Milan
+Inter Milan,Inter
+Internazionale,Inter
+Napoli,Napoli
+AS Roma,Roma
+Lazio,Lazio
+Atalanta,Atalanta
+Torino,Torino
+Fiorentina,Fiorentina
+Bologna,Bologna
+Genoa,Genoa
+Sampdoria,Sampdoria
+Udinese,Udinese
+Empoli,Empoli
+Monza,Monza
+Cagliari,Cagliari
+Sassuolo,Sassuolo
+Lecce,Lecce
+Verona,Hellas Verona
+Salernitana,Salernitana
+Parma,Parma
+Bari,Bari
+Venezia,Venezia
+Palermo,Palermo
+
+Bayern Munich,Bayern Munich
+Bayern München,Bayern Munich
+Borussia Dortmund,Dortmund
+BVB,Dortmund
+RB Leipzig,RB Leipzig
+Leipzig,RB Leipzig
+Bayer Leverkusen,Leverkusen
+Leverkusen,Bayer Leverkusen
+Eintracht Frankfurt,Eintracht Frankfurt
+Union Berlin,Union Berlin
+VfB Stuttgart,Stuttgart
+Wolfsburg,Wolfsburg
+Werder Bremen,Werder Bremen
+Freiburg,SC Freiburg
+Mainz 05,Mainz
+Augsburg,FC Augsburg
+Bochum,VfL Bochum
+Mönchengladbach,Monchengladbach
+Borussia M'gladbach,Monchengladbach
+Heidenheim,Heidenheim
+
+Paris Saint-Germain,PSG
+PSG,Paris Saint-Germain
+Marseille,Olympique Marseille
+Lyon,Olympique Lyonnais
+Lille,LOSC Lille
+Monaco,AS Monaco
+Rennes,Stade Rennais
+Nice,OGC Nice
+Lens,RC Lens
+Nantes,FC Nantes
+Reims,Stade de Reims
+Toulouse,Toulouse FC
+Montpellier,Montpellier
+Brest,Stade Brestois
+Lorient,FC Lorient
+Metz,Metz
+Clermont,Clermont Foot
+Strasbourg,Strasbourg
+
+Benfica,SL Benfica
+Sporting CP,Sporting
+Sporting Lisbon,Sporting
+FC Porto,Porto
+Braga,SC Braga
+Boavista,Boavista
+Vitória Guimarães,Vitoria Guimaraes
+Gil Vicente,Gil Vicente
+Estoril,Estoril Praia
+Casa Pia,Casa Pia
+Famalicão,Famalicao
+Arouca,Arouca
+Portimonense,Portimonense
+Farense,SC Farense
+Moreirense,Moreirense
+Rio Ave,Rio Ave
+Chaves,GD Chaves
+Vizela,Vizela
+
+Ajax,Ajax
+PSV Eindhoven,PSV
+Feyenoord,Feyenoord
+AZ Alkmaar,AZ
+Twente,FC Twente
+Utrecht,FC Utrecht
+Vitesse,Vitesse
+Heerenveen,Heerenveen
+Sparta Rotterdam,Sparta Rotterdam
+NEC Nijmegen,NEC
+Groningen,Groningen
+
+Celtic,Celtic
+Rangers,Rangers
+Aberdeen,Aberdeen
+Hearts,Heart of Midlothian
+Hibernian,Hibernian
+Dundee United,Dundee United
+Kilmarnock,Kilmarnock
+
+Galatasaray,Galatasaray
+Fenerbahce,Fenerbahce
+Besiktas,Besiktas
+Trabzonspor,Trabzonspor
+
+Boca Juniors,Boca Juniors
+River Plate,River Plate
+Racing Club,Racing Club
+Independiente,Independiente
+San Lorenzo,San Lorenzo
+Newell's Old Boys,Newells Old Boys
+Rosario Central,Rosario Central
+Estudiantes,Estudiantes LP
+Gimnasia LP,Gimnasia LP
+Velez Sarsfield,Velez Sarsfield
+Talleres Cordoba,Talleres
+Colon,Santa Fe
+Union Santa Fe,Union SF
+Huracan,Huracan
+Lanus,Lanus
+Banfield,Banfield
+Defensa y Justicia,Defensa y Justicia
+Argentinos Juniors,Argentinos Juniors
+Godoy Cruz,Godoy Cruz
+Barracas Central,Barracas Central
+Instituto,Instituto Cordoba
+
+Penarol,Penarol
+Nacional (URU),Nacional URU
+Defensor Sporting,Defensor Sporting
+Danubio,Danubio
+Liverpool Montevideo,Liverpool URU
+Cerro Largo,Cerro Largo
+Boston River,Boston River
+River Plate (URU),River Plate URU
+
+Colo-Colo,Colo Colo
+Universidad de Chile,Universidad de Chile
+Universidad Catolica,Universidad Catolica
+Cobresal,Cobresal
+Palestino,Palestino
+Union Espanola,Union Espanola
+Audax Italiano,Audax Italiano
+Nublense,Nublense
+
+América de Cali,America de Cali
+Atlético Nacional,Atletico Nacional
+Millonarios,Millonarios
+Junior Barranquilla,Junior
+Santa Fe,Independiente Santa Fe
+Deportivo Cali,Deportivo Cali
+Once Caldas,Once Caldas
+Envigado,Envigado
+Deportes Tolima,Tolima
+Alianza Petrolera,Alianza Petrolera
+
+Club América,Club America
+Club America,Mexico America
+Chivas Guadalajara,Guadalajara
+Monterrey,Monterrey
+Tigres UANL,Tigres
+Pumas UNAM,Pumas
+Cruz Azul,Cruz Azul
+Santos Laguna,Santos Laguna
+Toluca,Toluca
+Atlas,Atlas
+Leon,Leon
+Pachuca,Pachuca
+Necaxa,Necaxa
+Tijuana,Tijuana
+
+LA Galaxy,LA Galaxy
+Los Angeles FC,LAFC
+Seattle Sounders,Seattle Sounders
+Portland Timbers,Portland Timbers
+Vancouver Whitecaps,Vancouver Whitecaps
+New York City FC,NYCFC
+New York Red Bulls,NY Red Bulls
+Inter Miami,Inter Miami CF
+Orlando City,Orlando City
+Atlanta United,Atlanta United
+Columbus Crew,Columbus Crew
+DC United,DC United
+Toronto FC,Toronto FC
+CF Montreal,CF Montreal
+Philadelphia Union,Philadelphia Union
+Chicago Fire,Chicago Fire
+FC Dallas,FC Dallas
+Houston Dynamo,Houston Dynamo
+Sporting Kansas City,Sporting KC
+Real Salt Lake,Real Salt Lake
+Austin FC,Austin FC
+San Jose Earthquakes,San Jose Earthquakes
+St. Louis City,St Louis City SC
+
+Brazil,Brazil
+Brasil,Brazil
+Argentina,Argentina
+Germany,Germany
+Alemanha,Germany
+France,France
+França,France
+Spain,Spain
+Espanha,Spain
+Portugal,Portugal
+England,England
+Inglaterra,England
+Italy,Italy
+Itália,Italy
+Netherlands,Netherlands
+Holanda,Netherlands
+Belgium,Belgium
+Bélgica,Belgium
+Uruguay,Uruguay
+Chile,Chile
+Colombia,Colombia
+Mexico,Mexico
+United States,USA
+USA,USA
+Croatia,Croatia
+Denmark,Denmark
+Sweden,Sweden
+Norway,Norway
+Finland,Finland
+Switzerland,Switzerland
+Austria,Austria
+Poland,Poland
+Czech Republic,Czech Republic
+Hungary,Hungary
+Romania,Romania
+Serbia,Serbia
+Turkey,Turkey
+Greece,Greece
+Ukraine,Ukraine
+Russia,Russia
+Japan,Japan
+South Korea,South Korea
+Korea Republic,South Korea
+Australia,Australia
+Morocco,Morocco
+Egypt,Egypt
+Nigeria,Nigeria
+Cameroon,Cameroon
+Ghana,Ghana
+Senegal,Senegal
+Algeria,Algeria
+Tunisia,Tunisia
+Saudi Arabia,Saudi Arabia
+Qatar,Qatar
+Iran,Iran
+China,China
+India,India
