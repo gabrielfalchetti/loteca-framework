@@ -1,0 +1,11 @@
+==== CARTÃO LOTECA ====
+Jogo 01 - Manchester United x Vålerenga: A (stake=65.0) [19.26%]
+Jogo 02 - SKN St. Pölten x Atlético Madrid: H (stake=61.0) [20.21%]
+Jogo 03 - Amazonas FC x Criciuma: H (stake=55.0) [21.31%]
+Jogo 04 - FC Twente Enschede x Chelsea: H (stake=55.0) [21.52%]
+Jogo 05 - Real Madrid x AS Roma: A (stake=45.0) [23.26%]
+Jogo 06 - Operario PR x Athletic Club (MG): A (stake=30.0) [26.26%]
+Jogo 07 - Goiás x Clube de Regatas Brasil: A (stake=28.0) [26.7%]
+Jogo 08 - VfL Wolfsburg x Paris Saint Germain: D (stake=17.0) [28.59%]
+Jogo 09 - Botafogo x Paysandu: D (stake=0.0) [32.85%]
+=======================
