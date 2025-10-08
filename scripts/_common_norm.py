@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Funções comuns de normalização de nomes e match_key.
-Coloque este arquivo em: scripts/_common_norm.py
 """
 
 import re
