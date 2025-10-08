@@ -263,7 +263,8 @@ jobs:
         run: |
           set -euo pipefail
           [ -f scripts/blend_models.py ] || { echo "::error::scripts/blend_models.py não encontrado"; exit 24; }
-          python scripts/blend_models.py --rodada "${OUT_DIR}" --w_calib 0.65 --w_market 0.35 --use-context true --context-strength 0.15
+          # --use-context é um flag (sem 'true/false' após)
+          python scripts/blend_models.py --rodada "${OUT_DIR}" --w_calib 0.65 --w_market 0.35 --use-context --context-strength 0.15
           test -s "${OUT_DIR}/predictions_final.csv" || { echo "::error::predictions_final.csv não gerado"; exit 24; }
           head -n 10 "${OUT_DIR}/predictions_final.csv" || true
 
