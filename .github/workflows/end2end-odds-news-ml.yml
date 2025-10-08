@@ -3,7 +3,7 @@ name: loteca - end2end (odds + news + ml)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 * * * *"   # ajuste se quiser outra cadência
+    - cron: "15 * * * *"
   push:
     paths:
       - "scripts/**"
@@ -107,7 +107,7 @@ jobs:
 
       # ----------------------- INGEST ODDS -----------------------
       - name: Ingest odds – TheOddsAPI (opcional)
-        if: env.THEODDS_API_KEY != ''
+        if: ${{ env.THEODDS_API_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -121,7 +121,7 @@ jobs:
           head -n 12 "${OUT_DIR}/odds_theoddsapi.csv" || true
 
       - name: Ingest odds – API-Football (opcional)
-        if: env.X_RAPIDAPI_KEY != ''
+        if: ${{ env.X_RAPIDAPI_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -152,7 +152,7 @@ jobs:
 
       # ----------------------- NOTÍCIAS / CLIMA / INJURIES -----------------------
       - name: News (opcional)
-        if: env.NEWSAPI_KEY != ''
+        if: ${{ env.NEWSAPI_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -186,7 +186,7 @@ jobs:
           head -n 5 "${OUT_DIR}/weather.csv" || true
 
       - name: Injuries (opcional, filtrando base U17/U20)
-        if: env.X_RAPIDAPI_KEY != ''
+        if: ${{ env.X_RAPIDAPI_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -234,34 +234,12 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          if [ -f scripts/calibrate_probs.py ]; then
-            python scripts/calibrate_probs.py --rodada "${OUT_DIR}" --debug
-          else
-            echo "==================================================="
-            echo "[calibrate] INICIANDO CALIBRAÇÃO DE PROBABILIDADES"
-            echo "[calibrate] Diretório de rodada : ${OUT_DIR}"
-            echo "==================================================="
-            # fallback mínimo: converte predictions_market -> calibrated_probs
-            python - <<'PY'
-import pandas as pd, sys, pathlib
-out = pathlib.Path("${OUT_DIR}")
-pm = pd.read_csv(out/"predictions_market.csv")
-pm["match_id"] = pm["home"].str.title()+"__"+pm["away"].str.title() if "home" in pm.columns else pm["match_key"].str.replace("__vs__", "__").str.title()
-cal = pd.DataFrame({
-  "match_id": pm["match_id"],
-  "calib_method": "Dirichlet",
-  "calib_home": pm["p_home"],
-  "calib_draw": pm["p_draw"],
-  "calib_away": pm["p_away"],
-})
-cal.to_csv(out/"calibrated_probs.csv", index=False)
-print(f"[ok] Calibração fallback -> {out/'calibrated_probs.csv'}")
-PY
-          fi
+          [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py não encontrado"; exit 23; }
+          python scripts/calibrate_probs.py --rodada "${OUT_DIR}" --debug
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv não gerado"; exit 23; }
           head -n 5 "${OUT_DIR}/calibrated_probs.csv" || true
 
-      - name: Blend (market + calib)  # <-- AGORA após calibração
+      - name: Blend (market + calib)  # <-- após calibração
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -312,7 +290,7 @@ PY
           echo "Sanity OK."
 
       - name: Publish W&B (opcional)
-        if: env.WANDB_API_KEY != ''
+        if: ${{ env.WANDB_API_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
