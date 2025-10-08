@@ -1,10 +1,7 @@
 match_id,home,away,source,lat,lon
-1,Amazonas,Criciuma,manual,-3.0899,-60.0283
-2,Goias,CRB,manual,-16.6956,-49.2511
-3,Botafogo-SP,Paysandu,manual,-21.2028,-47.8066
-4,Atletico-MG,Sport,manual,-19.9642,-44.0096
-5,Cuiaba,Novorizontino,manual,-15.6008,-56.1189
-6,Operario-PR,Athletic Club,manual,-25.0947,-50.1582
-7,Mirassol,Fluminense,manual,-20.8156,-49.5173
-8,Avai,Volta Redonda,manual,-27.6705,-48.5462
-9,America-MG,Vila Nova,manual,-19.9017,-43.9150
+1,Atletico-MG,Sport,manual,-19.9642,-44.0096
+2,Cuiaba,Novorizontino,manual,-15.6008,-56.1189
+3,Operario-PR,Athletic Club,manual,-25.0947,-50.1582
+4,Mirassol,Fluminense,manual,-20.8156,-49.5173
+5,Avai,Volta Redonda,manual,-27.6705,-48.5462
+6,America-MG,Vila Nova,manual,-19.9017,-43.9150
