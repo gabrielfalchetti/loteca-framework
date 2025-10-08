@@ -53,7 +53,6 @@ jobs:
               requests==2.32.3 python-dateutil==2.9.0.post0 pytz==2024.1 \
               pyarrow==17.0.0 rich==13.9.2 tqdm==4.66.4 beautifulsoup4==4.12.3 \
               lxml==5.2.2 tabulate==0.9.0 matplotlib==3.8.4 PyYAML==6.0.2
-          fi
 
       - name: Prepare run folder
         id: prep
@@ -107,7 +106,7 @@ jobs:
 
       # ----------------------- INGEST ODDS -----------------------
       - name: Ingest odds – TheOddsAPI (opcional)
-        if: ${{ env.THEODDS_API_KEY != '' }}
+        if: ${{ secrets.THEODDS_API_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -121,7 +120,7 @@ jobs:
           head -n 12 "${OUT_DIR}/odds_theoddsapi.csv" || true
 
       - name: Ingest odds – API-Football (opcional)
-        if: ${{ env.X_RAPIDAPI_KEY != '' }}
+        if: ${{ secrets.X_RAPIDAPI_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -152,7 +151,7 @@ jobs:
 
       # ----------------------- NOTÍCIAS / CLIMA / INJURIES -----------------------
       - name: News (opcional)
-        if: ${{ env.NEWSAPI_KEY != '' }}
+        if: ${{ secrets.NEWSAPI_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -186,7 +185,7 @@ jobs:
           head -n 5 "${OUT_DIR}/weather.csv" || true
 
       - name: Injuries (opcional, filtrando base U17/U20)
-        if: ${{ env.X_RAPIDAPI_KEY != '' }}
+        if: ${{ secrets.X_RAPIDAPI_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -201,7 +200,7 @@ jobs:
             : > "${OUT_DIR}/injuries.csv"
           fi
 
-      # ----------------------- ML / PROBS / BLEND / KELLY -----------------------
+      # ----------------------- ML / PROBS / FEATURES -----------------------
       - name: Predict from odds (market)
         shell: bash
         env:
@@ -239,17 +238,30 @@ jobs:
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv não gerado"; exit 23; }
           head -n 5 "${OUT_DIR}/calibrated_probs.csv" || true
 
-      - name: Blend (market + calib)  # <-- após calibração
+      # ----------------------- CONTEXTO + BLEND FINAL -----------------------
+      - name: Join context features (uni+bivariado+xg+weather+injuries+news)
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          [ -f scripts/feature_join_context.py ] || { echo "::error::scripts/feature_join_context.py não encontrado"; exit 28; }
+          python scripts/feature_join_context.py --rodada "${OUT_DIR}" --debug
+          test -s "${OUT_DIR}/context_features.csv" || { echo "::error::context_features.csv não gerado"; exit 28; }
+          head -n 10 "${OUT_DIR}/context_features.csv" || true
+
+      - name: Blend (market + calib + context)
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           set -euo pipefail
           [ -f scripts/blend_models.py ] || { echo "::error::scripts/blend_models.py não encontrado"; exit 24; }
-          python scripts/blend_models.py --rodada "${OUT_DIR}" --w_calib 0.65 --w_market 0.35
-          test -s "${OUT_DIR}/predictions_blend.csv" || { echo "::error::predictions_blend.csv não gerado"; exit 24; }
-          head -n 10 "${OUT_DIR}/predictions_blend.csv" || true
+          python scripts/blend_models.py --rodada "${OUT_DIR}" --w_calib 0.65 --w_market 0.35 --use-context true --context-strength 0.15
+          test -s "${OUT_DIR}/predictions_final.csv" || { echo "::error::predictions_final.csv não gerado"; exit 24; }
+          head -n 10 "${OUT_DIR}/predictions_final.csv" || true
 
+      # ----------------------- KELLY / CARTÃO / SANITY -----------------------
       - name: Kelly stakes
         shell: bash
         env:
@@ -290,7 +302,7 @@ jobs:
           echo "Sanity OK."
 
       - name: Publish W&B (opcional)
-        if: ${{ env.WANDB_API_KEY != '' }}
+        if: ${{ secrets.WANDB_API_KEY != '' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
