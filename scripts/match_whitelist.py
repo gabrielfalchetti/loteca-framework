@@ -2,19 +2,16 @@
 """
 Gera uma 'whitelist' de partidas a partir de data/in/matches_source.csv.
 Saída: data/in/matches_whitelist.csv (com match_key canônica).
-Falha com mensagens claras se o arquivo não existir ou estiver inválido.
 
-Execute no workflow ANTES de qualquer ingestão/consenso:
-  python scripts/match_whitelist.py
-
-Coloque este arquivo em: scripts/match_whitelist.py
+Execute ANTES das ingestões:
+  python -m scripts.match_whitelist
 """
 
 import csv
 import sys
 from pathlib import Path
 
-from _common_norm import match_key_from_teams
+from scripts._common_norm import match_key_from_teams
 
 IN_PATH  = Path("data/in/matches_source.csv")
 OUT_PATH = Path("data/in/matches_whitelist.csv")
@@ -31,7 +28,7 @@ def main():
 
     with IN_PATH.open("r", encoding="utf-8", newline="") as f:
         r = csv.DictReader(f)
-        header = [h.strip() for h in r.fieldnames or []]
+        header = [h.strip() for h in (r.fieldnames or [])]
         miss = [c for c in REQUIRED if c not in header]
         if miss:
             fail(f"Cabeçalhos ausentes em {IN_PATH.name}: {miss}", 92)
@@ -44,7 +41,6 @@ def main():
             lat  = (row.get("lat") or "").strip()
             lon  = (row.get("lon") or "").strip()
             if not (home and away and mid):
-                # ignora linhas vazias
                 continue
             key = match_key_from_teams(home, away)
             rows.append({
