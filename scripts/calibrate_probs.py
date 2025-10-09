@@ -1,266 +1,228 @@
-# scripts/calibrate_probs.py
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Calibração de probabilidades 1X2 com caminhos de fallback robustos.
+calibrate_probs.py
 
-Entrada prioritária:
-  {OUT_DIR}/predictions_market.csv
-    - Se tiver prob_home, prob_draw, prob_away -> usa diretamente
-    - Senão, tenta p_* de fair probs por odds, ou faz merge com odds_consensus.csv
+Objetivo:
+  Ler probabilidades de mercado (ou derivá-las das odds) e aplicar uma
+  calibração suave tipo "Dirichlet smoothing" (mistura com distribuição
+  uniforme), produzindo:
 
-Fallback:
-  {OUT_DIR}/odds_consensus.csv -> converte odds em probs (1/odds) e normaliza
+    <OUT_DIR>/calibrated_probs.csv
+
+Entradas possíveis (nesta ordem de preferência):
+  1) <OUT_DIR>/predictions_market.csv
+     - Usa colunas p_home, p_draw, p_away se existirem;
+     - Caso não existam, tenta derivar das colunas de odds.
+
+  2) <OUT_DIR>/odds_consensus.csv
+     - Deriva probabilidades removendo overround.
+
+Parâmetros:
+  --rodada <OUT_DIR>         (obrigatório)
+  --alpha  <float>           (força da suavização Dirichlet, default 0.20)
+  --debug                    (prints extras)
 
 Saída:
-  {OUT_DIR}/calibrated_probs.csv
-    colunas: match_id, calib_method, calib_home, calib_draw, calib_away
+  calibrated_probs.csv  com colunas:
+    match_id,calib_method,calib_home,calib_draw,calib_away
+
+Notas:
+  - 'match_id' sai no estilo "Home__Away" (com dois underlines), compatível
+    com o loader do blend (ele normaliza para comparar).
 """
 
 import argparse
 import csv
 import os
 import sys
-from typing import Optional, Tuple
+from math import isfinite
 
 import pandas as pd
 
 
-def log(msg: str, debug: bool = False) -> None:
-    if debug:
-        print(msg, flush=True)
-
-
-def read_csv_safe(path: str, debug: bool = False) -> Optional[pd.DataFrame]:
+def ffloat(x, d=0.0):
     try:
-        return pd.read_csv(path)
-    except FileNotFoundError:
-        log(f"[calibrate] arquivo não encontrado: {path}", debug)
-        return None
-    except Exception as e:
-        log(f"[calibrate] falha lendo {path}: {e}", debug)
-        return None
+        v = float(x)
+        return v if isfinite(v) else d
+    except Exception:
+        return d
 
 
-def implied_from_odds(odd_home, odd_draw, odd_away) -> Tuple[float, float, float]:
-    # Converte odds decimais em probabilidades implícitas e normaliza
-    vals = []
-    for o in (odd_home, odd_draw, odd_away):
-        try:
-            o = float(o)
-            vals.append(0.0 if o <= 0 else 1.0 / o)
-        except Exception:
-            vals.append(0.0)
-    s = sum(vals)
+def remove_overround(oh: float, od: float, oa: float):
+    """Converte odds (com overround) em probabilidades justas."""
+    if oh <= 1.01 or od <= 1.01 or oa <= 1.01:
+        return (1/3, 1/3, 1/3)
+    imp_h = 1.0 / oh
+    imp_d = 1.0 / od
+    imp_a = 1.0 / oa
+    s = imp_h + imp_d + imp_a
     if s <= 0:
-        return 0.0, 0.0, 0.0
-    return (vals[0] / s, vals[1] / s, vals[2] / s)
+        return (1/3, 1/3, 1/3)
+    return (imp_h / s, imp_d / s, imp_a / s)
 
 
-def dirichlet_calibration(p_home: float, p_draw: float, p_away: float, alpha: float = 0.3) -> Tuple[float, float, float]:
-    """
-    Suavização Dirichlet-like: adiciona pseudo-contagens (alpha) e renormaliza.
-    alpha pequeno para não distorcer muito.
-    """
-    ph = max(p_home, 0.0)
-    pd_ = max(p_draw, 0.0)
-    pa = max(p_away, 0.0)
-    s = ph + pd_ + pa
-    if s <= 0:
-        ph, pd_, pa = 1/3, 1/3, 1/3
-    # aplica suavização
-    ph, pd_, pa = ph + alpha, pd_ + alpha, pa + alpha
-    s = ph + pd_ + pa
-    return ph / s, pd_ / s, pa / s
+def get_names(df, *candidates):
+    """Retorna o primeiro nome de coluna existente, dentre os candidatos."""
+    for name in candidates:
+        if name in df.columns:
+            return name
+    return None
 
 
-def ensure_match_id(df: pd.DataFrame, debug: bool = False) -> pd.Series:
-    """
-    Devolve uma Series 'match_id' coerente:
-      - se já existir 'match_id', usa
-      - senão, se houver team_home/team_away, monta "home__away"
-      - senão, se houver home/away, monta
-      - senão, tenta extrair de 'match_key' (ex.: "botafogo-sp__vs__paysandu")
-      - caso falhe, gera id incremental baseado no índice
-    """
-    if "match_id" in df.columns:
-        out = df["match_id"].astype(str).fillna("")
-        if out.str.len().gt(0).any():
-            return out
+def load_probs_from_predictions_market(path: str, debug: bool):
+    if not os.path.isfile(path):
+        return None
+    df = pd.read_csv(path)
+    # nomes de times
+    c_home = get_names(df, "home", "team_home")
+    c_away = get_names(df, "away", "team_away")
+    if not c_home or not c_away:
+        raise ValueError("Colunas de times não encontradas em predictions_market.csv.")
 
-    def _norm(s):
-        return str(s or "").strip()
+    # match_id: "Home__Away"
+    if "match_key" in df.columns and df["match_key"].notna().all():
+        # pode vir normalizado; reconstruímos 'bonito' com os nomes originais
+        pass
+    # odds (podem não existir se já veio com p_*)
+    c_oh = get_names(df, "odd_home", "odds_home", "home_odds")
+    c_od = get_names(df, "odd_draw", "odds_draw", "draw_odds")
+    c_oa = get_names(df, "odd_away", "odds_away", "away_odds")
 
-    home = None
-    away = None
+    # probs
+    c_ph = get_names(df, "p_home")
+    c_pd = get_names(df, "p_draw")
+    c_pa = get_names(df, "p_away")
 
-    if {"team_home", "team_away"}.issubset(df.columns):
-        home = df["team_home"].map(_norm)
-        away = df["team_away"].map(_norm)
-    elif {"home", "away"}.issubset(df.columns):
-        home = df["home"].map(_norm)
-        away = df["away"].map(_norm)
+    rows = []
+    for _, r in df.iterrows():
+        home = str(r[c_home]).strip()
+        away = str(r[c_away]).strip()
+        mid = f"{home}__{away}"
 
-    if home is not None and away is not None:
-        mi = (home + "__" + away).where(~((home == "") | (away == "")))
-    else:
-        mi = pd.Series([""] * len(df), index=df.index)
+        if c_ph and c_pd and c_pa and pd.notna(r.get(c_ph)) and pd.notna(r.get(c_pd)) and pd.notna(r.get(c_pa)):
+            p_home, p_draw, p_away = ffloat(r[c_ph]), ffloat(r[c_pd]), ffloat(r[c_pa])
+        elif c_oh and c_od and c_oa:
+            p_home, p_draw, p_away = remove_overround(
+                ffloat(r[c_oh]), ffloat(r[c_od]), ffloat(r[c_oa])
+            )
+        else:
+            # linha sem dados suficientes
+            continue
 
-    # tentar extrair de match_key se ainda vazio
-    if "match_key" in df.columns:
-        mk = df["match_key"].astype(str)
-        # padrões comuns: "time-a__vs__time-b" ou "TimeA__TimeB"
-        guess = mk.str.replace("__vs__", "__", regex=False)
-        mi = mi.where(mi.str.len() > 0, guess)
-
-    # ainda vazio? gera fallback previsível
-    if mi.fillna("").str.len().eq(0).any():
-        mi = mi.fillna("")
-        for i in mi.index[mi.eq("")]:
-            mi.at[i] = f"match_{i}"
+        rows.append((mid, p_home, p_draw, p_away))
 
     if debug:
-        sample = mi.head(3).tolist()
-        log(f"[calibrate] sample match_id: {sample}", debug)
-    return mi
+        print(f"[calibrate][DEBUG] predictions_market -> linhas: {len(rows)}")
+
+    return rows if rows else None
 
 
-def load_probs_from_predictions(out_dir: str, debug: bool = False) -> Optional[pd.DataFrame]:
-    path = os.path.join(out_dir, "predictions_market.csv")
-    df = read_csv_safe(path, debug)
-    if df is None or df.empty:
+def load_probs_from_odds(path: str, debug: bool):
+    if not os.path.isfile(path):
+        return None
+    df = pd.read_csv(path)
+
+    c_home = get_names(df, "home", "team_home")
+    c_away = get_names(df, "away", "team_away")
+    c_oh = get_names(df, "odd_home", "odds_home")
+    c_od = get_names(df, "odd_draw", "odds_draw")
+    c_oa = get_names(df, "odd_away", "odds_away")
+
+    if not all([c_home, c_away, c_oh, c_od, c_oa]):
+        # arquivo não está no padrão esperado
         return None
 
-    # Normaliza nomes esperados
-    # Tenta detectar colunas de probabilidade
-    prob_cols = None
-    for trip in [
-        ("prob_home", "prob_draw", "prob_away"),
-        ("p_home", "p_draw", "p_away"),
-        ("fair_p_home", "fair_p_draw", "fair_p_away"),
-    ]:
-        if set(trip).issubset(df.columns):
-            prob_cols = trip
-            break
+    rows = []
+    for _, r in df.iterrows():
+        home = str(r[c_home]).strip()
+        away = str(r[c_away]).strip()
+        mid = f"{home}__{away}"
+        p_home, p_draw, p_away = remove_overround(
+            ffloat(r[c_oh]), ffloat(r[c_od]), ffloat(r[c_oa])
+        )
+        rows.append((mid, p_home, p_draw, p_away))
 
-    # Se não tem prob*, mas tem odds no predictions, calcula
-    if prob_cols is None and {"odd_home", "odd_draw", "odd_away"}.issubset(df.columns):
-        log("[calibrate] predictions_market.csv sem colunas prob_*. Derivando de odds.", debug)
-        ph, pd_, pa = zip(*df[["odd_home", "odd_draw", "odd_away"]].apply(
-            lambda r: implied_from_odds(r["odd_home"], r["odd_draw"], r["odd_away"]), axis=1
-        ))
-        df = df.copy()
-        df["prob_home"], df["prob_draw"], df["prob_away"] = ph, pd_, pa
-        prob_cols = ("prob_home", "prob_draw", "prob_away")
+    if debug:
+        print(f"[calibrate][DEBUG] odds_consensus -> linhas: {len(rows)}")
 
-    if prob_cols is None:
-        # sem probabilidades e sem odds -> nada a fazer
-        return None
-
-    # garante match_id
-    df = df.copy()
-    df["match_id"] = ensure_match_id(df, debug)
-    # renomeia para nomes canônicos
-    out = pd.DataFrame({
-        "match_id": df["match_id"],
-        "prob_home": df[prob_cols[0]].astype(float),
-        "prob_draw": df[prob_cols[1]].astype(float),
-        "prob_away": df[prob_cols[2]].astype(float),
-    })
-    return out
+    return rows if rows else None
 
 
-def load_probs_from_consensus(out_dir: str, debug: bool = False) -> Optional[pd.DataFrame]:
-    path = os.path.join(out_dir, "odds_consensus.csv")
-    df = read_csv_safe(path, debug)
-    if df is None or df.empty:
-        return None
-    need = {"team_home", "team_away", "odds_home", "odds_draw", "odds_away"}
-    if not need.issubset(df.columns):
-        log(f"[calibrate] odds_consensus.csv está sem colunas obrigatórias: {sorted(need - set(df.columns))}", debug)
-        return None
+def dirichlet_smooth(p_home: float, p_draw: float, p_away: float, alpha: float):
+    """
+    Calibração tipo Dirichlet: mistura convexa com uniforme (1/3,1/3,1/3).
+    alpha = 0  -> sem suavização
+    alpha = 1  -> mistura 50/50 com uniforme
+    """
+    alpha = max(0.0, min(1.0, float(alpha)))
+    u = 1.0 / 3.0
+    ch = (1 - alpha) * p_home + alpha * u
+    cd = (1 - alpha) * p_draw + alpha * u
+    ca = (1 - alpha) * p_away + alpha * u
+    s = ch + cd + ca
+    if s <= 0:
+        return (u, u, u)
+    return (ch / s, cd / s, ca / s)
 
-    df = df.copy()
-    ph, pd_, pa = zip(*df[["odds_home", "odds_draw", "odds_away"]].apply(
-        lambda r: implied_from_odds(r["odds_home"], r["odds_draw"], r["odds_away"]), axis=1
-    ))
-    df["prob_home"], df["prob_draw"], df["prob_away"] = ph, pd_, pa
-    df["match_id"] = ensure_match_id(df, debug)
-    out = df[["match_id", "prob_home", "prob_draw", "prob_away"]].copy()
-    return out
+
+def write_output(out_dir: str, rows, alpha: float, debug: bool):
+    out_path = os.path.join(out_dir, "calibrated_probs.csv")
+    cols = ["match_id", "calib_method", "calib_home", "calib_draw", "calib_away"]
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(cols)
+        for mid, ph, pd, pa in rows:
+            ch, cd, ca = dirichlet_smooth(ph, pd, pa, alpha)
+            wr.writerow([mid, "Dirichlet", f"{ch:.9f}", f"{cd:.9f}", f"{ca:.9f}"])
+    if debug:
+        print(f"[calibrate] Salvo em: {out_path}")
+        # preview
+        try:
+            prv = pd.read_csv(out_path).head(5)
+            print(prv.to_csv(index=False))
+        except Exception:
+            pass
+    return out_path
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True, help="Diretório da rodada (ex.: data/out/123456)")
-    ap.add_argument("--history", required=False, help="(opcional) caminho de histórico/treino", default=None)
-    ap.add_argument("--model_path", required=False, help="(opcional) caminho de modelo", default=None)
+    ap.add_argument("--alpha", type=float, default=0.20, help="força da suavização Dirichlet [0..1]")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
     out_dir = args.rodada
-    os.makedirs(out_dir, exist_ok=True)
-    log("=" * 51, args.debug)
-    log("[calibrate] INICIANDO CALIBRAÇÃO DE PROBABILIDADES", args.debug)
-    log(f"[calibrate] Diretório de rodada : {out_dir}", args.debug)
-    log("=" * 51, args.debug)
+    pm_path = os.path.join(out_dir, "predictions_market.csv")
+    oc_path = os.path.join(out_dir, "odds_consensus.csv")
 
-    # 1) tenta predictions_market.csv
-    dfp = load_probs_from_predictions(out_dir, args.debug)
+    # 1) tenta pegar do predictions_market
+    rows = load_probs_from_predictions_market(pm_path, args.debug)
 
-    # 2) fallback: odds_consensus.csv
-    if dfp is None:
-        log("[calibrate] predictions_market.csv sem prob*. Usando fallback por odds_consensus.csv.", args.debug)
-        dfp = load_probs_from_consensus(out_dir, args.debug)
+    # 2) fallback: odds_consensus
+    if not rows:
+        print("[calibrate] predictions_market.csv sem prob*. Usando fallback por odds_consensus.csv.")
+        rows = load_probs_from_odds(oc_path, args.debug)
 
-    # 3) se ainda None, tenta odds do próprio predictions_market (sem prob* e sem fair)
-    if dfp is None:
-        pm_path = os.path.join(out_dir, "predictions_market.csv")
-        dfpm = read_csv_safe(pm_path, args.debug)
-        if dfpm is not None and not dfpm.empty and {"odd_home", "odd_draw", "odd_away"}.issubset(dfpm.columns):
-            log("[calibrate] Fallback final: odds em predictions_market.csv → probs.", args.debug)
-            dfpm = dfpm.copy()
-            ph, pd_, pa = zip(*dfpm[["odd_home", "odd_draw", "odd_away"]].apply(
-                lambda r: implied_from_odds(r["odd_home"], r["odd_draw"], r["odd_away"]), axis=1
-            ))
-            dfpm["prob_home"], dfpm["prob_draw"], dfpm["prob_away"] = ph, pd_, pa
-            dfpm["match_id"] = ensure_match_id(dfpm, args.debug)
-            dfp = dfpm[["match_id", "prob_home", "prob_draw", "prob_away"]].copy()
-
-    if dfp is None or dfp.empty:
-        print("::error::[calibrate] Não foi possível derivar probabilidades (predictions_market/odds_consensus ausentes/incompletos).")
+    if not rows:
+        print("##[error][calibrate] Não foi possível derivar probabilidades (predictions_market/odds_consensus ausentes/incompletos).", file=sys.stderr)
         sys.exit(23)
 
-    # Calibração
-    rows = []
-    for _, r in dfp.iterrows():
-        mh = float(r.get("prob_home", 0) or 0)
-        md = float(r.get("prob_draw", 0) or 0)
-        ma = float(r.get("prob_away", 0) or 0)
-        ch, cd, ca = dirichlet_calibration(mh, md, ma, alpha=0.3)
-        rows.append({
-            "match_id": str(r["match_id"]),
-            "calib_method": "Dirichlet",
-            "calib_home": ch,
-            "calib_draw": cd,
-            "calib_away": ca,
-        })
-
-    df = pd.DataFrame(rows)
-
-    out = os.path.join(out_dir, "calibrated_probs.csv")
-    df[["match_id", "calib_method", "calib_home", "calib_draw", "calib_away"]].to_csv(
-        out, index=False, quoting=csv.QUOTE_MINIMAL
-    )
-
-    log(f"[calibrate] Salvo em: {out}", args.debug)
-    if args.debug:
-        try:
-            print(df.head(10).to_string(index=False))
-        except Exception:
-            pass
-
+    write_output(out_dir, rows, args.alpha, args.debug)
     print("[ok] Calibração concluída com sucesso.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        print("=" * 51)
+        print("[calibrate] INICIANDO CALIBRAÇÃO DE PROBABILIDADES")
+        print(f"[calibrate] Diretório de rodada : {os.environ.get('OUT_DIR','(não definido via env)')}")
+        print("=" * 51)
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"##[error][calibrate] Falha inesperada: {e}", file=sys.stderr)
+        sys.exit(23)
