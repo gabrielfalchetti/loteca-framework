@@ -1,291 +1,299 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# scripts/ingest_odds_theoddsapi.py
+# Coleta odds H2H da TheOddsAPI e casa com a whitelist de jogos,
+# gerando odds_theoddsapi.csv com schema obrigatório.
 
-"""
-ingest_odds_theoddsapi.py
-Coleta odds H2H no TheOddsAPI com:
-- Fallback de sport_key para Brasil (A/B/C/D) quando necessário;
-- Matching robusto de times: normaliza (unidecode, lower), remove EC/FC/“futebol clube”,
-  pontuação e hífens; tenta (home,away) e também invertido; usa fuzzy score mais permissivo;
-- Exporta k1 (mandante), kx (empate), k2 (visitante).
-
-Saída: data/out/<rodada>/odds_theoddsapi.csv
-"""
-
+from __future__ import annotations
+import argparse
+import csv
+import json
 import os
 import sys
-import json
-import argparse
-import time
-import re
-from typing import Dict, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
-import requests
 import pandas as pd
-from rapidfuzz import fuzz, process
+import requests
+from rapidfuzz import process, fuzz
 from unidecode import unidecode
 
-DEFAULT_REGIONS = "uk,eu,us,au"
-ODDS_MARKET = "h2h"
-ODDS_FORMAT = "decimal"
-DATE_FORMAT = "iso"
-TIMEOUT = 25
+SOURCE_NAME = "theoddsapi"
+REQUIRED_COLUMNS = ["match_id", "home", "away", "odds_home", "odds_draw", "odds_away", "bookmaker", "market", "source"]
 
-# Pool de sports para fallback (ordem de prioridade)
-BRAZIL_SPORT_POOL = [
-    "soccer_brazil_serie_b",
-    "soccer_brazil_serie_a",
-    "soccer_brazil_serie_c",
-    "soccer_brazil_serie_d"
-    # "soccer_brazil_cup"  # inclua se seu plano expõe Copa do Brasil
-]
+def log(msg: str):
+    print(msg, flush=True)
 
-CLEAN_RE = re.compile(r"[^\w\s]", flags=re.UNICODE)
+def err(msg: str):
+    print(f"[{SOURCE_NAME}] ERRO {msg}", flush=True)
 
-def log(msg: str): print(f"[theoddsapi] {msg}", flush=True)
-def warn(msg: str): print(f"[theoddsapi] AVISO {msg}", flush=True)
-def err(msg: str): print(f"[theoddsapi] ERRO {msg}", flush=True)
+def dbg(enabled: bool, msg: str):
+    if enabled:
+        print(f"[{SOURCE_NAME}][DEBUG] {msg}", flush=True)
 
-def read_json(path: str, default):
-    if not os.path.exists(path): return default
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def read_json(path: Optional[str], default: Any) -> Any:
+    """
+    Lê JSON com tolerância: se path não existir, for vazio, ou inválido -> retorna default.
+    """
+    if not path:
+        return default
+    try:
+        if not os.path.exists(path):
+            return default
+        if os.path.getsize(path) == 0:
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
-def normalize_team(name: str) -> str:
-    if not name: return ""
-    s = unidecode(str(name)).lower().strip()
-    # remove pontuação
-    s = CLEAN_RE.sub(" ", s)
-    # remove sufixos/comuns de clubes
-    tokens = [t for t in s.split() if t not in {
-        "ec","fc","sc","ac","esporte","sport","clube","clube","futebol","futbol","clube","de",
-        "associacao","association","athletico","atletico"  # mantemos "atletico" às vezes, mas OK
-    }]
-    s = " ".join(tokens)
-    # normalizações específicas rápidas
-    s = s.replace("america mg","america mineiro")
-    s = s.replace("avai","avai")
-    s = s.replace("ceara","ceara")
-    s = s.replace("volta redonda","volta redonda")
-    s = s.replace("coritiba","coritiba")
-    s = s.replace("amazonas","amazonas")
-    # espreme espaços
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+def normalize_team(s: str) -> str:
+    return unidecode(str(s or "")).lower().strip()
 
-def apply_alias(name: str, alias_map: Dict[str, str]) -> str:
-    if not name: return ""
-    keyspace = {unidecode(k).lower(): v for k, v in alias_map.items()}
-    k = unidecode(name).lower()
-    return keyspace.get(k, name)
+def load_whitelist(rodada_dir: str, debug: bool=False) -> pd.DataFrame:
+    """
+    Tenta localizar whitelist/matches_source em possíveis locais.
+    Ordem de preferência:
+      1) {rodada}/matches_whitelist.csv
+      2) {rodada}/matches_source.csv
+      3) data/in/matches_whitelist.csv
+      4) data/in/matches_source.csv
+    """
+    candidates = [
+        os.path.join(rodada_dir, "matches_whitelist.csv"),
+        os.path.join(rodada_dir, "matches_source.csv"),
+        "data/in/matches_whitelist.csv",
+        "data/in/matches_source.csv",
+    ]
+    for p in candidates:
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            df = pd.read_csv(p)
+            dbg(debug, f"whitelist encontrada: {p} (linhas={len(df)})")
+            break
+    else:
+        raise FileNotFoundError(f"Whitelist inexistente nas localizações padrão: {candidates}")
 
-def best_pair_score(target_h: str, target_a: str, cand_h: str, cand_a: str) -> float:
-    # score médio considerando também possibilidade de inversão
-    s1 = 0.5 * (fuzz.token_set_ratio(target_h, cand_h) + fuzz.token_set_ratio(target_a, cand_a))
-    s2 = 0.5 * (fuzz.token_set_ratio(target_h, cand_a) + fuzz.token_set_ratio(target_a, cand_h))
-    return max(float(s1), float(s2))
+    # Validar colunas mínimas
+    needed = {"match_id", "home", "away"}
+    missing = needed - set(map(str.lower, df.columns))
+    # Tentar normalizar cabeçalho (case-insensitive)
+    cols = {c.lower(): c for c in df.columns}
+    if missing:
+        # checar se a planilha tem as colunas com case diferente
+        if needed - set(cols.keys()):
+            raise ValueError(f"Whitelist precisa conter colunas {sorted(list(needed))}, encontrado={list(df.columns)}")
+    # Renomear para o padrão
+    ren = {}
+    for k in ["match_id", "home", "away"]:
+        if k in cols:
+            ren[cols[k]] = k
+    if ren:
+        df = df.rename(columns=ren)
 
-def fetch_sport_events(api_key: str, sport_key: str, regions: str) -> List[dict]:
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
+    # Garantir tipos/cortes
+    df["match_id"] = df["match_id"].astype(str)
+    df["home_norm"] = df["home"].map(normalize_team)
+    df["away_norm"] = df["away"].map(normalize_team)
+    return df
+
+def theodds_fetch(api_key: str, regions: str, debug: bool=False) -> List[Dict[str, Any]]:
+    """
+    Busca odds H2H em todos os esportes 'upcoming'. Mantemos a query simples (sem commenceTimeTo)
+    para evitar 422 por formato de data.
+    """
+    base = "https://api.the-odds-api.com/v4/sports/upcoming/odds"
     params = {
         "apiKey": api_key,
         "regions": regions,
-        "markets": ODDS_MARKET,
-        "oddsFormat": ODDS_FORMAT,
-        "dateFormat": DATE_FORMAT
+        "markets": "h2h",
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
     }
-    r = requests.get(url, params=params, timeout=TIMEOUT)
-    if r.status_code == 404:
-        warn(f"{sport_key}: 404 UNKNOWN_SPORT")
-        return []
+    dbg(debug, f"GET {base} params={params}")
+    r = requests.get(base, params=params, timeout=30)
     if r.status_code != 200:
-        warn(f"{sport_key}: HTTP {r.status_code} -> {r.text[:200]}")
-        return []
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
     try:
-        return r.json()
-    except Exception:
-        warn(f"{sport_key}: JSON inválido")
-        return []
+        data = r.json()
+    except Exception as e:
+        raise RuntimeError(f"Falha ao decodificar JSON: {e}")
+    if not isinstance(data, list):
+        raise RuntimeError("Resposta inesperada da TheOddsAPI (não é lista).")
+    dbg(debug, f"Registros retornados: {len(data)}")
+    return data
 
-def build_candidates(evs: List[dict]) -> List[Tuple[str,str,dict]]:
-    cands = []
-    for ev in evs or []:
-        teams = ev.get("teams", [])
-        hteam = ev.get("home_team","")
-        if len(teams) != 2 or not hteam:
-            continue
-        t_norm = [normalize_team(t) for t in teams]
-        h_norm = normalize_team(hteam)
-        # descobrir away norm a partir do vetor
-        if normalize_team(teams[0]) == h_norm:
-            a_norm = normalize_team(teams[1])
-        else:
-            a_norm = normalize_team(teams[0])
-        cands.append((h_norm, a_norm, ev))
-    return cands
+def best_match_team(candidate: str, choices: List[str]) -> Tuple[str, float]:
+    """
+    Encontra o melhor match por fuzzy matching (token_sort_ratio) entre 'candidate' e 'choices'.
+    Retorna (melhor_escolha, score).
+    """
+    if not choices:
+        return ("", 0.0)
+    res = process.extractOne(
+        normalize_team(candidate),
+        [normalize_team(x) for x in choices],
+        scorer=fuzz.token_sort_ratio
+    )
+    if not res:
+        return ("", 0.0)
+    best_norm, score, idx = res
+    return choices[idx], float(score)
+
+def map_odds_to_whitelist(whitelist: pd.DataFrame, odds_raw: List[Dict[str, Any]], debug: bool=False) -> pd.DataFrame:
+    """
+    Casa os eventos da TheOddsAPI com a whitelist pelo par (home, away) via fuzzy.
+    Se não achar mapeamento com score >= 80 para ambos, ignora o evento.
+    """
+    wl_rows: List[Dict[str, Any]] = []
+    wl_home_choices = whitelist["home"].tolist()
+    wl_away_choices = whitelist["away"].tolist()
+
+    total = 0
+    mapeados = 0
+
+    for ev in odds_raw:
+        total += 1
+        try:
+            home = ev.get("home_team") or ""
+            away = ev.get("away_team") or ""
+            if not home or not away:
+                continue
+
+            # fuzzy por time da whitelist
+            best_home, s1 = best_match_team(home, wl_home_choices)
+            best_away, s2 = best_match_team(away, wl_away_choices)
+
+            if s1 < 80 or s2 < 80:
+                dbg(debug, f"descartado por score baixo: '{home}'->{best_home}({s1}), '{away}'->{best_away}({s2})")
+                continue
+
+            # localizar match_id correspondente (home==best_home & away==best_away)
+            match_row = whitelist[(whitelist["home"] == best_home) & (whitelist["away"] == best_away)]
+            if match_row.empty:
+                # tentar na ordem invertida (algumas fontes podem inverter home/away)
+                match_row = whitelist[(whitelist["home"] == best_away) & (whitelist["away"] == best_home)]
+                if match_row.empty:
+                    dbg(debug, f"sem linha correspondente na whitelist: {best_home} vs {best_away}")
+                    continue
+
+            match_id = str(match_row.iloc[0]["match_id"])
+
+            # bookmakers -> markets (h2h)
+            odds_home = odds_draw = odds_away = None
+            bookmaker_name = ""
+            market_name = "h2h"
+
+            for bm in ev.get("bookmakers", []):
+                markets = bm.get("markets", [])
+                for mk in markets:
+                    if mk.get("key") != "h2h":
+                        continue
+                    outcomes = mk.get("outcomes", [])
+                    # outcomes: [{name: Team A, price: 1.80}, {name: Team B, price: 2.0}, {name: Draw, price:3.2}]
+                    # coletar melhor preço por outcome
+                    local_home = local_draw = local_away = None
+                    for oc in outcomes:
+                        name = (oc.get("name") or "").lower().strip()
+                        price = oc.get("price")
+                        if price is None:
+                            continue
+                        if "draw" in name or "empate" in name:
+                            local_draw = max(local_draw, price) if local_draw else price
+                        elif normalize_team(name) == normalize_team(home) or normalize_team(name) == normalize_team(best_home):
+                            local_home = max(local_home, price) if local_home else price
+                        else:
+                            # assume away
+                            local_away = max(local_away, price) if local_away else price
+                    # atualizar com o melhor encontrado entre casas
+                    if local_home and (not odds_home or local_home > odds_home):
+                        odds_home = local_home
+                        bookmaker_name = bm.get("title") or bm.get("key") or bookmaker_name
+                    if local_draw and (not odds_draw or local_draw > odds_draw):
+                        odds_draw = local_draw
+                        bookmaker_name = bm.get("title") or bm.get("key") or bookmaker_name
+                    if local_away and (not odds_away or local_away > odds_away):
+                        odds_away = local_away
+                        bookmaker_name = bm.get("title") or bm.get("key") or bookmaker_name
+
+            if not (odds_home and odds_away):
+                # precisamos ao menos odds_home e odds_away; draw pode faltar em alguns mercados
+                dbg(debug, f"evento sem odds suficientes: {best_home} vs {best_away}")
+                continue
+
+            wl_rows.append({
+                "match_id": match_id,
+                "home": best_home,
+                "away": best_away,
+                "odds_home": float(odds_home),
+                "odds_draw": float(odds_draw) if odds_draw else "",
+                "odds_away": float(odds_away),
+                "bookmaker": bookmaker_name,
+                "market": market_name,
+                "source": SOURCE_NAME
+            })
+            mapeados += 1
+
+        except Exception as e:
+            dbg(debug, f"erro ao processar evento: {e}")
+
+    dbg(debug, f"mapeados={mapeados}/{total}")
+    if not wl_rows:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+    return pd.DataFrame(wl_rows, columns=REQUIRED_COLUMNS)
+
+def save_csv(df: pd.DataFrame, path: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    df.to_csv(path, index=False, quoting=csv.QUOTE_MINIMAL)
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="ex: 2025-09-27_1213")
-    ap.add_argument("--regions", default=DEFAULT_REGIONS)
-    ap.add_argument("--aliases", default="data/aliases_br.json")
-    ap.add_argument("--league_map", default="data/theoddsapi_league_map.json")
-    ap.add_argument("--debug", action="store_true")
+    ap = argparse.ArgumentParser(description="Ingeste odds H2H da TheOddsAPI e casa com whitelist.")
+    ap.add_argument("--rodada", required=True, help="Diretório de trabalho/rodada para saída (e possíveis insumos).")
+    ap.add_argument("--regions", default=os.environ.get("REGIONS", "uk,eu,us,au"), help="Regiões da TheOddsAPI (ex: uk,eu,us,au).")
+    ap.add_argument("--aliases", default="data/in/team_aliases.json", help="Arquivo de aliases de times (opcional).")
+    ap.add_argument("--league_map", default="data/in/league_map.json", help="Mapeamento de ligas (opcional).")
+    ap.add_argument("--debug", action="store_true", help="Logs detalhados.")
     args = ap.parse_args()
 
+    out_dir = args.rodada
     api_key = os.environ.get("THEODDS_API_KEY", "").strip()
+
     if not api_key:
-        err("THEODDS_API_KEY não definido.")
-        sys.exit(2)
+        err("THEODDS_API_KEY não definido no ambiente.")
+        sys.exit(4)
 
-    in_csv = f"data/in/{args.rodada}/matches_source.csv"
-    out_csv = f"data/out/{args.rodada}/odds_theoddsapi.csv"
-    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
-
-    if not os.path.exists(in_csv):
-        err(f"Arquivo de entrada inexistente: {in_csv}")
-        sys.exit(2)
+    try:
+        wl = load_whitelist(out_dir, debug=args.debug)
+    except Exception as e:
+        err(f"Whitelist não encontrada/válida: {e}")
+        sys.exit(4)
 
     aliases = read_json(args.aliases, {"teams": {}})
-    alias_map = aliases.get("teams", {})
-
     league_map = read_json(args.league_map, {})
+    if args.debug:
+        dbg(True, f"aliases carregado? {'sim' if aliases and isinstance(aliases, dict) else 'não (usando default)'}")
+        dbg(True, f"league_map carregado? {'sim' if league_map and isinstance(league_map, dict) else 'não (usando default)'}")
 
-    matches = pd.read_csv(in_csv)
-    required = {"match_id","home","away"}
-    if not required.issubset(set(matches.columns)):
-        err("matches_source.csv precisa de colunas: match_id,home,away[,date,league,sport_key]")
-        sys.exit(2)
+    try:
+        raw = theodds_fetch(api_key, args.regions, debug=args.debug)
+    except Exception as e:
+        err(f"Falha na chamada TheOddsAPI: {e}")
+        sys.exit(4)
 
-    # Aplica aliases e normaliza
-    matches["home_std"] = matches["home"].apply(lambda x: apply_alias(str(x), alias_map))
-    matches["away_std"] = matches["away"].apply(lambda x: apply_alias(str(x), alias_map))
-    matches["_home_norm"] = matches["home_std"].apply(normalize_team)
-    matches["_away_norm"] = matches["away_std"].apply(normalize_team)
+    df = map_odds_to_whitelist(wl, raw, debug=args.debug)
 
-    # Escolhe sport da linha (se houver), senão tenta inferir por league_map
-    def pick_sport(row):
-        sk = str(row.get("sport_key","") or "").strip()
-        if sk: return sk
-        league = unidecode(str(row.get("league",""))).lower().strip()
-        # tenta achar o sport_key por aliases de liga
-        for _, node in league_map.items():
-            skey = node.get("sport_key","")
-            aliases = [unidecode(a).lower() for a in node.get("aliases",[])]
-            if league in aliases or league == skey:
-                return skey
-        return ""
-
-    matches["_sport"] = matches.apply(pick_sport, axis=1)
-
-    # Esport(es) a consultar
-    unique_sports = sorted({s for s in matches["_sport"].tolist() if s})
-    if not unique_sports:
-        # se nada informado, comece pelo pool Brasil
-        unique_sports = list(BRAZIL_SPORT_POOL)
-
-    sport_events_cache: Dict[str,List[dict]] = {}
-    sport_candidates: Dict[str,List[Tuple[str,str,dict]]] = {}
-
-    for sk in unique_sports:
-        evs = fetch_sport_events(api_key, sk, args.regions)
-        if not evs:
-            warn(f"{sk} vazio/indisponível")
-        else:
-            log(f"{sk} -> {len(evs)} eventos")
-        sport_events_cache[sk] = evs
-        sport_candidates[sk] = build_candidates(evs)
-        time.sleep(0.35)
-
-    # Prepara fallback caso algum sport venha vazio
-    if any(len(v)==0 for v in sport_events_cache.values()):
-        for fsk in BRAZIL_SPORT_POOL:
-            if fsk in sport_events_cache: 
-                continue
-            evs = fetch_sport_events(api_key, fsk, args.regions)
-            if not evs:
-                warn(f"[fallback] {fsk} vazio/indisponível")
-            else:
-                log(f"[fallback] {fsk} -> {len(evs)} eventos")
-            sport_events_cache[fsk] = evs
-            sport_candidates[fsk] = build_candidates(evs)
-            time.sleep(0.35)
-
-    MIN_SCORE = 55.0  # ficou mais permissivo
-
-    rows = []
-    for _, row in matches.iterrows():
-        mid = row["match_id"]
-        home = row["home_std"]
-        away = row["away_std"]
-        hn = row["_home_norm"]
-        an = row["_away_norm"]
-
-        # lista de sports a tentar: 1) da linha (se houver), 2) todos os demais do pool
-        sports_to_try = []
-        if row["_sport"]:
-            sports_to_try.append(row["_sport"])
-        for s in BRAZIL_SPORT_POOL:
-            if s not in sports_to_try:
-                sports_to_try.append(s)
-
-        best_ev, best_sc, best_sk = None, 0.0, None
-        for sk in sports_to_try:
-            cands = sport_candidates.get(sk, [])
-            if not cands: 
-                continue
-            for ch, ca, ev in cands:
-                sc = best_pair_score(hn, an, ch, ca)
-                if sc > best_sc:
-                    best_sc, best_ev, best_sk = sc, ev, sk
-            if best_sc >= MIN_SCORE:
-                break
-
-        if best_ev is None:
-            warn(f"{mid}: nenhum evento casado -> '{home}' vs '{away}'")
-            continue
-
-        if best_sc < MIN_SCORE:
-            warn(f"{mid}: matching fraco ({best_sc}) - '{home}' x '{away}' (sport={best_sk})")
-
-        # Extrai odds (melhor preço entre bookmakers)
-        best_home, best_draw, best_away = None, None, None
-        for bk in best_ev.get("bookmakers", []):
-            for mk in bk.get("markets", []):
-                if mk.get("key") != ODDS_MARKET: 
-                    continue
-                for o in mk.get("outcomes", []):
-                    nm = unidecode(o.get("name","")).lower().strip()
-                    price = o.get("price")
-                    if price is None: 
-                        continue
-                    if nm in {"home","home team","hometeam"} or fuzz.partial_ratio(nm, normalize_team(home)) >= 80:
-                        best_home = max(best_home or 0.0, float(price))
-                    elif nm in {"away","away team","awayteam"} or fuzz.partial_ratio(nm, normalize_team(away)) >= 80:
-                        best_away = max(best_away or 0.0, float(price))
-                    elif nm in {"draw","empate","tie","x"}:
-                        best_draw = max(best_draw or 0.0, float(price))
-
-        if not (best_home and best_draw and best_away):
-            warn(f"{mid}: odds H2H incompletas no evento casado (sport={best_sk}).")
-            continue
-
-        rows.append({
-            "match_id": mid,
-            "home": home,
-            "away": away,
-            "sport_key": best_sk,
-            "match_score": round(best_sc, 2),
-            "k1": best_home,
-            "kx": best_draw,
-            "k2": best_away
-        })
-
-    df = pd.DataFrame(rows, columns=["match_id","home","away","sport_key","match_score","k1","kx","k2"])
+    out_csv = os.path.join(out_dir, "odds_theoddsapi.csv")
     if df.empty:
-        warn(f"nenhum par de odds casou com os jogos (arquivo vazio salvo em {out_csv})")
-    df.to_csv(out_csv, index=False, encoding="utf-8")
-    log(f"OK -> {out_csv} ({len(df)} linhas)")
+        err("Nenhum evento mapeado à whitelist (odds vazias).")
+        # ainda salva CSV com cabeçalho para facilitar debug downstream
+        save_csv(pd.DataFrame(columns=REQUIRED_COLUMNS), out_csv)
+        sys.exit(4)
+
+    # Garantir colunas e ordem
+    for c in REQUIRED_COLUMNS:
+        if c not in df.columns:
+            df[c] = "" if c not in ("odds_home", "odds_draw", "odds_away") else None
+    df = df[REQUIRED_COLUMNS]
+
+    save_csv(df, out_csv)
+    log(f"[{SOURCE_NAME}] OK -> {out_csv} ({len(df)} linhas)")
 
 if __name__ == "__main__":
     main()
