@@ -12,13 +12,13 @@ import pandas as pd
 
 REQUIRED_WL = {"match_id", "home", "away"}
 OUT_COLS = [
-    "match_id",         # mantemos para rastreabilidade interna
-    "team_home",        # exigido pelo seu step de validação
-    "team_away",        # exigido pelo seu step de validação
+    "match_id",
+    "team_home",
+    "team_away",
     "odds_home",
     "odds_draw",
     "odds_away",
-    "sources_count"     # auditoria do consenso
+    "sources_count",
 ]
 
 def log(msg: str, flush: bool = True):
@@ -32,9 +32,7 @@ def warn(msg: str):
     print(f"Warning: {msg}", flush=True)
 
 def read_csv_safe(path: str, debug: bool=False) -> pd.DataFrame:
-    """
-    Lê CSV; se não existir ou estiver vazio, retorna DataFrame vazio com 0 linhas.
-    """
+    """Lê CSV; se não existir ou estiver vazio, retorna DF vazio."""
     if not os.path.exists(path):
         dbg(debug, f"{os.path.basename(path)} não existe")
         return pd.DataFrame()
@@ -43,16 +41,15 @@ def read_csv_safe(path: str, debug: bool=False) -> pd.DataFrame:
     except Exception as e:
         warn(f"Falha ao ler {path}: {e}")
         return pd.DataFrame()
-    # Se for NaN-only, normaliza para 0 linhas
     if df.shape[0] == 0:
-        dbg(debug, f"{os.path.basename(path)} lido (somente cabeçalho ou 0 linhas)")
+        dbg(debug, f"{os.path.basename(path)} lido (0 linhas ou apenas cabeçalho)")
     return df
 
 def normalize_cols(df: pd.DataFrame, mapping_opts: List[List[str]]) -> Dict[str, str]:
     """
-    Dado um DF e opções de nomes por campo, cria mapeamento canônico.
+    Cria mapeamento canônico para nomes de colunas com variações.
     mapping_opts = [
-       ["home","team_home"], ["away","team_away"], ["odds_home"], ["odds_draw"], ["odds_away"], ["match_id"]
+        ["home","team_home"], ["away","team_away"], ["odds_home"], ["odds_draw"], ["odds_away"], ["match_id"]
     ]
     """
     cols_lower = {c.lower(): c for c in df.columns}
@@ -84,28 +81,35 @@ def load_whitelist(rodada_dir: str, debug: bool=False) -> pd.DataFrame:
         raise FileNotFoundError("Whitelist não encontrada em locais padrão.")
 
     df = pd.read_csv(path)
-    # normalizar cabeçalhos p/ case-insensitive
     cols = {c.lower(): c for c in df.columns}
     missing = REQUIRED_WL - set(cols.keys())
     if missing:
-        raise ValueError(f"Whitelist sem colunas {sorted(list(REQUIRED_WL))}; encontrado={list(df.columns)}")
+        raise ValueError(
+            f"Whitelist sem colunas {sorted(list(REQUIRED_WL))}; encontrado={list(df.columns)}"
+        )
 
-    ren = {cols["match_id"]: "match_id", cols["home"]: "home", cols["away"]: "away"}
+    ren = {
+        cols["match_id"]: "match_id",
+        cols["home"]: "home",
+        cols["away"]: "away",
+    }
     df = df.rename(columns=ren)
     df["match_id"] = df["match_id"].astype(str)
 
-    log(f"[consensus] whitelist: {path}  linhas={len(df)}  mapping={{{'match_id':'match_id','home':'home','away':'away'}}}")
-    return df[["match_id","home","away"]].copy()
+    # log sem f-string com chaves literais
+    mapping_str = "{'match_id':'match_id','home':'home','away':'away'}"
+    log(f"[consensus] whitelist: {path}  linhas={len(df)}  mapping={mapping_str}")
+    return df[["match_id", "home", "away"]].copy()
 
 def clean_odds_df(df: pd.DataFrame, source_name: str, debug: bool=False) -> pd.DataFrame:
     """
-    Harmoniza colunas para o padrão (match_id, home, away, odds_home, odds_draw, odds_away, source).
-    Ignora DF sem colunas suficientes.
+    Harmoniza colunas para (match_id, home, away, odds_home, odds_draw, odds_away, source).
+    Ignora DF sem colunas mínimas.
     """
+    empty_schema = ["match_id","home","away","odds_home","odds_draw","odds_away","source"]
     if df.empty:
-        return pd.DataFrame(columns=["match_id","home","away","odds_home","odds_draw","odds_away","source"])
+        return pd.DataFrame(columns=empty_schema)
 
-    # mapear colunas possíveis
     colmap = normalize_cols(df, [
         ["match_id"],
         ["home","team_home"],
@@ -115,36 +119,29 @@ def clean_odds_df(df: pd.DataFrame, source_name: str, debug: bool=False) -> pd.D
         ["odds_away","price_away","away_odds"],
     ])
 
-    required_min = {"home","away"}  # match_id pode vir ausente em odds; a gente cruza por nomes com whitelist
+    required_min = {"home","away"}
     faltantes = required_min - set(colmap.keys())
     if faltantes:
-        warn(f"{source_name} colunas faltantes em {source_name}: {sorted(list(faltantes))}; ignorando fonte.")
-        return pd.DataFrame(columns=["match_id","home","away","odds_home","odds_draw","odds_away","source"])
+        warn(f"{source_name} colunas faltantes: {sorted(list(faltantes))}; ignorando fonte.")
+        return pd.DataFrame(columns=empty_schema)
 
-    # renomear para canônicos que tivermos
     df2 = df.rename(columns={v: k for k, v in colmap.items()})
 
-    # assegurar todas as colunas padrão presentes
     for c in ["match_id","home","away","odds_home","odds_draw","odds_away"]:
         if c not in df2.columns:
             df2[c] = pd.NA
 
-    # normalizações
     df2["home"] = df2["home"].astype(str)
     df2["away"] = df2["away"].astype(str)
     df2["match_id"] = df2["match_id"].astype(str).fillna("")
 
-    # manter somente colunas padrão + source
     df2 = df2[["match_id","home","away","odds_home","odds_draw","odds_away"]].copy()
     df2["source"] = source_name
-    # remover linhas totalmente vazias de odds
     df2 = df2.dropna(subset=["odds_home","odds_away"], how="all")
     return df2
 
 def consensus_by_median(df_sources: pd.DataFrame, debug: bool=False) -> pd.DataFrame:
-    """
-    Calcula mediana por (match_id,home,away) nas colunas de odds.
-    """
+    """Calcula mediana das odds por (match_id,home,away)."""
     if df_sources.empty:
         return pd.DataFrame(columns=OUT_COLS)
 
@@ -156,9 +153,7 @@ def consensus_by_median(df_sources: pd.DataFrame, debug: bool=False) -> pd.DataF
         sources_count=("source","nunique"),
     ).reset_index()
 
-    # renomear home/away para team_home/team_away (como seu step espera)
     agg = agg.rename(columns={"home":"team_home","away":"team_away"})
-    # ordenar colunas
     agg = agg[OUT_COLS]
     return agg
 
@@ -193,7 +188,7 @@ def main():
     df_theodds = clean_odds_df(df_theodds_raw, "theoddsapi", debug=args.debug)
     df_apifoot = clean_odds_df(df_apifoot_raw, "apifootball", debug=args.debug)
 
-    # filtrar pelas partidas da whitelist — por (home, away) e/ou por match_id se houver
+    # filtrar pelas partidas da whitelist
     wl_key = wl[["match_id","home","away"]].copy()
     wl_key["home_l"] = wl_key["home"].str.lower()
     wl_key["away_l"] = wl_key["away"].str.lower()
@@ -204,14 +199,12 @@ def main():
         tmp = df.copy()
         tmp["home_l"] = tmp["home"].str.lower()
         tmp["away_l"] = tmp["away"].str.lower()
-        # join por nomes; se match_id vier preenchido na fonte, também podemos aproveitar merge por match_id
         merged = tmp.merge(
             wl_key[["match_id","home_l","away_l"]],
             on=["home_l","away_l"],
             how="inner",
             suffixes=("","_wl")
         )
-        # se a fonte trouxe match_id (às vezes vazio), prioriza o da whitelist
         merged["match_id"] = merged["match_id_wl"]
         merged = merged.drop(columns=["home_l","away_l","match_id_wl"])
         return merged
@@ -220,23 +213,29 @@ def main():
     df_apifoot_f = filter_by_wl(df_apifoot)
 
     if args.debug:
-        dbg(True, f"theodds -> linhas válidas após WL: {len(df_theodds_f)}")
-        dbg(True, f"apifoot  -> linhas válidas após WL: {len(df_apifoot_f)}")
+        dbg(True, f"theodds -> válidas após WL: {len(df_theodds_f)}")
+        dbg(True, f"apifoot  -> válidas após WL: {len(df_apifoot_f)}")
 
-    fontes_count = (0 if df_theodds_f.empty else 1) + (0 if df_apifoot_f.empty else 1)
     log(f"[consensus] fontes: theodds={'0' if df_theodds_f.empty else len(df_theodds_f)}  apifoot={'0' if df_apifoot_f.empty else len(df_apifoot_f)}")
 
     df_all = pd.concat([df_theodds_f, df_apifoot_f], ignore_index=True)
     if df_all.empty:
         print("##[error]Nenhuma odd válida encontrada para gerar consenso.")
-        # mensagem diagnóstica mais clara sobre colunas faltantes
-        def missing_for(df_raw: pd.DataFrame, name: str) -> List[str]:
+        # diagnósticos adicionais
+        def missing_for(df_raw: pd.DataFrame) -> List[str]:
             required = ["home","away","odds_home","odds_away"]
             lower = [c.lower() for c in df_raw.columns]
-            miss = [c for c in required if c not in lower and ("team_"+c if c in ["home","away"] else c) not in lower]
+            miss = []
+            for c in required:
+                if c in ["home","away"]:
+                    if (c not in lower) and (f"team_{c}" not in lower):
+                        miss.append(c)
+                else:
+                    if c not in lower:
+                        miss.append(c)
             return miss
-        miss_theodds = missing_for(df_theodds_raw, "theoddsapi")
-        miss_apifoot = missing_for(df_apifoot_raw, "apifootball")
+        miss_theodds = missing_for(df_theodds_raw)
+        miss_apifoot = missing_for(df_apifoot_raw)
         if miss_theodds:
             warn(f"theoddsapi colunas faltantes em {theodds_path}; ignorando. Faltantes: {miss_theodds}")
         if miss_apifoot:
@@ -245,13 +244,12 @@ def main():
 
     df_cons = consensus_by_median(df_all, debug=args.debug)
 
-    # STRICT: exigir cobertura para todos os jogos da WL
+    # STRICT: exigir cobertura total
     if args.strict:
         wl_ids = set(wl["match_id"].astype(str))
         covered_ids = set(df_cons["match_id"].astype(str))
         missing_ids = sorted(wl_ids - covered_ids)
         if missing_ids:
-            # montar relatório dos jogos faltantes
             miss_rows = wl[wl["match_id"].astype(str).isin(missing_ids)].copy()
             miss_rows = miss_rows.rename(columns={"home":"team_home","away":"team_away"})
             miss_preview = miss_rows[["match_id","team_home","team_away"]].to_string(index=False)
@@ -259,12 +257,10 @@ def main():
             print(miss_preview)
             sys.exit(6)
 
-    # salvar
     os.makedirs(rodada_dir, exist_ok=True)
     df_cons = df_cons[OUT_COLS]
     df_cons.to_csv(out_path, index=False, quoting=csv.QUOTE_MINIMAL)
 
-    # preview
     head_n = min(20, len(df_cons))
     log(f"[consensus] OK -> {out_path} (linhas={len(df_cons)})")
     if head_n > 0:
