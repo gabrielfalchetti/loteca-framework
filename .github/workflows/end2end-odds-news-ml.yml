@@ -64,7 +64,7 @@ jobs:
           RUN_ID=$(date +%s)
           echo "RUN_ID=$RUN_ID" >> "$GITHUB_OUTPUT"
           echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
-          mkdir -p "data/in" "$OUT_DIR"
+          mkdir -p "data/in" "${OUT_DIR}"
           # aliases.json padrão (vazio) caso não exista
           if [ ! -s "data/in/aliases.json" ]; then
             echo '{"teams": {}}' > data/in/aliases.json
@@ -207,20 +207,20 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-import pandas as pd, os, sys
-out_dir = os.environ["OUT_DIR"]
-cal = os.path.join(out_dir, "calibrated_probs.csv")
-if not os.path.exists(cal) or os.path.getsize(cal) == 0:
-    print("::error::calibrated_probs.csv ausente/vazio"); sys.exit(1)
-df = pd.read_csv(cal)
-need = ["match_id","team_home","team_away","prob_home","prob_draw","prob_away"]
-missing = [c for c in need if c not in df.columns]
-if missing:
-    print(f"::error::Colunas faltando em calibrated_probs.csv: {missing}")
-    sys.exit(1)
-fxg = df[need].copy()
-fxg.to_csv(os.path.join(out_dir,"features_xg.csv"), index=False)
-print(fxg.head().to_string(index=False))
+            import pandas as pd, os, sys
+            out_dir = os.environ["OUT_DIR"]
+            cal = os.path.join(out_dir, "calibrated_probs.csv")
+            if not os.path.exists(cal) or os.path.getsize(cal) == 0:
+                print("::error::calibrated_probs.csv ausente/vazio"); sys.exit(1)
+            df = pd.read_csv(cal)
+            need = ["match_id","team_home","team_away","prob_home","prob_draw","prob_away"]
+            missing = [c for c in need if c not in df.columns]
+            if missing:
+                print(f"::error::Colunas faltando em calibrated_probs.csv: {missing}")
+                sys.exit(1)
+            fxg = df[need].copy()
+            fxg.to_csv(os.path.join(out_dir,"features_xg.csv"), index=False)
+            print(fxg.head().to_string(index=False))
 PY
           test -s "${OUT_DIR}/features_xg.csv" || { echo "::error::features_xg.csv não gerado"; exit 28; }
 
@@ -276,7 +276,7 @@ PY
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
-      # ===================== W&B (best-effort via shell, sem if: em YAML) =====================
+      # ===================== W&B (best-effort via shell) =====================
       - name: Weights and Biases - Upload artifacts (best-effort)
         shell: bash
         env:
@@ -288,19 +288,19 @@ PY
             exit 0
           fi
           python - <<'PY'
-import os, glob, wandb
-run = wandb.init(
-    project="loteca-framework",
-    job_type="e2e_strict",
-    config={"run_id": os.environ.get("RUN_ID"),
-            "out_dir": os.environ.get("OUT_DIR")}
-)
-art = wandb.Artifact("rodada_artifacts", type="dataset")
-out_dir = os.environ["OUT_DIR"]
-for path in glob.glob(os.path.join(out_dir, "*.csv")):
-    art.add_file(path, name=os.path.basename(path))
-run.log_artifact(art)
-run.finish()
+            import os, glob, wandb
+            run = wandb.init(
+                project="loteca-framework",
+                job_type="e2e_strict",
+                config={"run_id": os.environ.get("RUN_ID"),
+                        "out_dir": os.environ.get("OUT_DIR")}
+            )
+            art = wandb.Artifact("rodada_artifacts", type="dataset")
+            out_dir = os.environ["OUT_DIR"]
+            for path in glob.glob(os.path.join(out_dir, "*.csv")):
+                art.add_file(path, name=os.path.basename(path))
+            run.log_artifact(art)
+            run.finish()
 PY
 
       - name: Artefatos
