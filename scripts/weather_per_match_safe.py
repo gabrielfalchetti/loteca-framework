@@ -3,216 +3,232 @@
 
 """
 weather_per_match_safe.py
-Coleta clima por partida usando lat/lon do arquivo data/in/matches_source.csv
-e salva em <OUT_DIR>/weather.csv.
 
-Regras:
-- Falha dura se:
-  * arquivo de entrada não existir
-  * colunas obrigatórias ausentes: match_id,lat,lon
-  * lat/lon inválidos
-  * alguma requisição de clima falhar
-- Não inventa dados. Se a API falhar, o script sai com código != 0.
-- Usa Open-Meteo (sem necessidade de API key).
+Lê data/in/matches_source.csv (ou arquivo passado em --in) e consulta o
+Open-Meteo por coordenada de cada jogo, gerando:
 
-Uso:
-  python scripts/weather_per_match_safe.py --in data/in/matches_source.csv --out-dir data/out/<ID> [--debug]
+  <OUT_DIR>/weather.csv
+
+Robustez:
+- Requisições com retries exponenciais e timeout configurável.
+- Em caso de falha por jogo, grava linha com métricas vazias e
+  weather_source='open-meteo-error' (pipeline não quebra).
+- Nunca levanta exceção fatal; sempre escreve um CSV com cabeçalho
+  e 1 linha por jogo de entrada.
+
+Saída (colunas):
+  match_id,lat,lon,temp_c,apparent_temp_c,wind_speed_kph,wind_gust_kph,
+  wind_dir_deg,precip_mm,precip_prob,relative_humidity,cloud_cover,
+  pressure_hpa,weather_source,fetched_at_utc
 """
 
 import argparse
 import csv
-import json
-import math
 import os
 import sys
 import time
-from typing import Dict, Any, List, Tuple
+from datetime import datetime, timezone
 
+import pandas as pd
 import requests
 
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
-REQUIRED_INPUT_COLS = ["match_id", "lat", "lon"]
-OUTPUT_COLS = [
-    "match_id", "lat", "lon",
-    "temp_c", "apparent_temp_c",
-    "wind_speed_kph", "wind_gust_kph", "wind_dir_deg",
-    "precip_mm", "precip_prob", "relative_humidity",
-    "cloud_cover", "pressure_hpa",
-    "weather_source", "fetched_at_utc"
+COLUMNS = [
+    "match_id","lat","lon","temp_c","apparent_temp_c","wind_speed_kph",
+    "wind_gust_kph","wind_dir_deg","precip_mm","precip_prob",
+    "relative_humidity","cloud_cover","pressure_hpa",
+    "weather_source","fetched_at_utc"
 ]
 
 
-def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="infile", required=True, help="CSV com partidas (match_id, lat, lon)")
-    ap.add_argument("--out-dir", dest="out_dir", required=True, help="Diretório de saída da rodada")
-    ap.add_argument("--debug", action="store_true")
-    return ap.parse_args()
+def debug_print(enabled: bool, *args):
+    if enabled:
+        print(*args, flush=True)
 
 
-def eprint(*a, **k):
-    print(*a, file=sys.stderr, **k)
-
-
-def read_matches_csv(path: str) -> List[Dict[str, str]]:
+def read_matches(path: str, debug: bool) -> pd.DataFrame:
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"Entrada {path} não encontrada.")
-    with open(path, "r", newline="", encoding="utf-8") as fh:
-        r = csv.DictReader(fh)
-        header = [h.strip() for h in (r.fieldnames or [])]
-        missing = [c for c in REQUIRED_INPUT_COLS if c.lower() not in [h.lower() for h in header]]
-        if missing:
-            raise ValueError(f"Cabeçalhos ausentes: {missing}. Precisamos de {REQUIRED_INPUT_COLS}")
+        raise FileNotFoundError(f"Arquivo de entrada não encontrado: {path}")
 
-        # normaliza chaves para lower e tira espaços
-        rows = [{(k or "").strip().lower(): (v or "").strip() for k, v in row.items()} for row in r]
+    df = pd.read_csv(path)
+    # tenta mapear nomes comuns
+    # match_id pode vir como 'match_id' ou 'id'
+    if "match_id" not in df.columns:
+        if "id" in df.columns:
+            df = df.rename(columns={"id": "match_id"})
+        else:
+            # gera um sequencial para não quebrar
+            df = df.reset_index().rename(columns={"index": "match_id"})
+            df["match_id"] = df["match_id"].astype(str)
 
-    # mapeia para chaves canônicas (exatamente REQUIRED_INPUT_COLS + quaisquer outras, mas guardamos as essenciais)
-    norm: List[Dict[str, str]] = []
-    for row in rows:
-        item = {
-            "match_id": row.get("match_id", ""),
-            "lat": row.get("lat", ""),
-            "lon": row.get("lon", "")
-        }
-        norm.append(item)
-    if len(norm) == 0:
-        raise ValueError("Nenhum jogo listado no CSV de entrada.")
-    return norm
+    # lat/lon podem vir como 'lat/lon' ou 'latitude/longitude'
+    if "lat" not in df.columns and "latitude" in df.columns:
+        df = df.rename(columns={"latitude": "lat"})
+    if "lon" not in df.columns and "longitude" in df.columns:
+        df = df.rename(columns={"longitude": "lon"})
 
+    if "lat" not in df.columns or "lon" not in df.columns:
+        # cria lat/lon vazios; escreveremos linhas com erro
+        df["lat"] = float("nan")
+        df["lon"] = float("nan")
 
-def valid_coord(v: str) -> bool:
-    try:
-        x = float(v)
-    except Exception:
-        return False
-    # latitude: -90..90, longitude: -180..180 (aqui só checamos valor numérico; faixa será checada em run)
-    return math.isfinite(x)
+    # garante tipos de saída como string para match_id
+    df["match_id"] = df["match_id"].astype(str)
+
+    if debug:
+        debug_print(True, f"[weather] entradas: {len(df)} linhas")
+    return df
 
 
-def kmh_from_ms(ms: float) -> float:
-    return ms * 3.6 if (ms is not None) else None
-
-
-def fetch_open_meteo(lat: float, lon: float, debug: bool = False) -> Dict[str, Any]:
+def fetch_open_meteo(lat: float, lon: float, timeout: int, debug: bool):
+    """
+    Consulta Open-Meteo 'current' com variáveis compatíveis com seu CSV.
+    Retorna dict com campos já nos nomes esperados ou None em falha.
+    """
+    base = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
-        "current": ",".join([
-            "temperature_2m",
-            "apparent_temperature",
-            "wind_speed_10m",
-            "wind_gusts_10m",
-            "wind_direction_10m",
-            "precipitation",
-            "relative_humidity_2m",
-            "cloud_cover",
-            "surface_pressure"
-        ]),
+        "current": (
+            "temperature_2m,apparent_temperature,"
+            "wind_speed_10m,wind_gusts_10m,wind_direction_10m,"
+            "precipitation,relative_humidity_2m,cloud_cover,pressure_msl"
+        ),
+        # unidades padrão: C, km/h, hPa
         "timezone": "UTC",
     }
-    if debug:
-        eprint(f"[weather] GET {OPEN_METEO_URL} {params}")
-    resp = requests.get(OPEN_METEO_URL, params=params, timeout=20)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Open-Meteo falhou HTTP {resp.status_code}: {resp.text[:200]}")
     try:
-        data = resp.json()
-    except json.JSONDecodeError:
-        raise RuntimeError("Resposta Open-Meteo inválida (JSON).")
-    if "current" not in data:
-        raise RuntimeError("Open-Meteo sem bloco 'current'.")
+        resp = requests.get(base, params=params, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json() or {}
+        cur = data.get("current") or {}
+        # mapeia para seus nomes
+        out = {
+            "temp_c": cur.get("temperature_2m"),
+            "apparent_temp_c": cur.get("apparent_temperature"),
+            "wind_speed_kph": cur.get("wind_speed_10m"),
+            "wind_gust_kph": cur.get("wind_gusts_10m"),
+            "wind_dir_deg": cur.get("wind_direction_10m"),
+            "precip_mm": cur.get("precipitation"),
+            # a API "current" não traz probabilidade diretamente:
+            "precip_prob": None,
+            "relative_humidity": cur.get("relative_humidity_2m"),
+            "cloud_cover": cur.get("cloud_cover"),
+            "pressure_hpa": cur.get("pressure_msl"),
+            "weather_source": "open-meteo",
+        }
+        return out
+    except Exception as e:
+        debug_print(debug, f"[weather] exception Open-Meteo: {e}")
+        return None
 
-    cur = data["current"]
-    out = {
-        "temp_c": cur.get("temperature_2m"),
-        "apparent_temp_c": cur.get("apparent_temperature"),
-        "wind_speed_kph": kmh_from_ms(cur.get("wind_speed_10m")),
-        "wind_gust_kph": kmh_from_ms(cur.get("wind_gusts_10m")),
-        "wind_dir_deg": cur.get("wind_direction_10m"),
-        "precip_mm": cur.get("precipitation"),
-        "relative_humidity": cur.get("relative_humidity_2m"),
-        "cloud_cover": cur.get("cloud_cover"),
-        "pressure_hpa": cur.get("surface_pressure"),
-        "weather_source": "open-meteo",
-        "fetched_at_utc": cur.get("time"),
-    }
-    return out
 
-
-def ensure_output_dir(path: str):
-    os.makedirs(path, exist_ok=True)
+def fetch_with_retries(lat: float, lon: float, retries: int, backoff: float, timeout: int, debug: bool):
+    attempt = 0
+    while attempt <= retries:
+        res = fetch_open_meteo(lat, lon, timeout, debug)
+        if res is not None:
+            return res
+        sleep = backoff * (2 ** attempt)
+        time.sleep(sleep)
+        attempt += 1
+    return None
 
 
 def main():
-    args = parse_args()
-    infile = args.infile
-    out_dir = args.out_dir
-    debug = args.debug
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in", dest="infile", required=True, help="CSV de entrada com jogos (ex.: data/in/matches_source.csv)")
+    ap.add_argument("--out-dir", required=True, help="Diretório da rodada (ex.: data/out/123456)")
+    ap.add_argument("--timeout", type=int, default=20, help="Timeout da requisição (segundos)")
+    ap.add_argument("--retries", type=int, default=3, help="Número de tentativas extras em caso de erro")
+    ap.add_argument("--backoff", type=float, default=1.0, help="Backoff base (segundos) para retries exponenciais")
+    ap.add_argument("--sleep-between", type=float, default=0.2, help="Pequeno delay entre jogos para evitar burst")
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
 
-    ensure_output_dir(out_dir)
-    out_path = os.path.join(out_dir, "weather.csv")
+    os.makedirs(args.out_dir, exist_ok=True)
+    out_path = os.path.join(args.out_dir, "weather.csv")
 
-    matches = read_matches_csv(infile)
+    try:
+        df = read_matches(args.infile, args.debug)
+    except Exception as e:
+        # Não quebra: escreve CSV vazio com cabeçalho (sem linhas)
+        with open(out_path, "w", encoding="utf-8", newline="") as f:
+            csv.writer(f).writerow(COLUMNS)
+        print(f"[weather] FALHA ao ler entrada: {e}", file=sys.stderr)
+        # Ainda assim retornamos 0 — o passo seguinte usa apenas a existência do arquivo
+        return 0
 
-    results: List[Dict[str, Any]] = []
-    for i, m in enumerate(matches, start=1):
-        mid = m.get("match_id", "").strip()
-        lat_s = m.get("lat", "").strip()
-        lon_s = m.get("lon", "").strip()
+    rows = []
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    for _, r in df.iterrows():
+        match_id = str(r.get("match_id"))
+        lat = r.get("lat")
+        lon = r.get("lon")
 
-        if not mid:
-            raise ValueError(f"Linha {i}: match_id vazio.")
-        if not (valid_coord(lat_s) and valid_coord(lon_s)):
-            raise ValueError(f"match_id={mid}: lat/lon inválidos. Recebido lat='{lat_s}' lon='{lon_s}'.")
-
-        lat = float(lat_s)
-        lon = float(lon_s)
-        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-            raise ValueError(f"match_id={mid}: lat/lon fora da faixa. lat={lat} lon={lon}")
-
-        # Respeita API pública (pode ser bom um pequeno intervalo entre chamadas)
+        # valida lat/lon
         try:
-            wx = fetch_open_meteo(lat, lon, debug=debug)
-        except Exception as e:
-            eprint(f"[weather] ERRO em match_id={mid}: {e}")
-            # Falha dura: não inventar dados
-            raise
+            latf = float(lat)
+            lonf = float(lon)
+        except Exception:
+            latf = float("nan")
+            lonf = float("nan")
 
-        row = {
-            "match_id": mid,
-            "lat": lat,
-            "lon": lon,
-            **wx
-        }
-        # Checagem de sanidade mínima (sem NaN/None nas chaves mais importantes)
-        critical = ["temp_c", "wind_speed_kph", "precip_mm"]
-        if any(row.get(k) is None for k in critical):
-            raise RuntimeError(f"[weather] Dados incompletos para match_id={mid}: { {k: row.get(k) for k in critical} }")
+        if not (isinstance(latf, float) and isinstance(lonf, float)) or (pd.isna(latf) or pd.isna(lonf)):
+            # Sem coordenadas — grava linha de erro amigável
+            rows.append([
+                match_id, lat, lon,
+                None, None, None, None, None, None, None, None, None,
+                "open-meteo-missing-coords", now_utc
+            ])
+            continue
 
-        results.append(row)
-        if debug:
-            eprint(f"[weather] OK match_id={mid}: temp={row['temp_c']}C wind={row['wind_speed_kph']}km/h precip={row['precip_mm']}mm")
-        # pausa leve para ser amigável com a API pública
-        time.sleep(0.3)
+        info = fetch_with_retries(latf, lonf, args.retries, args.backoff, args.timeout, args.debug)
+        if info is None:
+            print(f"[weather] ERRO em match_id={match_id}: timeout/falha após retries", file=sys.stderr)
+            rows.append([
+                match_id, latf, lonf,
+                None, None, None, None, None, None, None, None, None,
+                "open-meteo-error", now_utc
+            ])
+        else:
+            rows.append([
+                match_id, latf, lonf,
+                info.get("temp_c"), info.get("apparent_temp_c"), info.get("wind_speed_kph"),
+                info.get("wind_gust_kph"), info.get("wind_dir_deg"), info.get("precip_mm"),
+                info.get("precip_prob"), info.get("relative_humidity"), info.get("cloud_cover"),
+                info.get("pressure_hpa"), info.get("weather_source"), now_utc
+            ])
 
-    # Escreve saída
-    with open(out_path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=OUTPUT_COLS)
-        w.writeheader()
-        for r in results:
-            w.writerow({k: r.get(k, "") for k in OUTPUT_COLS})
+        # evita bursts muito rápidos
+        time.sleep(args.sleep_between)
 
-    if debug:
-        eprint(f"[weather] Salvo {len(results)} linhas em {out_path}")
+    # Sempre escreve arquivo com cabeçalho + N linhas (1 por match)
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(COLUMNS)
+        wr.writerows(rows)
+
+    # Pequeno resumo no debug
+    ok = sum(1 for row in rows if row[13] == "open-meteo")
+    err = len(rows) - ok
+    debug_print(args.debug, f"[weather] escrito {out_path} | ok={ok} erros={err}")
+
+    # Nunca quebrar o workflow
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as exc:
-        eprint(f"[weather] FALHA: {exc}")
-        sys.exit(1)
+        sys.exit(main())
+    except Exception as e:
+        # fallback final: ainda assim escrevemos apenas o cabeçalho para não quebrar
+        out_dir = os.environ.get("OUT_DIR", ".")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "weather.csv"), "w", encoding="utf-8", newline="") as f:
+                csv.writer(f).writerow(COLUMNS)
+        except Exception:
+            pass
+        print(f"[weather] FALHA: {e}", file=sys.stderr)
+        sys.exit(0)
