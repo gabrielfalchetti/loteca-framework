@@ -2,130 +2,117 @@
 # -*- coding: utf-8 -*-
 
 """
-predict_from_odds.py (STRICT)
+Deriva probabilidades "de mercado" a partir de odds_consensus.csv (sem inventar dados).
+Saída: predictions_market.csv com:
+  match_key,home,away,odd_home,odd_draw,odd_away,p_home,p_draw,p_away,pick_1x2,conf_margin
 
-Lê <OUT_DIR>/odds_consensus.csv e gera <OUT_DIR>/predictions_market.csv
-a partir das odds, derivando probabilidades FAIR:
-  imp = 1/odds ; fair_p = imp / sum(imp)
-
-Regras estritas:
-- Se odds_consensus.csv estiver ausente, vazio ou sem colunas esperadas,
-  o script encerra com exit code 7 (erro).
-- Proíbe odds <= 1.0.
-- Normaliza chaves e nomes de times.
+Erros “amigáveis”:
+- Falha se odds_consensus.csv estiver vazio/ausente
+- Falha se faltar colunas-chave
 """
 
-import os
+from __future__ import annotations
 import sys
-import argparse
-import pandas as pd
+import os
 import math
+import pandas as pd
 
+EXIT_CODE = 7
 
-REQ_COLS = ["team_home", "team_away", "odds_home", "odds_draw", "odds_away"]
+def log(msg: str):
+    print(f"[predict] {msg}")
 
+def err(msg: str):
+    print(f"::error::{msg}", file=sys.stderr)
 
-def die(msg: str, code: int = 7):
-    print(f"##[error]{msg}", file=sys.stderr, flush=True)
-    sys.exit(code)
+def normalize_match_key(h: str, a: str) -> str:
+    return f"{str(h).strip().lower().replace(' ','-')}__vs__{str(a).strip().lower().replace(' ','-')}"
 
-
-def read_csv_strict(path: str) -> pd.DataFrame:
-    if not os.path.isfile(path) or os.path.getsize(path) == 0:
-        die(f"odds_consensus.csv ausente ou vazio em {path}.")
-    try:
-        df = pd.read_csv(path)
-    except Exception as e:
-        die(f"Falha lendo {path}: {e}")
-    if df.empty:
-        die(f"odds_consensus.csv está vazio em {path}.")
-    return df
-
-
-def std_teams(df: pd.DataFrame) -> pd.DataFrame:
-    # aceita 'home'/'away' e renomeia para 'team_home'/'team_away'
-    if "team_home" not in df.columns and "home" in df.columns:
-        df = df.rename(columns={"home": "team_home"})
-    if "team_away" not in df.columns and "away" in df.columns:
-        df = df.rename(columns={"away": "team_away"})
-    return df
-
-
-def ensure_match_id(df: pd.DataFrame) -> pd.DataFrame:
-    if "match_id" not in df.columns:
-        if "team_home" in df.columns and "team_away" in df.columns:
-            df["match_id"] = df["team_home"].astype(str) + "__" + df["team_away"].astype(str)
-        elif "match_key" in df.columns:
-            df["match_id"] = df["match_key"].astype(str)
-        else:
-            die("Não foi possível derivar 'match_id' (faltam colunas team_home/team_away).")
-    df["match_id"] = df["match_id"].astype(str)
-    return df
-
-
-def fair_probs_from_odds(df: pd.DataFrame) -> pd.DataFrame:
-    for c in ["odds_home", "odds_draw", "odds_away"]:
-        if c not in df.columns:
-            die(f"Coluna obrigatória ausente: {c}")
-        if (df[c] <= 1.0).any():
-            bad = df.loc[df[c] <= 1.0, ["team_home","team_away",c]].head(5)
-            die(f"Odds inválidas (<=1.0) na coluna {c}. Amostra:\n{bad.to_string(index=False)}")
-    imp_h = 1.0 / df["odds_home"]
-    imp_d = 1.0 / df["odds_draw"]
-    imp_a = 1.0 / df["odds_away"]
-    over = imp_h + imp_d + imp_a
-    if (over <= 0).any():
-        die("Soma de probabilidades implícitas <= 0 (overround inválido).")
-    df["p_home"] = imp_h / over
-    df["p_draw"] = imp_d / over
-    df["p_away"] = imp_a / over
-    return df
-
+def implied_probs(odd_home, odd_draw, odd_away):
+    # Probabilidades implícitas (com overround)
+    imp_h = 1.0/odd_home
+    imp_d = 1.0/odd_draw
+    imp_a = 1.0/odd_away
+    s = imp_h + imp_d + imp_a
+    return imp_h/s, imp_d/s, imp_a/s
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Diretório da rodada (ex.: data/out/12345)")
-    ap.add_argument("--debug", action="store_true")
-    args = ap.parse_args()
+    if len(sys.argv) < 3 or sys.argv[1] != "--rodada":
+        print("Uso: python scripts/predict_from_odds.py --rodada <OUT_DIR> [--debug]")
+        sys.exit(EXIT_CODE)
 
-    out_dir = args.rodada
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = sys.argv[2]
+    debug = "--debug" in sys.argv
+
+    log(f"OUT_DIR = {out_dir}")
+
     odds_path = os.path.join(out_dir, "odds_consensus.csv")
-    out_path = os.path.join(out_dir, "predictions_market.csv")
+    if not os.path.isfile(odds_path):
+        err(f"odds_consensus.csv ausente em {odds_path}.")
+        sys.exit(EXIT_CODE)
 
-    df = read_csv_strict(odds_path)
-    df = std_teams(df)
+    df = pd.read_csv(odds_path)
+    if df.empty:
+        err(f"odds_consensus.csv está vazio em {odds_path}.")
+        sys.exit(EXIT_CODE)
 
-    # padroniza nomes de colunas possivelmente diferentes
-    if "odd_home" in df.columns and "odds_home" not in df.columns:
-        df = df.rename(columns={"odd_home": "odds_home"})
-    if "odd_draw" in df.columns and "odds_draw" not in df.columns:
-        df = df.rename(columns={"odd_draw": "odds_draw"})
-    if "odd_away" in df.columns and "odds_away" not in df.columns:
-        df = df.rename(columns={"odd_away": "odds_away"})
+    needed = {"match_id","team_home","team_away","odds_home","odds_draw","odds_away"}
+    if not needed.issubset(df.columns):
+        err(f"Colunas ausentes em odds_consensus.csv. Esperado: {sorted(needed)}")
+        sys.exit(EXIT_CODE)
 
-    missing = [c for c in REQ_COLS if c not in df.columns]
-    if missing:
-        die(f"Colunas obrigatórias ausentes em odds_consensus.csv: {missing}")
+    # remover linhas com odds faltantes/zeradas
+    df = df.dropna(subset=["odds_home","odds_draw","odds_away"])
+    df = df[(df["odds_home"]>0) & (df["odds_draw"]>0) & (df["odds_away"]>0)]
+    if df.empty:
+        err("Nenhuma linha válida em odds_consensus.csv após limpeza de odds.")
+        sys.exit(EXIT_CODE)
 
-    df = ensure_match_id(df)
-    df = fair_probs_from_odds(df)
+    rows = []
+    for _, r in df.iterrows():
+        h, d, a = float(r["odds_home"]), float(r["odds_draw"]), float(r["odds_away"])
+        p_h, p_d, p_a = implied_probs(h, d, a)
+        # pick pelo maior p
+        if p_h >= p_d and p_h >= p_a:
+            pick = "1"
+            margin = p_h - max(p_d, p_a)
+        elif p_d >= p_h and p_d >= p_a:
+            pick = "X"
+            margin = p_d - max(p_h, p_a)
+        else:
+            pick = "2"
+            margin = p_a - max(p_h, p_d)
 
-    # saída estrita e limpa
-    out = df[["match_id","team_home","team_away",
-              "odds_home","odds_draw","odds_away",
-              "p_home","p_draw","p_away"]].copy()
-    out.to_csv(out_path, index=False)
+        rows.append({
+            "match_key": str(r["match_id"]),
+            "home": r["team_home"],
+            "away": r["team_away"],
+            "odd_home": h,
+            "odd_draw": d,
+            "odd_away": a,
+            "p_home": p_h,
+            "p_draw": p_d,
+            "p_away": p_a,
+            "pick_1x2": pick,
+            "conf_margin": margin
+        })
 
-    if args.debug:
-        print(f"[predict] OUT_DIR = {out_dir}")
-        print(f"[predict] usando odds_consensus.csv ({odds_path})")
-        print(out.head(10).to_csv(index=False))
+    out = os.path.join(out_dir, "predictions_market.csv")
+    pd.DataFrame(rows).to_csv(out, index=False)
+    log(f"usando odds_consensus.csv ({odds_path})")
+    try:
+        prev = pd.DataFrame(rows)
+        prev["p_home"] = prev["p_home"].round(6)
+        prev["p_draw"] = prev["p_draw"].round(6)
+        prev["p_away"] = prev["p_away"].round(6)
+        print(prev[["match_key","home","away","odd_home","odd_draw","odd_away","p_home","p_draw","p_away","pick_1x2","conf_margin"]].head().to_string(index=False))
+    except Exception:
+        pass
+
+    # pronto
+    if not os.path.isfile(out) or os.path.getsize(out) == 0:
+        err("predictions_market.csv não gerado.")
+        sys.exit(EXIT_CODE)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as e:
-        die(f"Erro inesperado: {e}")
+    main()
