@@ -1,85 +1,129 @@
-name: End2End Odds+News ML • STRICT • 100% real data
+name: end2end-odds-news-ml
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    inputs:
+      season:
+        description: "Temporada base (ex.: 2025)"
+        required: true
+        default: "2025"
+      regions:
+        description: "Regiões de odds (theoddsapi) — csv"
+        required: true
+        default: "uk,eu,us,au"
+      lookahead_days:
+        description: "Janela (dias) para buscar jogos futuros"
+        required: true
+        default: "3"
+      bankroll:
+        description: "Bankroll inicial para Kelly"
+        required: true
+        default: "1000"
+      kelly_fraction:
+        description: "Fração de Kelly"
+        required: true
+        default: "0.5"
+      kelly_cap:
+        description: "Aposta máxima (fração do bankroll)"
+        required: true
+        default: "0.1"
+      kelly_top_n:
+        description: "Top N apostas"
+        required: true
+        default: "14"
+      round_to:
+        description: "Arredondamento (unidade monetária)"
+        required: true
+        default: "1"
+      debug:
+        description: "Logs detalhados"
+        required: true
+        default: "true"
 
 permissions:
   contents: read
 
-env:
-  SEASON: "2025"
-  REGIONS: "uk,eu,us,au"
-  LOOKAHEAD_DAYS: "3"
-  BANKROLL: "1000"
-  KELLY_FRACTION: "0.5"
-  KELLY_CAP: "0.1"
-  KELLY_TOP_N: "14"
-  ROUND_TO: "1"
-  DEBUG: "true"
-
 jobs:
   end2end:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    env:
+      SEASON: ${{ inputs.season }}
+      REGIONS: ${{ inputs.regions }}
+      LOOKAHEAD_DAYS: ${{ inputs.lookahead_days }}
+      BANKROLL: ${{ inputs.bankroll }}
+      KELLY_FRACTION: ${{ inputs.kelly_fraction }}
+      KELLY_CAP: ${{ inputs.kelly_cap }}
+      KELLY_TOP_N: ${{ inputs.kelly_top_n }}
+      ROUND_TO: ${{ inputs.round_to }}
+      DEBUG: ${{ inputs.debug }}
+      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Python deps
+      - name: Install dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install \
-            pandas numpy python-dateutil pytz requests tenacity tqdm \
-            rapidfuzz unidecode \
-            scikit-learn==1.* \
-            beautifulsoup4 lxml \
-            wandb
-          pip install csvkit
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          # Pacotes que falharam anteriormente ou que são necessários
+          pip install pandas numpy scipy scikit-learn xgboost \
+                      requests python-dateutil pytz tqdm beautifulsoup4 \
+                      rapidfuzz Unidecode
 
-      - name: Prepare run folders
+      - name: Prepare run folders and OUT_DIR
         id: prep
+        shell: bash
         run: |
           set -euo pipefail
           RUN_ID=$(date +%s)
           echo "RUN_ID=$RUN_ID" >> "$GITHUB_OUTPUT"
-          OUT_DIR="data/out/${RUN_ID}"
-          echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
-          mkdir -p "data/in" "$OUT_DIR"
+          echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
+          mkdir -p "data/in" "${OUT_DIR}" "data/config"
+          # Flags de presença de secrets (APIs são OBRIGATÓRIAS)
+          [ -n "${THEODDS_API_KEY:-}" ] || { echo "::error::Faltando secret THEODDS_API_KEY"; exit 2; }
+          [ -n "${X_RAPIDAPI_KEY:-}" ] || { echo "::error::Faltando secret X_RAPIDAPI_KEY"; exit 2; }
+          [ -n "${NEWSAPI_KEY:-}" ] || echo "::notice::NEWSAPI_KEY ausente — módulos de notícias podem ser ignorados, se existirem."
 
-      - name: Validate secrets (STRICT)
-        env:
-          HAS_THEODDS: ${{ secrets.THEODDS_API_KEY != '' }}
-          HAS_XRAPI:   ${{ secrets.X_RAPIDAPI_KEY != '' }}
-          HAS_NEWS:    ${{ secrets.NEWSAPI_KEY != '' }}
-          HAS_WANDB:   ${{ secrets.WANDB_API_KEY != '' }}
+      - name: Seed default config files (aliases / league_map)
         run: |
           set -euo pipefail
-          [ "${HAS_THEODDS}" = "true" ] || { echo "::error::Falta THEODDS_API_KEY"; exit 2; }
-          [ "${HAS_XRAPI}"   = "true" ] || { echo "::error::Falta X_RAPIDAPI_KEY"; exit 2; }
-          [ "${HAS_NEWS}"    = "true" ] || { echo "::notice::NEWSAPI_KEY ausente — bloco de notícias será pulado."; }
-          [ "${HAS_WANDB}"   = "true" ] || { echo "::notice::WANDB_API_KEY ausente — tracking desligado."; }
+          mkdir -p data/config
+          # aliases.json
+          if [ ! -s data/config/aliases.json ]; then
+            cat > data/config/aliases.json <<'JSON'
+{"teams": {}, "leagues": {}}
+JSON
+          fi
+          # league_map.json
+          if [ ! -s data/config/league_map.json ]; then
+            cat > data/config/league_map.json <<'JSON'
+{"mapping": {}}
+JSON
+          fi
 
-      # 1) WHITELIST automática 100% por API (sem input manual)
-      - name: Build whitelist a partir das APIs (obrigatório)
-        env:
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-          X_RAPIDAPI_KEY:  ${{ secrets.X_RAPIDAPI_KEY }}
+      # ============================================================
+      # 1) Construir WHITELIST automaticamente (sem input manual)
+      #    Gera data/in/matches_whitelist.csv e copia para ${OUT_DIR}
+      # ============================================================
+      - name: Build whitelist from APIs (strict)
         run: |
           set -euo pipefail
           [ -f scripts/build_whitelist_from_apis.py ] || { echo "::error::scripts/build_whitelist_from_apis.py não encontrado"; exit 3; }
 
-          a=0; until [ $a -ge 3 ]; do
+          a=0
+          until [ $a -ge 3 ]; do
             python scripts/build_whitelist_from_apis.py \
               --out data/in/matches_whitelist.csv \
               --season "${SEASON}" \
@@ -91,114 +135,153 @@ jobs:
 
           WL="data/in/matches_whitelist.csv"
           test -s "$WL" || { echo "::error::Whitelist não gerada"; exit 3; }
+
           header="$(head -n1 "$WL" | tr -d '\r')"
           for c in match_id home away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Whitelist sem coluna '$c'"; exit 3; }
           done
+
           LINES=$(wc -l < "$WL" | tr -d ' ')
-          [ "$LINES" -ge 2 ] || { echo "::error::Whitelist sem jogos"; exit 3; }
+          [ "$LINES" -ge 2 ] || { echo "::error::Whitelist sem jogos (mínimo 1 linha além do cabeçalho)"; exit 3; }
 
-          # Cópias úteis
           cp "$WL" "${OUT_DIR}/matches_whitelist.csv"
-
-          # >>> PREP INPUT ESPERADO PELO ingest_odds_theoddsapi.py <<<
-          # Este script concatena "data/in" + RODADA + "matches_source.csv".
-          # Então criamos exatamente esse caminho e copiamos a whitelist como source.
-          mkdir -p "data/in/${OUT_DIR}"
-          cp "$WL" "data/in/${OUT_DIR}/matches_source.csv"
+          # Também gerar um matches_source.csv (alguns scripts esperam esse nome)
+          cp "$WL" "${OUT_DIR}/matches_source.csv"
 
           echo "===== Preview whitelist ====="
           head -n 20 "$WL" || true
 
-      # 2) Ingest THEODDS (obrigatório) — SEM --season (script não aceita)
-      - name: Ingest odds — TheOddsAPI (STRICT)
-        env:
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      # ============================================================
+      # 2) Ingestão de odds — TheOddsAPI (OBRIGATÓRIO)
+      # ============================================================
+      - name: Ingest TheOddsAPI (strict)
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py não encontrado."; exit 4; }
-          a=0; until [ $a -ge 3 ]; do
+
+          a=0
+          until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
               --rodada "${OUT_DIR}" \
               --regions "${REGIONS}" \
+              --aliases data/config/aliases.json \
+              --league_map data/config/league_map.json \
               ${DEBUG:+--debug} && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
           done
-          test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv não gerado"; exit 4; }
 
-      # 3) Ingest API-FOOTBALL (obrigatório)
-      - name: Ingest odds — API-Football via RapidAPI (STRICT)
-        env:
-          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+          OUT="${OUT_DIR}/odds_theoddsapi.csv"
+          test -s "$OUT" || { echo "::error::odds_theoddsapi.csv não gerado"; exit 4; }
+          header="$(head -n1 "$OUT" | tr -d '\r')"
+          for c in match_id team_home team_away odds_home odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_theoddsapi.csv"; exit 4; }
+          done
+          # odds_draw pode faltar (mercado 2-way); não é obrigatório aqui.
+
+      # ============================================================
+      # 3) Ingestão de odds — API-Football via RapidAPI (OBRIGATÓRIO)
+      # ============================================================
+      - name: Ingest API-Football (strict)
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py não encontrado."; exit 5; }
-          a=0; until [ $a -ge 3 ]; do
+
+          a=0
+          until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_apifootball_rapidapi \
               --rodada "${OUT_DIR}" \
               --season "${SEASON}" \
+              --aliases data/config/aliases.json \
+              --league_map data/config/league_map.json \
               ${DEBUG:+--debug} && break
             a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
           done
+
           OUT="${OUT_DIR}/odds_apifootball.csv"
           test -s "$OUT" || { echo "::error::odds_apifootball.csv não gerado"; exit 5; }
           header="$(head -n1 "$OUT" | tr -d '\r')"
-          for c in match_id home away odds_home odds_draw odds_away; do
+          for c in match_id team_home team_away odds_home odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_apifootball.csv"; exit 5; }
           done
 
-      # 4) CONSENSO de odds (STRICT)
-      - name: Odds consensus (STRICT)
+      # ============================================================
+      # 4) Consensus de odds (OBRIGATÓRIO e STRICT)
+      # ============================================================
+      - name: Build odds consensus (strict)
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py não encontrado"; exit 6; }
-          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
+
+          python -m scripts.consensus_odds_safe \
+            --rodada "${OUT_DIR}" \
+            --strict \
+            ${DEBUG:+--debug}
+
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
           test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv não gerado"; exit 6; }
           header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
-          for c in team_home team_away odds_home odds_draw odds_away; do
+          for c in team_home team_away odds_home odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_consensus.csv"; exit 6; }
           done
+          echo "===== Preview odds_consensus ====="
           head -n 20 "$OUT_FILE" || true
 
-      # 5) PREDIÇÃO a partir do mercado (probabilidades)
-      - name: Predict from odds (market probs)
+      # ============================================================
+      # 5) Predição a partir das odds (aceitando 2-way e 3-way)
+      # ============================================================
+      - name: Predict from odds (market model)
         run: |
           set -euo pipefail
           [ -f scripts/predict_from_odds.py ] || { echo "::error::scripts/predict_from_odds.py não encontrado"; exit 7; }
-          python scripts/predict_from_odds.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
-          test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado"; exit 7; }
 
-      # 6) CALIBRAÇÃO das probabilidades
+          python scripts/predict_from_odds.py \
+            --rodada "${OUT_DIR}" \
+            --allow-two-way \
+            ${DEBUG:+--debug}
+
+          test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado"; exit 7; }
+          head -n 20 "${OUT_DIR}/predictions_market.csv" || true
+
+      # ============================================================
+      # 6) Calibração de probabilidades
+      # ============================================================
       - name: Calibrate probabilities
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py não encontrado"; exit 23; }
+
           python scripts/calibrate_probs.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv não gerado"; exit 23; }
+          head -n 20 "${OUT_DIR}/calibrated_probs.csv" || true
 
-      # 7) CLIMA por partida (obrigatório, com retry)
-      - name: Weather per match (Open-Meteo)
+      # ============================================================
+      # 7) XG Univariado (gera features_univariado.csv)
+      # ============================================================
+      - name: XG Univariado
         run: |
           set -euo pipefail
-          if [ -f scripts/weather_per_match_safe.py ]; then
-            a=0; until [ $a -ge 3 ]; do
-              python scripts/weather_per_match_safe.py --in "data/in/matches_source.csv" --out-dir "${OUT_DIR}" && break
-              a=$((a+1)); echo "retry weather: $a/3"; sleep $((5*a))
-            done
-            test -s "${OUT_DIR}/weather.csv" || { echo "::error::weather.csv não gerado pelo per-match"; exit 17; }
-          else
-            [ -f scripts/weather_snapshot_safe.py ] || { echo "::error::scripts/weather_snapshot_safe.py não encontrado"; exit 17; }
-            if [ -n "${WEATHER_LAT:-}" ] && [ -n "${WEATHER_LON:-}" ]; then
-              python scripts/weather_snapshot_safe.py --out-dir "${OUT_DIR}" --lat "${WEATHER_LAT}" --lon "${WEATHER_LON}"
-              test -s "${OUT_DIR}/weather.csv" || { echo "::error::weather.csv não gerado"; exit 17; }
-            else
-              echo "::error::WEATHER_LAT/WEATHER_LON não definidos e weather_per_match_safe.py ausente"; exit 17;
-            fi
-          fi
+          [ -f scripts/xg_univariado.py ] || { echo "::error::scripts/xg_univariado.py não encontrado"; exit 26; }
 
-      # 8) CONTEXTO/FEATURES (une mercado + clima + (opcional) notícias)
-      - name: Join context & features
+          python scripts/xg_univariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv não gerado"; exit 26; }
+          head -n 10 "${OUT_DIR}/features_univariado.csv" || true
+
+      # ============================================================
+      # 8) XG Bivariado (gera features_bivariado.csv)
+      # ============================================================
+      - name: XG Bivariado
+        run: |
+          set -euo pipefail
+          [ -f scripts/xg_bivariado.py ] || { echo "::error::scripts/xg_bivariado.py não encontrado"; exit 27; }
+
+          python scripts/xg_bivariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv não gerado"; exit 27; }
+          head -n 10 "${OUT_DIR}/features_bivariado.csv" || true
+
+      # ============================================================
+      # 9) Contexto (join com clima / notícias se houver) — requer os dois XG
+      # ============================================================
+      - name: Join contexto (XG + extras)
         run: |
           set -euo pipefail
           [ -f scripts/feature_join_context.py ] || { echo "::error::scripts/feature_join_context.py não encontrado"; exit 28; }
@@ -212,26 +295,14 @@ jobs:
           test -s "${OUT_DIR}/context_features.csv" || { echo "::error::context_features.csv não gerado"; exit 28; }
           head -n 10 "${OUT_DIR}/context_features.csv" || true
 
-      # 9) XG UNIVARIADO/BIVARIADO (treino/pred) — obrigatórios
-      - name: XG Univariado (train/predict)
-        run: |
-          set -euo pipefail
-          [ -f scripts/xg_univariado.py ] || { echo "::error::scripts/xg_univariado.py não encontrado"; exit 29; }
-          python scripts/xg_univariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
-          test -s "${OUT_DIR}/pred_univariado.csv" || { echo "::error::pred_univariado.csv não gerado"; exit 29; }
-
-      - name: XG Bivariado (train/predict)
-        run: |
-          set -euo pipefail
-          [ -f scripts/xg_bivariado.py ] || { echo "::error::scripts/xg_bivariado.py não encontrado"; exit 30; }
-          python scripts/xg_bivariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
-          test -s "${OUT_DIR}/pred_bivariado.csv" || { echo "::error::pred_bivariado.csv não gerado"; exit 30; }
-
-      # 10) BLEND (calibrado + mercado + contexto + XG)
+      # ============================================================
+      # 10) Blend (market + calibrated + contexto)
+      # ============================================================
       - name: Blend models
         run: |
           set -euo pipefail
           [ -f scripts/blend_models.py ] || { echo "::error::scripts/blend_models.py não encontrado"; exit 24; }
+
           python scripts/blend_models.py \
             --rodada "${OUT_DIR}" \
             --w_calib 0.65 \
@@ -239,16 +310,24 @@ jobs:
             --use-context \
             --context-strength 0.15 \
             ${DEBUG:+--debug}
-          test -s "${OUT_DIR}/predictions_final.csv" || { echo "::error::predictions_final.csv não gerado"; exit 24; }
-          head -n 10 "${OUT_DIR}/predictions_final.csv" || true
 
-      # 11) KELLY — publicação das stakes
-      - name: Publish Kelly stakes
-        env:
-          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          test -s "${OUT_DIR}/predictions_final.csv" || { echo "::error::predictions_final.csv não gerado"; exit 24; }
+          head -n 20 "${OUT_DIR}/predictions_final.csv" || true
+
+      # ============================================================
+      # 11) Kelly e publicação
+      # ============================================================
+      - name: Kelly stakes
         run: |
           set -euo pipefail
           [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
+
+          export BANKROLL="${BANKROLL}"
+          export KELLY_FRACTION="${KELLY_FRACTION}"
+          export KELLY_CAP="${KELLY_CAP}"
+          export KELLY_TOP_N="${KELLY_TOP_N}"
+          export ROUND_TO="${ROUND_TO}"
+
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
           head -n 20 "${OUT_DIR}/kelly_stakes.csv" || true
