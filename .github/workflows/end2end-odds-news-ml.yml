@@ -52,7 +52,6 @@ jobs:
           fi
 
       - name: Prepare run folder
-        id: prep
         shell: bash
         run: |
           set -euo pipefail
@@ -110,7 +109,7 @@ jobs:
           test -s "${OUT_DIR}/matches_whitelist.csv" || { echo "::error::matches_whitelist.csv não gerado"; exit 6; }
           head -n 10 "${OUT_DIR}/matches_whitelist.csv" || true
 
-      # ----------------------- INGEST ODDS -----------------------
+      # ----------------------- INGEST ODDS (ABERTURA) -----------------------
       - name: Ingest odds – TheOddsAPI (opcional)
         if: ${{ env.HAS_THEODDS == 'true' }}
         shell: bash
@@ -123,7 +122,6 @@ jobs:
           [ -f scripts/ingest_odds_theoddsapi_safe.py ] || { echo "::error::scripts/ingest_odds_theoddsapi_safe.py não encontrado."; exit 4; }
           python scripts/ingest_odds_theoddsapi_safe.py --rodada "${OUT_DIR}" --regions "${REGIONS}" --debug
           test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv não gerado"; exit 4; }
-          head -n 12 "${OUT_DIR}/odds_theoddsapi.csv" || true
 
       - name: Ingest odds – API-Football (opcional)
         if: ${{ env.HAS_XRAPI == 'true' }}
@@ -138,8 +136,7 @@ jobs:
           python -m scripts.ingest_odds_apifootball_rapidapi --rodada "${OUT_DIR}" --season "${SEASON}" --debug || true
           echo '9:Marcador requerido pelo workflow: "apifootball-safe"'
 
-      # ------------------- CONSENSUS (NORMALIZAÇÃO) -------------------
-      - name: Odds consensus (normalização robusta)
+      - name: Odds consensus (abertura)
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -147,15 +144,9 @@ jobs:
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py não encontrado"; exit 6; }
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}"
-          OUT_FILE="${OUT_DIR}/odds_consensus.csv"
-          test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv não gerado"; exit 6; }
-          header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
-          for c in team_home team_away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_consensus.csv"; exit 6; }
-          done
-          head -n 10 "$OUT_FILE" || true
+          test -s "${OUT_DIR}/odds_consensus.csv" || { echo "::error::odds_consensus.csv não gerado"; exit 6; }
 
-      # ----------------------- NOTÍCIAS / CLIMA / INJURIES -----------------------
+      # ------------------- NOTÍCIAS / CLIMA / INJURIES -------------------
       - name: News (opcional)
         if: ${{ env.HAS_NEWS == 'true' }}
         shell: bash
@@ -167,7 +158,6 @@ jobs:
           [ -f scripts/news_ingest_safe.py ] || { echo "::error::scripts/news_ingest_safe.py não encontrado"; exit 16; }
           python scripts/news_ingest_safe.py --out-dir "${OUT_DIR}"
           test -s "${OUT_DIR}/news.csv" || { echo "::error::news.csv não gerado"; exit 16; }
-          head -n 5 "${OUT_DIR}/news.csv" || true
 
       - name: Weather per match (snapshot ou por-jogo)
         shell: bash
@@ -188,9 +178,8 @@ jobs:
               : > "${OUT_DIR}/weather.csv"
             fi
           fi
-          head -n 5 "${OUT_DIR}/weather.csv" || true
 
-      - name: Injuries (opcional, filtrando base U17/U20)
+      - name: Injuries (opcional)
         if: ${{ env.HAS_XRAPI == 'true' }}
         shell: bash
         env:
@@ -206,7 +195,7 @@ jobs:
             : > "${OUT_DIR}/injuries.csv"
           fi
 
-      # ----------------------- ML / PROBS / FEATURES -----------------------
+      # ----------------------- ML / PROBS / FEATURES (ABERTURA) -----------------------
       - name: Predict from odds (market)
         shell: bash
         env:
@@ -216,7 +205,6 @@ jobs:
           [ -f scripts/predict_from_odds.py ] || { echo "::error::scripts/predict_from_odds.py não encontrado"; exit 7; }
           python scripts/predict_from_odds.py --rodada "${OUT_DIR}" --debug
           test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado"; exit 7; }
-          head -n 20 "${OUT_DIR}/predictions_market.csv" || true
 
       - name: Build features (uni / bivariado / xg)
         shell: bash
@@ -231,7 +219,6 @@ jobs:
           [ -f scripts/features_bivariado_xg.py ] || { echo "::error::scripts/features_bivariado_xg.py não encontrado"; exit 22; }
           python scripts/features_bivariado_xg.py --rodada "${OUT_DIR}" --season "${SEASON}" --debug
           test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv não gerado"; exit 22; }
-          head -n 10 "${OUT_DIR}/features_bivariado.csv" || true
 
       - name: Calibrate probabilities (Dirichlet)
         shell: bash
@@ -242,9 +229,7 @@ jobs:
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py não encontrado"; exit 23; }
           python scripts/calibrate_probs.py --rodada "${OUT_DIR}" --debug
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv não gerado"; exit 23; }
-          head -n 5 "${OUT_DIR}/calibrated_probs.csv" || true
 
-      # ----------------------- CONTEXTO + BLEND FINAL -----------------------
       - name: Join context features (uni+bivariado+xg+weather+injuries+news)
         shell: bash
         env:
@@ -254,8 +239,32 @@ jobs:
           [ -f scripts/feature_join_context.py ] || { echo "::error::scripts/feature_join_context.py não encontrado"; exit 28; }
           python scripts/feature_join_context.py --rodada "${OUT_DIR}" --debug
           test -s "${OUT_DIR}/context_features.csv" || { echo "::error::context_features.csv não gerado"; exit 28; }
-          head -n 10 "${OUT_DIR}/context_features.csv" || true
 
+      # ----------------------- REFRESH (CLOSING) -----------------------
+      - name: Refresh odds (closing) e recompute tudo antes do cartão
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+          REGIONS: ${{ env.REGIONS }}
+          SEASON: ${{ env.SEASON }}
+        run: |
+          set -euo pipefail
+          if [ -n "${THEODDS_API_KEY:-}" ]; then
+            python scripts/ingest_odds_theoddsapi_safe.py --rodada "${OUT_DIR}" --regions "${REGIONS}" --debug || true
+          fi
+          if [ -n "${X_RAPIDAPI_KEY:-}" ]; then
+            python -m scripts.ingest_odds_apifootball_rapidapi --rodada "${OUT_DIR}" --season "${SEASON}" --debug || true
+          fi
+          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}"
+          python scripts/predict_from_odds.py --rodada "${OUT_DIR}" --debug
+          python scripts/features_univariado.py --rodada "${OUT_DIR}" --season "${SEASON}" --debug
+          python scripts/features_bivariado_xg.py --rodada "${OUT_DIR}" --season "${SEASON}" --debug
+          python scripts/calibrate_probs.py --rodada "${OUT_DIR}" --debug
+          python scripts/feature_join_context.py --rodada "${OUT_DIR}" --debug
+
+      # ----------------------- BLEND FINAL -----------------------
       - name: Blend (market + calib + context)
         shell: bash
         env:
@@ -263,10 +272,8 @@ jobs:
         run: |
           set -euo pipefail
           [ -f scripts/blend_models.py ] || { echo "::error::scripts/blend_models.py não encontrado"; exit 24; }
-          # --use-context é um flag (sem 'true/false' após)
           python scripts/blend_models.py --rodada "${OUT_DIR}" --w_calib 0.65 --w_market 0.35 --use-context --context-strength 0.15
           test -s "${OUT_DIR}/predictions_final.csv" || { echo "::error::predictions_final.csv não gerado"; exit 24; }
-          head -n 10 "${OUT_DIR}/predictions_final.csv" || true
 
       # ----------------------- KELLY / CARTÃO / SANITY -----------------------
       - name: Kelly stakes
@@ -283,7 +290,6 @@ jobs:
           [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" --debug
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
-          head -n 20 "${OUT_DIR}/kelly_stakes.csv" || true
 
       - name: Build cartão Loteca (ÚLTIMA etapa)
         shell: bash
