@@ -1,4 +1,4 @@
-name: End2End Odds+News ML (STRICT)
+name: End2End Odds+News ML (STRICT • 100% automático)
 
 on:
   workflow_dispatch:
@@ -11,6 +11,10 @@ on:
         description: "Regiões da TheOddsAPI (ex.: uk,eu,us,au)"
         required: true
         default: "uk,eu,us,au"
+      lookahead_days:
+        description: "Quantos dias à frente buscar jogos"
+        required: true
+        default: "3"
       bankroll:
         description: "Bankroll inicial"
         required: true
@@ -49,6 +53,7 @@ jobs:
     env:
       SEASON: ${{ github.event.inputs.season }}
       REGIONS: ${{ github.event.inputs.regions }}
+      LOOKAHEAD_DAYS: ${{ github.event.inputs.lookahead_days }}
       BANKROLL: ${{ github.event.inputs.bankroll }}
       KELLY_FRACTION: ${{ github.event.inputs.kelly_fraction }}
       KELLY_CAP: ${{ github.event.inputs.kelly_cap }}
@@ -84,6 +89,8 @@ jobs:
           set -euo pipefail
           python -V
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Garantir requests e unidecode p/ script novo
+          pip install requests python-dateutil Unidecode pandas
 
       - name: Preparar diretórios e validar segredos
         run: |
@@ -96,29 +103,33 @@ jobs:
           [ -n "${NEWSAPI_KEY:-}" ]      || { echo "::error::NEWSAPI_KEY ausente (repo Settings > Secrets)"; exit 1; }
           [ -n "${WANDB_API_KEY:-}" ]    || { echo "::error::WANDB_API_KEY ausente (repo Settings > Secrets)"; exit 1; }
 
-      - name: Validar lista obrigatória de jogos (whitelist)
+      - name: Gerar whitelist automaticamente das APIs (OBRIGATÓRIO)
         run: |
           set -euo pipefail
+          [ -f scripts/build_whitelist_from_apis.py ] || { echo "::error::scripts/build_whitelist_from_apis.py não encontrado"; exit 3; }
+
+          a=0; until [ $a -ge 3 ]; do
+            python scripts/build_whitelist_from_apis.py \
+              --out data/in/matches_whitelist.csv \
+              --season "${SEASON}" \
+              --regions "${REGIONS}" \
+              --lookahead-days "${LOOKAHEAD_DAYS}" \
+              ${DEBUG:+--debug} && break
+            a=$((a+1)); echo "retry whitelist: $a/3"; sleep $((5*a))
+          done
+
           WL="data/in/matches_whitelist.csv"
-          if [ ! -s "$WL" ]; then
-            echo "::error::Arquivo obrigatório ausente: $WL"
-            echo "Crie o arquivo com este cabeçalho exato e pelo menos 1 linha:"
-            echo ""
-            echo "match_id,home,away"
-            echo "12345,Cuiaba,Novorizontino"
-            echo "67890,America-MG,Vila Nova"
-            echo ""
-            echo "Dica: copie data/in/matches_whitelist.csv.example para $WL e substitua com dados reais."
-            exit 3
-          fi
+          test -s "$WL" || { echo "::error::Whitelist não gerada"; exit 3; }
+
           header="$(head -n1 "$WL" | tr -d '\r')"
           for c in match_id home away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Whitelist sem coluna '$c'"; exit 3; }
           done
-          # exigir pelo menos 1 linha de jogo
           LINES=$(wc -l < "$WL" | tr -d ' ')
           [ "$LINES" -ge 2 ] || { echo "::error::Whitelist sem jogos (mínimo 1 linha além do cabeçalho)"; exit 3; }
           cp "$WL" "${OUT_DIR}/matches_whitelist.csv"
+          echo "===== Preview whitelist ====="
+          head -n 20 "$WL" || true
 
       - name: Ingest TheOddsAPI (OBRIGATÓRIO)
         run: |
