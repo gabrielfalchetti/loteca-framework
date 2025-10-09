@@ -54,7 +54,6 @@ jobs:
           RUN_ID=$(date +%s)
           echo "RUN_ID=$RUN_ID" >> "$GITHUB_OUTPUT"
           OUT_DIR="data/out/${RUN_ID}"
-          export OUT_DIR
           echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
           mkdir -p "data/in" "$OUT_DIR"
 
@@ -68,8 +67,8 @@ jobs:
           set -euo pipefail
           [ "${HAS_THEODDS}" = "true" ] || { echo "::error::Falta THEODDS_API_KEY"; exit 2; }
           [ "${HAS_XRAPI}"   = "true" ] || { echo "::error::Falta X_RAPIDAPI_KEY"; exit 2; }
-          [ "${HAS_NEWS}"  = "true" ] || { echo "::notice::NEWSAPI_KEY ausente — bloco de notícias será pulado."; }
-          [ "${HAS_WANDB}" = "true" ] || { echo "::notice::WANDB_API_KEY ausente — tracking desligado."; }
+          [ "${HAS_NEWS}"    = "true" ] || { echo "::notice::NEWSAPI_KEY ausente — bloco de notícias será pulado."; }
+          [ "${HAS_WANDB}"   = "true" ] || { echo "::notice::WANDB_API_KEY ausente — tracking desligado."; }
 
       # 1) WHITELIST automática 100% por API (sem input manual)
       - name: Build whitelist a partir das APIs (obrigatório)
@@ -98,11 +97,20 @@ jobs:
           done
           LINES=$(wc -l < "$WL" | tr -d ' ')
           [ "$LINES" -ge 2 ] || { echo "::error::Whitelist sem jogos"; exit 3; }
+
+          # Cópias úteis
           cp "$WL" "${OUT_DIR}/matches_whitelist.csv"
+
+          # >>> PREP INPUT ESPERADO PELO ingest_odds_theoddsapi.py <<<
+          # Este script concatena "data/in" + RODADA + "matches_source.csv".
+          # Então criamos exatamente esse caminho e copiamos a whitelist como source.
+          mkdir -p "data/in/${OUT_DIR}"
+          cp "$WL" "data/in/${OUT_DIR}/matches_source.csv"
+
           echo "===== Preview whitelist ====="
           head -n 20 "$WL" || true
 
-      # 2) Ingest THEODDS (obrigatório) — REMOVIDO --season (script não aceita)
+      # 2) Ingest THEODDS (obrigatório) — SEM --season (script não aceita)
       - name: Ingest odds — TheOddsAPI (STRICT)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
