@@ -31,10 +31,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps (strict)
+        shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          # Se houver requirements.txt, usa. Senão, instala o mínimo necessário.
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
@@ -43,15 +43,25 @@ jobs:
 
       - name: Create OUT_DIR and base dirs
         id: init
+        shell: bash
         run: |
           set -euo pipefail
           RUN_ID=$(date +%s)
-          echo "RUN_ID=$RUN_ID" >> $GITHUB_OUTPUT
-          echo "OUT_DIR=data/out/${RUN_ID}" >> $GITHUB_ENV
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
           mkdir -p "data/in" "${OUT_DIR}"
+
+      - name: Ensure aliases.json exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s "data/in/aliases.json" ]; then
+            echo '{"teams": {}, "leagues": {}}' > data/in/aliases.json
+          fi
 
       # ===================== WHITELIST (obrigatória) =====================
       - name: Build whitelist from APIs (STRICT)
+        shell: bash
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
@@ -81,6 +91,7 @@ jobs:
 
       # ===================== ODDS (obrigatórias) =====================
       - name: Ingest TheOddsAPI (STRICT)
+        shell: bash
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
@@ -102,6 +113,7 @@ jobs:
           done
 
       - name: Ingest APIFootball via RapidAPI (STRICT)
+        shell: bash
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         run: |
@@ -122,6 +134,7 @@ jobs:
           done
 
       - name: Odds consensus (STRICT)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py não encontrado"; exit 6; }
@@ -136,7 +149,7 @@ jobs:
 
       # ===================== WEATHER (obrigatório) =====================
       - name: Weather per match (preferred, STRICT)
-        continue-on-error: false
+        shell: bash
         run: |
           set -euo pipefail
           if [ -f scripts/weather_per_match_safe.py ]; then
@@ -147,9 +160,9 @@ jobs:
             exit 17
           fi
 
-      # Snapshot (fallback) — só dispara se a etapa anterior falhar. Mantém obrigatoriedade.
       - name: Weather snapshot fallback (STRICT)
         if: failure()
+        shell: bash
         env:
           WEATHER_LAT: ${{ secrets.WEATHER_LAT }}
           WEATHER_LON: ${{ secrets.WEATHER_LON }}
@@ -162,6 +175,7 @@ jobs:
 
       # ===================== NEWS (obrigatório) =====================
       - name: News ingest (STRICT)
+        shell: bash
         env:
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
         run: |
@@ -175,6 +189,7 @@ jobs:
 
       # ===================== MARKET PREDICT + CALIBRATE =====================
       - name: Predict from odds (STRICT)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/predict_from_odds.py ] || { echo "::error::scripts/predict_from_odds.py não encontrado"; exit 7; }
@@ -184,6 +199,7 @@ jobs:
           awk -F, 'NR==1{for(i=1;i<=NF;i++) if($i=="odds_draw") c=i} NR>1 && ($c=="" || $c=="NaN"){print "linha com odds_draw inválida: " NR; bad=1} END{exit bad}' "${OUT_DIR}/predictions_market.csv" || { echo "::error::odds_draw inválida em predictions_market.csv"; exit 98; }
 
       - name: Calibrate probabilities (STRICT)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py não encontrado"; exit 23; }
@@ -192,6 +208,7 @@ jobs:
 
       # ===================== FEATURES & CONTEXTO =====================
       - name: Build features - Univariado (STRICT)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/feature_build_univariado.py ] || { echo "::error::scripts/feature_build_univariado.py não encontrado"; exit 21; }
@@ -199,6 +216,7 @@ jobs:
           test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv não gerado"; exit 21; }
 
       - name: Build features - Bivariado (STRICT)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/feature_build_bivariado.py ] || { echo "::error::scripts/feature_build_bivariado.py não encontrado"; exit 22; }
@@ -206,6 +224,7 @@ jobs:
           test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv não gerado"; exit 22; }
 
       - name: Join contexto (STRICT)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/feature_join_context.py ] || { echo "::error::scripts/feature_join_context.py não encontrado"; exit 28; }
@@ -214,15 +233,16 @@ jobs:
 
       # ===================== BLEND & KELLY =====================
       - name: Blend models (STRICT)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/blend_models.py ] || { echo "::error::scripts/blend_models.py não encontrado"; exit 24; }
-          # flags booleanas tipo store_true: não passe 'true' literal
           python scripts/blend_models.py --rodada "${OUT_DIR}" --w_calib 0.65 --w_market 0.35 --use-context --context-strength 0.15 ${DEBUG:+--debug}
           test -s "${OUT_DIR}/predictions_final.csv" || { echo "::error::predictions_final.csv não gerado"; exit 24; }
           head -n 10 "${OUT_DIR}/predictions_final.csv" || true
 
       - name: Publish Kelly (STRICT)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
@@ -231,6 +251,7 @@ jobs:
 
       # ===================== W&B (obrigatório) =====================
       - name: Weights & Biases - Upload artifacts (STRICT)
+        shell: bash
         env:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
