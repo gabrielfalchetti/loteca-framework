@@ -4,202 +4,144 @@
 """
 build_cartao.py
 
-Gera o cartão Loteca com decisões guiadas por valor (Kelly) e margem mínima.
-- Simples (1/X/2) apenas se houver edge>0 e margem mínima.
-- Caso contrário, duplo (1X/X2) ou triplo (1X2) conforme probabilidades.
+Lê:
+- matches_whitelist.csv
+- predictions_final.csv (novo blend com calibração + contexto)
+- kelly_stakes.csv (opcional; usamos apenas stake se existir)
 
-Saídas:
-- {OUT_DIR}/loteca_cartao.txt
+Política de decisão (draw-aware):
+- c = p_fav - p_segundo_maior
+- Se c >= 0.18  => crava favorito (1 ou 2)
+- Se 0.10 <= c < 0.18 e p_draw >= 0.30 => "X"
+- Se 0.08 <= c < 0.18 e p_draw < 0.30 => "Dupla Chance" (1X ou X2)
+- Se c < 0.08  => "X" (empate)
+Esses thresholds reduzem erros como América-MG x Vila Nova.
+
+Saída:
+  {OUT_DIR}/loteca_cartao.txt
 """
 
-import argparse
+import csv
 import os
 import sys
-from typing import Optional, Tuple
-import pandas as pd
+from math import isfinite
 
-# Parâmetros de decisão
-MARGEM_MIN_SIMPLE = 0.20      # diferença entre top prob e segunda
-MARGEM_MIN_DUPLO  = 0.08      # se entre top e segundo >= isso, permite duplo ao invés de triplo
-P_DRAW_ALTO       = 0.30      # quando p_draw alto, prioriza cobrir X no duplo
-STAKE_MIN_SIMPLE  = 0.5       # opcional: se stake (Kelly) < isso, evita cravar simples
-
-def dbg(*msg):
-    print("[cartao]", *msg, flush=True)
-
-
-def read_csv_safe(path: str) -> Optional[pd.DataFrame]:
-    if not os.path.isfile(path):
-        return None
+def _f(x, d=0.0):
     try:
-        df = pd.read_csv(path)
-        if df.shape[0] == 0:
-            return None
-        return df
-    except Exception:
-        return None
+        v = float(x);  return v if isfinite(v) else d
+    except: return d
 
+def _read(path):
+    if not os.path.isfile(path): return []
+    with open(path, "r", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
 
-def load_predictions(out_dir: str) -> pd.DataFrame:
-    # prioridade: predictions_final.csv -> predictions_blend.csv
-    p_final = read_csv_safe(os.path.join(out_dir, "predictions_final.csv"))
-    if p_final is not None and {"match_key","home","away","p_home","p_draw","p_away"}.issubset(p_final.columns):
-        return p_final.copy()
-    p_blend = read_csv_safe(os.path.join(out_dir, "predictions_blend.csv"))
-    if p_blend is not None and {"match_key","home","away","p_home","p_draw","p_away"}.issubset(p_blend.columns):
-        return p_blend.copy()
-    raise FileNotFoundError("Nenhum predictions_final.csv/blend.csv válido encontrado.")
+def load_wl(rodada):
+    p = os.path.join(rodada, "matches_whitelist.csv")
+    rows = _read(p)
+    out = []
+    for r in rows:
+        out.append({
+            "match_id": str(r.get("match_id") or "").strip(),
+            "home": r.get("team_home") or r.get("home"),
+            "away": r.get("team_away") or r.get("away")
+        })
+    return out
 
+def load_pred(rodada):
+    p = os.path.join(rodada, "predictions_final.csv")
+    if not os.path.isfile(p):
+        # fallback: predictions_blend.csv
+        p = os.path.join(rodada, "predictions_blend.csv")
+    rows = _read(p)
+    idx = {}
+    for r in rows:
+        key = (r.get("match_key") or "").strip()
+        idx[key] = {
+            "home": r.get("home"),
+            "away": r.get("away"),
+            "p1": _f(r.get("p_home")),
+            "pX": _f(r.get("p_draw")),
+            "p2": _f(r.get("p_away")),
+        }
+    return idx
 
-def load_kelly(out_dir: str) -> Optional[pd.DataFrame]:
-    k = read_csv_safe(os.path.join(out_dir, "kelly_stakes.csv"))
-    if k is None:
-        return None
-    # normalizar picks para 1/X/2
-    if "pick" in k.columns:
-        k = k.rename(columns={"pick":"pick_raw"})
-        def map_pick(x: str) -> str:
-            x = str(x).upper()
-            if x in ("HOME","1"): return "1"
-            if x in ("DRAW","X"): return "X"
-            if x in ("AWAY","2"): return "2"
-            return "?"
-        k["pick"] = k["pick_raw"].apply(map_pick)
-    return k
+def find_pred(idx, home, away):
+    k1 = f"{(home or '').strip().lower()}__vs__{(away or '').strip().lower()}"
+    if k1 in idx: return idx[k1]
+    # tolerante a variações
+    for k, v in idx.items():
+        if (v["home"] or "").lower() == (home or "").lower() and (v["away"] or "").lower() == (away or "").lower():
+            return v
+    return None
 
+def decide_symbol(p1, pX, p2):
+    # favorito e segundo
+    fav = "1" if p1 >= p2 and p1 >= pX else ("X" if pX >= p2 else "2")
+    trio = sorted([("1", p1), ("X", pX), ("2", p2)], key=lambda t: t[1], reverse=True)
+    fav_sym, fav_p = trio[0]
+    second_sym, second_p = trio[1]
+    c = fav_p - second_p
 
-def decide_row(ph: float, pd: float, pa: float,
-               edge_1: float, edge_x: float, edge_2: float,
-               stake_1: float, stake_x: float, stake_2: float) -> Tuple[str, str]:
-    """
-    Retorna (escolha, nota) onde escolha ∈ {"1","X","2","1X","X2","12","1X2"}
-    Nota: string explicando motivo.
-    """
-    probs = {"1": ph, "X": pd, "2": pa}
-    order = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)
-    top_key, top_p = order[0]
-    second_key, second_p = order[1]
-    margem = top_p - second_p
+    # Draw-aware rules
+    if c >= 0.18:
+        return fav_sym, "single"
 
-    # checar edge/stake da opção top
-    edge_map  = {"1": edge_1, "X": edge_x, "2": edge_2}
-    stake_map = {"1": stake_1, "X": stake_x, "2": stake_2}
-    edge_top  = edge_map.get(top_key, 0.0) if edge_map is not None else 0.0
-    stake_top = stake_map.get(top_key, 0.0) if stake_map is not None else 0.0
+    if 0.10 <= c < 0.18 and pX >= 0.30:
+        return "X", "draw_swing"
 
-    # 1) SIMPLES apenas com valor + margem mínima
-    if edge_top is not None and edge_top > 0 and margem >= MARGEM_MIN_SIMPLE and stake_top >= STAKE_MIN_SIMPLE:
-        return top_key, f"simples por valor (edge>0) e margem {margem:.3f} (≥ {MARGEM_MIN_SIMPLE:.2f})"
+    if 0.08 <= c < 0.18 and pX < 0.30:
+        # dupla chance em favor do favorito
+        return (f"{'1X' if fav_sym == '1' else 'X2'}"), "double_chance"
 
-    # 2) DUPLO quando margem moderada
-    if margem >= MARGEM_MIN_DUPLO:
-        # escolher entre 1X / X2 / 12 conforme top_key e p_draw
-        if top_key == "1":
-            # se p_draw alto, cobrir X; senão cobrir 2
-            prefer = "1X" if pd >= P_DRAW_ALTO else "12"
-            return prefer, f"duplo por margem {margem:.3f} (≥ {MARGEM_MIN_DUPLO:.2f}); draw alto={pd:.2f}"
-        elif top_key == "2":
-            prefer = "X2" if pd >= P_DRAW_ALTO else "12"
-            return prefer, f"duplo por margem {margem:.3f} (≥ {MARGEM_MIN_DUPLO:.2f}); draw alto={pd:.2f}"
-        else:  # top_key == "X"
-            # empates muito prováveis -> cobrir lado mais forte
-            if ph >= pa:
-                return "1X", f"duplo por X alto; mandante levemente à frente (p_home={ph:.2f})"
-            else:
-                return "X2", f"duplo por X alto; visitante levemente à frente (p_away={pa:.2f})"
+    if c < 0.08:
+        return "X", "draw_low_margin"
 
-    # 3) TRIPLO quando muito equilibrado
-    return "1X2", f"triplo por equilíbrio (margem {margem:.3f} < {MARGEM_MIN_DUPLO:.2f})"
+    return fav_sym, "fallback"
 
+def load_kelly(rodada):
+    p = os.path.join(rodada, "kelly_stakes.csv")
+    rows = _read(p)
+    d = {}
+    for r in rows:
+        # no kelly, nosso match_key é o númerico (por join anterior)
+        d[str(r.get("match_key") or "").strip()] = _f(r.get("stake"), 0.0)
+    return d
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Diretório da rodada (ex.: data/out/123456)")
-    args = ap.parse_args()
+    if len(sys.argv) < 3 or sys.argv[1] != "--rodada":
+        print("Uso: build_cartao.py --rodada OUT_DIR", file=sys.stderr)
+        sys.exit(2)
+    rodada = sys.argv[2]
 
-    out_dir = args.rodada
-
-    preds = load_predictions(out_dir)
-    kelly = load_kelly(out_dir)
-
-    # index auxiliar para buscar edges/stakes por match_key e opção
-    edge_by_opt = {}
-    stake_by_opt = {}
-    if kelly is not None and {"match_key","pick","edge","stake"}.issubset(kelly.columns):
-        for _, r in kelly.iterrows():
-            mk = str(r.get("match_key", r.get("match_id", "")))
-            pick = str(r["pick"]).upper()
-            edge_by_opt[(mk, pick)] = float(r.get("edge", 0.0))
-            stake_by_opt[(mk, pick)] = float(r.get("stake", 0.0))
+    wl = load_wl(rodada)
+    preds = load_pred(rodada)
+    kelly = load_kelly(rodada)
 
     lines = ["==== CARTÃO LOTECA ===="]
-    # tentar casar com whitelist para ordenar; caso contrário, seguir ordem natural
-    wl = read_csv_safe(os.path.join(out_dir, "matches_whitelist.csv"))
-    if wl is not None and {"match_id","match_key","team_home","team_away"}.issubset(wl.columns):
-        wl = wl.rename(columns={"team_home":"home","team_away":"away"})
-        order_keys = wl[["match_key","home","away"]].values.tolist()
-        # construir dict por match_key
-        pmap = {mk: row for mk, row in preds.set_index("match_key").iterrows()}
-        numero = 1
-        for mk, home, away in order_keys:
-            row = pmap.get(mk)
-            if row is None:
-                lines.append(f"Jogo {numero:02d} - {home} x {away}: ? (sem probabilidades)")
-                numero += 1
-                continue
-            ph, pd, pa = float(row["p_home"]), float(row["p_draw"]), float(row["p_away"])
-            # edges/stakes por opção
-            e1 = edge_by_opt.get((mk, "1"), 0.0); ex = edge_by_opt.get((mk, "X"), 0.0); e2 = edge_by_opt.get((mk, "2"), 0.0)
-            s1 = stake_by_opt.get((mk, "1"), 0.0); sx = stake_by_opt.get((mk, "X"), 0.0); s2 = stake_by_opt.get((mk, "2"), 0.0)
-            escolha, nota = decide_row(ph, pd, pa, e1, ex, e2, s1, sx, s2)
-            # prob exibida do top (ou se triplo, mostrar p_draw)
-            probs = {"1": ph, "X": pd, "2": pa}
-            if escolha in ("1","X","2"):
-                shown = probs[escolha]
-            elif escolha == "1X2":
-                shown = max(ph, pd, pa)
-            elif escolha == "1X":
-                shown = ph + pd
-            elif escolha == "X2":
-                shown = pd + pa
-            else:  # "12"
-                shown = ph + pa
-            lines.append(f"Jogo {numero:02d} - {home} x {away}: {escolha} [prob~{shown*100:.1f}%]  // {nota}")
-            numero += 1
-    else:
-        # fallback: sem whitelist
-        numero = 1
-        for _, row in preds.iterrows():
-            home, away = row["home"], row["away"]
-            mk = row["match_key"]
-            ph, pd, pa = float(row["p_home"]), float(row["p_draw"]), float(row["p_away"])
-            e1 = edge_by_opt.get((mk, "1"), 0.0); ex = edge_by_opt.get((mk, "X"), 0.0); e2 = edge_by_opt.get((mk, "2"), 0.0)
-            s1 = stake_by_opt.get((mk, "1"), 0.0); sx = stake_by_opt.get((mk, "X"), 0.0); s2 = stake_by_opt.get((mk, "2"), 0.0)
-            escolha, nota = decide_row(ph, pd, pa, e1, ex, e2, s1, sx, s2)
-            probs = {"1": ph, "X": pd, "2": pa}
-            if escolha in ("1","X","2"):
-                shown = probs[escolha]
-            elif escolha == "1X2":
-                shown = max(ph, pd, pa)
-            elif escolha == "1X":
-                shown = ph + pd
-            elif escolha == "X2":
-                shown = pd + pa
-            else:
-                shown = ph + pa
-            lines.append(f"Jogo {numero:02d} - {home} x {away}: {escolha} [prob~{shown*100:.1f}%]  // {nota}")
-            numero += 1
+    for i, m in enumerate(wl, start=1):
+        home, away = m["home"], m["away"]
+        pr = find_pred(preds, home, away)
+        if not pr:
+            lines.append(f"Jogo {i:02d} - {home} x {away}: ? (stake=0.0) [nan%]")
+            continue
+
+        p1, pX, p2 = pr["p1"], pr["pX"], pr["p2"]
+        symbol, reason = decide_symbol(p1, pX, p2)
+
+        # stake se houver (por número do jogo ou tentativas de chave)
+        st = _f(kelly.get(str(i)) or 0.0, 0.0)
+
+        pick_pct = {"1": p1, "X": pX, "2": p2}.get(symbol, max(p1, pX, p2))
+        lines.append(f"Jogo {i:02d} - {home} x {away}: {symbol} (stake={st:.1f}) [{pick_pct*100:.1f}%]")
 
     lines.append("=======================")
-    out_path = os.path.join(out_dir, "loteca_cartao.txt")
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    dbg("OK ->", out_path)
 
+    outp = os.path.join(rodada, "loteca_cartao.txt")
+    with open(outp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print("\n".join(lines))
+    print(f"[cartao] OK -> {outp}")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"[cartao][ERRO] {e}", file=sys.stderr)
-        sys.exit(1)
+    main()
