@@ -1,237 +1,224 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+build_whitelist_from_apis.py
+Gera data/in/matches_whitelist.csv com colunas mínimas (match_id, home, away)
+a partir da TheOddsAPI (v4), usando apenas dados reais.
+
+Uso:
+  python scripts/build_whitelist_from_apis.py \
+    --out data/in/matches_whitelist.csv \
+    --season 2025 \
+    --regions "uk,eu,us,au" \
+    --lookahead-days 3 \
+    --debug
+
+Requisitos de ambiente:
+  - THEODDS_API_KEY (obrigatório)
+"""
+
+from __future__ import annotations
+import argparse
+import hashlib
 import os
 import sys
-import csv
-import json
 import time
-import argparse
 from datetime import datetime, timedelta, timezone
-from dateutil import tz
-import requests
-from unidecode import unidecode
+from typing import List, Dict, Any, Optional
 
-# Regras: APIs obrigatórias. Falha se qualquer uma não responder com jogos.
-# Output: data/in/matches_whitelist.csv  (match_id,home,away)
+import json
+import csv
+import urllib.parse
+import urllib.request
 
-def log(msg):
+
+def log(msg: str) -> None:
     print(msg, flush=True)
 
-def err(msg, code=3):
-    print(f"::error::{msg}", flush=True)
-    sys.exit(code)
 
-def norm_team(name: str) -> str:
-    if name is None:
-        return ""
-    s = unidecode(str(name)).lower().strip()
-    # simplificações comuns
-    for tok in [" fc", " sc", " afc", " cfd", " sp", ".", ","]:
-        s = s.replace(tok, " ")
-    s = s.replace("-", " ")
-    s = " ".join(s.split())
-    return s
+def err(msg: str) -> None:
+    print(f"##[error]{msg}", flush=True)
 
-def get_time_window(days_ahead: int):
+
+def debug_log(enabled: bool, msg: str) -> None:
+    if enabled:
+        print(msg, flush=True)
+
+
+def http_get_json(url: str, timeout: int = 20) -> Any:
+    req = urllib.request.Request(url, headers={"User-Agent": "loteca-bot/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+        return json.loads(data.decode("utf-8"))
+
+
+def to_commence_time_to_utc_z(lookahead_days: int) -> str:
+    """
+    Retorna string UTC no formato exigido pela TheOddsAPI:
+    YYYY-MM-DDTHH:MM:SSZ (sem offset +00:00)
+    """
     now_utc = datetime.now(timezone.utc)
-    end_utc = now_utc + timedelta(days=days_ahead)
-    # formatos ISO sem micros
-    start = now_utc.replace(microsecond=0).isoformat()
-    end = end_utc.replace(microsecond=0).isoformat()
-    return start, end
+    target = now_utc + timedelta(days=lookahead_days)
+    # zulu format sem micros, com 'Z'
+    return target.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-def fetch_theodds(regions: str, lookahead_days: int, api_key: str, debug: bool=False):
-    # Documentação TheOddsAPI: endpoint /v4/sports/upcoming/odds
-    # Vamos pedir mercados "h2h" (3-way). Regiões do input (uk,eu,us,au)
-    start, end = get_time_window(lookahead_days)
+
+def safe_team_name(name: Optional[str]) -> str:
+    return (name or "").strip()
+
+
+def make_match_id(home: str, away: str, commence_iso: str) -> str:
+    """
+    ID determinístico curto baseado em (home, away, commence_time)
+    """
+    base = f"{home}|{away}|{commence_iso}".lower()
+    h = hashlib.md5(base.encode("utf-8")).hexdigest()[:12]
+    return h
+
+
+def fetch_upcoming_h2h(
+    api_key: str,
+    regions: str,
+    lookahead_days: int,
+    debug: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Chamada única à TheOddsAPI /v4/sports/upcoming/odds (markets=h2h).
+    Retorna a lista raw de eventos.
+    """
+    commence_to = to_commence_time_to_utc_z(lookahead_days)
     params = {
         "regions": regions,
         "markets": "h2h",
         "oddsFormat": "decimal",
         "dateFormat": "iso",
         "apiKey": api_key,
-      #  "commenceTimeFrom": start,   # alguns planos não aceitam ambos; cuidado
-        "commenceTimeTo": end,
+        "commenceTimeTo": commence_to,  # <-- formato Z correto
     }
-    url = "https://api.the-odds-api.com/v4/sports/upcoming/odds"
-    r = requests.get(url, params=params, timeout=30)
-    if debug:
-        log(f"[whitelist][theodds] GET {r.url} -> {r.status_code}")
-    if r.status_code != 200:
-        err(f"[whitelist][theodds] HTTP {r.status_code}: {r.text}", code=31)
-    data = r.json()
-    # Extrair pares home/away quando possível
-    matches = []
-    for item in data:
-        # Alguns esportes retornam 'home_team' e 'away_team'
-        home = item.get("home_team")
-        away = None
-        # Tentar deduzir away pelo 'bookmakers' outcomes quando necessário
-        if "bookmakers" in item and item["bookmakers"]:
-            # procurar outcomes com names
-            outcomes = []
-            for bm in item["bookmakers"]:
-                for mk in bm.get("markets", []):
-                    if mk.get("key") == "h2h":
-                        for oc in mk.get("outcomes", []):
-                            outcomes.append(oc.get("name"))
-                if outcomes:
-                    break
-            # heurística: se home_team presente e outcomes tem 2 ou 3 times, escolher o que não é home com melhor match
-            outs_norm = [norm_team(x) for x in outcomes if x]
-            hnorm = norm_team(home) if home else ""
-            cand = [o for o in outs_norm if o and o != hnorm]
-            # Não temos certeza do ordenamento; manter None se não conseguir
-            if cand:
-                # pegar a string original correspondente ao primeiro cand
-                idx = outs_norm.index(cand[0])
-                away = outcomes[idx]
-        # fallback: alguns retornos tem "away_team"
-        if not away:
-            away = item.get("away_team")
+    base_url = "https://api.the-odds-api.com/v4/sports/upcoming/odds"
+    url = f"{base_url}?{urllib.parse.urlencode(params)}"
+    debug_log(debug, f"[whitelist][theodds] URL -> {url}")
 
+    data = http_get_json(url)
+    # Em caso de erro, a API retorna dict com 'message'
+    if isinstance(data, dict) and "message" in data:
+        raise RuntimeError(
+            f"[whitelist][theodds] API error: {data.get('message')} "
+            f"(error_code={data.get('error_code')})"
+        )
+    if not isinstance(data, list):
+        raise RuntimeError("[whitelist][theodds] Resposta inesperada (não é lista).")
+    debug_log(debug, f"[whitelist][theodds] eventos retornados: {len(data)}")
+    return data
+
+
+def extract_h2h_rows(events: List[Dict[str, Any]], debug: bool = False) -> List[Dict[str, str]]:
+    """
+    Converte a resposta da TheOddsAPI em linhas (match_id, home, away)
+    usando os nomes das equipes do campo 'home_team' / 'away_team'.
+    """
+    rows: List[Dict[str, str]] = []
+
+    for ev in events:
+        home = safe_team_name(ev.get("home_team"))
+        away = safe_team_name(ev.get("away_team"))
+        commence = ev.get("commence_time") or ""
         if not home or not away:
-            # pular entradas sem pares
+            debug_log(debug, f"[whitelist][skip] evento sem home/away: {ev.get('id')}")
             continue
 
-        matches.append({
-            "home": home,
-            "away": away,
-            "commence_time": item.get("commence_time"),
-        })
-    if debug:
-        log(f"[whitelist][theodds] jogos brutos: {len(matches)}")
-    return matches
+        # Alguns eventos vêm com commence_time ISO com 'Z' — manter como veio
+        commence_iso = str(commence).strip()
 
-def fetch_apifootball_rapidapi(lookahead_days: int, rapid_key: str, season: str, debug: bool=False):
-    # API-Football (RapidAPI): usar endpoint fixtures entre datas (próximos dias)
-    # https://api-football-v1.p.rapidapi.com/v3/fixtures?from=YYYY-MM-DD&to=YYYY-MM-DD
-    now = datetime.utcnow().date()
-    to = now + timedelta(days=lookahead_days)
-    headers = {
-        "X-RapidAPI-Key": rapid_key,
-        "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"
-    }
-    url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
-    params = {
-        "from": now.isoformat(),
-        "to": to.isoformat(),
-        # Não filtramos por league aqui para cobrir o máximo, o consensus/ingest filtrará
-        # "season": season,  # API-Football exige season para ligas específicas; deixamos amplo
-        "timezone": "UTC"
-    }
-    r = requests.get(url, headers=headers, params=params, timeout=30)
-    if debug:
-        log(f"[whitelist][apifootball] GET {r.url} -> {r.status_code}")
-    if r.status_code != 200:
-        err(f"[whitelist][apifootball] HTTP {r.status_code}: {r.text}", code=32)
-    js = r.json()
-    resp = js.get("response", [])
-    matches = []
-    for fx in resp:
-        teams = fx.get("teams", {})
-        home = teams.get("home", {}).get("name")
-        away = teams.get("away", {}).get("name")
-        if home and away:
-            matches.append({
+        match_id = make_match_id(home, away, commence_iso)
+        rows.append(
+            {
+                "match_id": match_id,
                 "home": home,
                 "away": away,
-                "date": fx.get("fixture", {}).get("date"),
-            })
-    if debug:
-        log(f"[whitelist][apifootball] jogos brutos: {len(matches)}")
-    return matches
+                "commence_time": commence_iso,
+                "source": "theoddsapi",
+            }
+        )
 
-def intersect_matches(theodds_list, api_list, debug=False):
-    # indexar por (home_norm, away_norm)
-    idx_theodds = {}
-    for m in theodds_list:
-        key = (norm_team(m["home"]), norm_team(m["away"]))
-        if key[0] and key[1]:
-            idx_theodds[key] = (m["home"], m["away"])
+    # Remover duplicatas por (home, away, commence_time)
+    seen = set()
+    dedup: List[Dict[str, str]] = []
+    for r in rows:
+        key = (r["home"].lower(), r["away"].lower(), r["commence_time"])
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(r)
 
-    out = []
-    for m in api_list:
-        key = (norm_team(m["home"]), norm_team(m["away"]))
-        if key in idx_theodds:
-            # usar nomes da API-Football (tendem a ser “oficiais”) para reduzir variação
-            out.append({
-                "home": m["home"],
-                "away": m["away"]
-            })
-    if debug:
-        log(f"[whitelist] interseção: {len(out)}")
-    return out
+    debug_log(debug, f"[whitelist] linhas após dedupe: {len(dedup)}")
+    return dedup
 
-def main():
-    ap = argparse.ArgumentParser(description="Gera data/in/matches_whitelist.csv automáticamente a partir de TheOddsAPI e API-Football (RapidAPI).")
-    ap.add_argument("--out", required=True, help="Arquivo de saída (ex.: data/in/matches_whitelist.csv)")
-    ap.add_argument("--season", required=True, help="Temporada (ex.: 2025)")
-    ap.add_argument("--regions", required=True, help="Regiões TheOddsAPI (ex.: uk,eu,us,au)")
-    ap.add_argument("--lookahead-days", type=int, default=3, help="Dias à frente para buscar jogos (default: 3)")
-    ap.add_argument("--debug", action="store_true")
-    args = ap.parse_args()
 
-    theodds_key = os.getenv("THEODDS_API_KEY", "")
-    rapid_key = os.getenv("X_RAPIDAPI_KEY", "")
-
-    if not theodds_key:
-        err("THEODDS_API_KEY ausente no ambiente", code=11)
-    if not rapid_key:
-        err("X_RAPIDAPI_KEY ausente no ambiente", code=12)
-
-    if args.debug:
-        log(f"[whitelist] params: season={args.season}, regions={args.regions}, lookahead={args.lookahead_days}")
-
-    # Fetch das duas fontes (OBRIGATÓRIO)
-    try:
-        theodds_matches = fetch_theodds(args.regions, args.lookahead_days, theodds_key, args.debug)
-    except Exception as e:
-        err(f"[whitelist] Falha ao consultar TheOddsAPI: {e}", code=31)
-
-    try:
-        apifoot_matches = fetch_apifootball_rapidapi(args.lookahead_days, rapid_key, args.season, args.debug)
-    except Exception as e:
-        err(f"[whitelist] Falha ao consultar API-Football: {e}", code=32)
-
-    if len(theodds_matches) == 0:
-        err("[whitelist] TheOddsAPI retornou 0 jogos no intervalo. Não é permitido.", code=33)
-    if len(apifoot_matches) == 0:
-        err("[whitelist] API-Football retornou 0 jogos no intervalo. Não é permitido.", code=34)
-
-    inter = intersect_matches(theodds_matches, apifoot_matches, args.debug)
-    if len(inter) == 0:
-        # Diagnóstico útil:
-        # Imprimir até 10 nomes normalizados para ajudar ajuste posterior
-        td_keys = set((norm_team(m['home']), norm_team(m['away'])) for m in theodds_matches if m.get('home') and m.get('away'))
-        af_keys = set((norm_team(m['home']), norm_team(m['away'])) for m in apifoot_matches if m.get('home') and m.get('away'))
-        only_td = list(td_keys - af_keys)[:10]
-        only_af = list(af_keys - td_keys)[:10]
-        log("[whitelist][DEBUG] exemplos apenas TheOdds (até 10): " + json.dumps(only_td))
-        log("[whitelist][DEBUG] exemplos apenas APIFootball (até 10): " + json.dumps(only_af))
-        err("[whitelist] Interseção vazia entre TheOdds e API-Football. Verifique padronização de nomes/ligas e janela de datas.", code=35)
-
-    # Gerar IDs determinísticos a partir da string "home|away"
-    rows = []
-    for m in inter:
-        key = f"{m['home']}|{m['away']}"
-        # hash curto estável
-        match_id = abs(hash(key)) % (10**10)
-        rows.append({
-            "match_id": str(match_id),
-            "home": m["home"],
-            "away": m["away"]
-        })
-
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["match_id", "home", "away"])
+def write_csv(out_path: str, rows: List[Dict[str, str]]) -> None:
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fieldnames = ["match_id", "home", "away", "commence_time", "source"]
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in rows:
             w.writerow(r)
 
-    log(f"[whitelist] OK -> {args.out} (linhas={len(rows)})")
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Gera matches_whitelist.csv a partir da TheOddsAPI (v4)."
+    )
+    parser.add_argument("--out", required=True, help="Caminho do CSV de saída.")
+    parser.add_argument("--season", required=True, help="Temporada (ex.: 2025).")
+    parser.add_argument(
+        "--regions", default="uk,eu,us,au", help="Regiões da TheOddsAPI."
+    )
+    parser.add_argument(
+        "--lookahead-days", type=int, default=3, help="Janela de busca em dias (UTC)."
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="Logs extras."
+    )
+    args = parser.parse_args()
+
+    api_key = os.getenv("THEODDS_API_KEY", "").strip()
+    if not api_key:
+        err("THEODDS_API_KEY ausente no ambiente.")
+        sys.exit(3)
+
+    log(f"[whitelist] params: season={args.season}, regions={args.regions}, lookahead={args.lookahead_days}")
+
+    try:
+        events = fetch_upcoming_h2h(
+            api_key=api_key,
+            regions=args.regions,
+            lookahead_days=args.lookahead_days,
+            debug=args.debug,
+        )
+    except Exception as e:
+        err(str(e))
+        sys.exit(3)
+
+    rows = extract_h2h_rows(events, debug=args.debug)
+
+    if len(rows) == 0:
+        err("Nenhum jogo retornado pela TheOddsAPI dentro da janela. Whitelist vazia.")
+        sys.exit(3)
+
+    write_csv(args.out, rows)
+    # Preview curto
+    try:
+        import pandas as pd  # só para preview; se não houver, ignora
+        df = pd.read_csv(args.out)
+        debug_log(args.debug, "===== Preview whitelist (top 10) =====")
+        debug_log(args.debug, df.head(10).to_string(index=False))
+    except Exception:
+        pass
+
+    log(f"[whitelist] OK -> {args.out} ({len(rows)} jogos)")
+
 
 if __name__ == "__main__":
     main()
