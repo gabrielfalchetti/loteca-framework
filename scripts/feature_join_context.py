@@ -2,130 +2,126 @@
 # -*- coding: utf-8 -*-
 
 """
-feature_join_context.py (STRICT)
+Junta features de contexto para modelagem/kelly.
 
-Une features univariadas/bivariadas/xg + clima + notícias (opcional)
-para produzir <OUT_DIR>/context_features.csv.
+Entradas (estritas):
+- <rodada>/matches_whitelist.csv  [match_id,home,away]  (mapeadas para team_home/team_away)
+- <rodada>/features_univariado.csv  [match_id, ...]  (OBRIGATÓRIO)
+- Pelo menos uma entre:
+    * <rodada>/features_bivariado.csv [match_id, ...]
+    * <rodada>/features_xg.csv        [match_id, ...]
 
-Regras:
-- Exige: features_univariado.csv, features_bivariado.csv, features_xg.csv
-- Exige: weather.csv (não vazio, ao menos colunas mínimas)
-- Faz merges garantindo 'match_id' como string (evita erro object vs int64).
-- Se qualquer insumo estiver vazio/ausente, falha com exit code 28.
+O arquivo resultante:
+- <rodada>/context_features.csv
 """
 
+import argparse
 import os
 import sys
-import argparse
 import pandas as pd
 
 
 def die(msg: str, code: int = 28):
-    print(f"##[error]{msg}", file=sys.stderr, flush=True)
+    print(f"[context][ERRO] {msg}", file=sys.stderr)
     sys.exit(code)
 
 
-def load_required(path: str, name: str) -> pd.DataFrame:
-    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+def read_required_csv(path: str, name: str) -> pd.DataFrame:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
         die(f"Arquivo obrigatório ausente/vazio: {path}")
     try:
         df = pd.read_csv(path)
     except Exception as e:
-        die(f"Falha lendo {name} ({path}): {e}")
-    if df is None or df.empty:
-        die(f"Arquivo obrigatório vazio: {path}")
+        die(f"Falha ao ler {name}: {e}")
+    if df.empty:
+        die(f"{name} sem linhas úteis: {path}")
     return df
 
 
-def ensure_match_id(df: pd.DataFrame) -> pd.DataFrame:
-    if "match_id" not in df.columns:
-        # tenta a partir de match_key
-        if "match_key" in df.columns:
-            df["match_id"] = df["match_key"].astype(str)
-        elif "home" in df.columns and "away" in df.columns:
-            df["match_id"] = df["home"].astype(str) + "__" + df["away"].astype(str)
-        elif "team_home" in df.columns and "team_away" in df.columns:
-            df["match_id"] = df["team_home"].astype(str) + "__" + df["team_away"].astype(str)
-        else:
-            die("Não foi possível derivar 'match_id' em um dos datasets.")
-    df["match_id"] = df["match_id"].astype(str)
-    return df
+def read_optional_csv(path: str) -> pd.DataFrame | None:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return None
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return None
+    return df if not df.empty else None
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--rodada", required=True, help="Diretório da rodada.")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
-    out_dir = args.rodada
-    os.makedirs(out_dir, exist_ok=True)
-    print(f"[context] Base (whitelist) linhas={len(pd.read_csv(os.path.join(out_dir,'matches_whitelist.csv')))}" if os.path.isfile(os.path.join(out_dir,'matches_whitelist.csv')) else "[context] sem whitelist explícita")
+    rodada = args.rodada
+    wl_path = os.path.join(rodada, "matches_whitelist.csv")
+    uni_path = os.path.join(rodada, "features_univariado.csv")
+    bi_path  = os.path.join(rodada, "features_bivariado.csv")
+    xg_path  = os.path.join(rodada, "features_xg.csv")
+    out_path = os.path.join(rodada, "context_features.csv")
 
-    # carrega insumos obrigatórios
-    fu = load_required(os.path.join(out_dir, "features_univariado.csv"), "features_univariado")
-    fb = load_required(os.path.join(out_dir, "features_bivariado.csv"), "features_bivariado")
-    fx = load_required(os.path.join(out_dir, "features_xg.csv"), "features_xg")
-    w  = load_required(os.path.join(out_dir, "weather.csv"), "weather")
+    wl = read_required_csv(wl_path, "whitelist")
+    # normaliza nomes (alguns passos anteriores usam home/away; outros team_home/team_away)
+    if {"team_home", "team_away"}.issubset(wl.columns):
+        wl = wl.rename(columns={"team_home": "home", "team_away": "away"})
+    req_wl = {"match_id", "home", "away"}
+    missing = req_wl - set(wl.columns)
+    if missing:
+        die(f"Whitelist precisa conter colunas {sorted(req_wl)}; faltando {sorted(missing)}")
 
-    # normaliza match_id (string em todos)
-    fu = ensure_match_id(fu)
-    fb = ensure_match_id(fb)
-    fx = ensure_match_id(fx)
-    w  = ensure_match_id(w)
+    uni = read_required_csv(uni_path, "features_univariado.csv")
+    if "match_id" not in uni.columns:
+        die("features_univariado.csv precisa conter 'match_id'")
 
-    # seleciona colunas relevantes de cada bloco
-    fu_cols = ["match_id","fair_p_home","fair_p_draw","fair_p_away","entropy_bits","gap_top_second"]
-    fb_cols = ["match_id","diff_ph_pa","ratio_ph_pa","entropy_x_gap","overround_x_entropy"]
-    fx_cols = ["match_id","xg_home_proxy","xg_away_proxy","xg_diff_proxy"]
-    w_cols  = ["match_id","temp_c","wind_speed_kph","precip_mm","relative_humidity"]
+    bi = read_optional_csv(bi_path)
+    xg = read_optional_csv(xg_path)
 
-    for lst, nm in [(fu_cols,"features_univariado"),
-                    (fb_cols,"features_bivariado"),
-                    (fx_cols,"features_xg"),
-                    (w_cols, "weather")]:
-        missing = [c for c in lst if c not in locals()[nm.split('_')[0]][:0].columns]  # apenas para mypy
-        # (checagem distinta por dataframe)
-    # checagem efetiva
-    for c in fu_cols:
-        if c not in fu.columns: die(f"{c} ausente em features_univariado.csv")
-    for c in fb_cols:
-        if c not in fb.columns: die(f"{c} ausente em features_bivariado.csv")
-    for c in fx_cols:
-        if c not in fx.columns: die(f"{c} ausente em features_xg.csv")
-    for c in w_cols:
-        if c not in w.columns: die(f"{c} ausente em weather.csv")
+    if bi is None and xg is None:
+        die("Pelo menos um dos arquivos precisa existir: features_bivariado.csv OU features_xg.csv")
 
-    # merges
-    df = fu.merge(fb, on="match_id", how="inner")
-    df = df.merge(fx, on="match_id", how="inner")
-    df = df.merge(w[w_cols], on="match_id", how="left")
+    if bi is not None and "match_id" not in bi.columns:
+        die("features_bivariado.csv precisa conter 'match_id'")
+    if xg is not None and "match_id" not in xg.columns:
+        die("features_xg.csv precisa conter 'match_id'")
 
-    # garante que clima exista para todas as partidas (estrito)
-    if df[["temp_c","wind_speed_kph","precip_mm","relative_humidity"]].isna().any().any():
-        die("Clima ausente para uma ou mais partidas após merge (weather.csv incompleto).")
+    # começa a base pela whitelist (garante ordem/escopo dos jogos)
+    base = wl.copy()
+    print(f"[context] Base (whitelist) linhas={len(base)}")
 
-    # score simples de contexto (exemplo determinístico e reprodutível)
-    # você pode evoluir esta fórmula; manteremos transparente:
-    # quanto maior a incerteza (entropy_bits), menor o score; quanto maior xg_diff e diff_ph_pa, maior o score.
-    df["context_score"] = (
-        0.25 * (df["diff_ph_pa"]) +
-        0.25 * (df["xg_diff_proxy"]) +
-        0.20 * (df["ratio_ph_pa"]) -
-        0.20 * (df["entropy_bits"]) +
-        0.10 * (1.0 / (1.0 + df["overround_x_entropy"]))  # penaliza overround alto * entropia
-    )
+    # join com univariado
+    df = base.merge(uni, on="match_id", how="left", suffixes=("", "_uni"))
+    if df["match_id"].isna().any():
+        die("Após merge com univariado houve perda de integridade em 'match_id'")
 
-    out_path = os.path.join(out_dir, "context_features.csv")
+    # join com bivariado (se houver)
+    if bi is not None:
+        cols_overlap = set(df.columns).intersection(set(bi.columns)) - {"match_id"}
+        bi_join = bi.rename(columns={c: f"{c}_bi" for c in cols_overlap})
+        df = df.merge(bi_join, on="match_id", how="left")
+
+    # join com xg (se houver)
+    if xg is not None:
+        cols_overlap = set(df.columns).intersection(set(xg.columns)) - {"match_id"}
+        xg_join = xg.rename(columns={c: f"{c}_xg" for c in cols_overlap})
+        df = df.merge(xg_join, on="match_id", how="left")
+
+    # sanity check de cobertura
+    if df.isna().all(axis=1).any():
+        # identifica linhas completamente vazias além de match_id/home/away
+        non_key = [c for c in df.columns if c not in {"match_id", "home", "away"}]
+        mask = df[non_key].isna().all(axis=1)
+        vazios = df.loc[mask, ["match_id", "home", "away"]]
+        if not vazios.empty:
+            die(f"Linhas sem features após junção (amostra):\n{vazios.head(5).to_string(index=False)}")
+
+    # grava
+    os.makedirs(rodada, exist_ok=True)
     df.to_csv(out_path, index=False)
     if args.debug:
-        print(f"[context] OK -> {out_path} (linhas={len(df)})")
-        print(df.head(10).to_csv(index=False))
+        print(f"[context] gravado {out_path} ({len(df)} linhas)")
+        print(df.head(10).to_string(index=False))
+
 
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as e:
-        die(f"Erro inesperado: {e}")
+    main()
