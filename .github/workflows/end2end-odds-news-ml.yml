@@ -8,15 +8,15 @@ on:
         required: true
         default: "2025"
       regions:
-        description: "Regiões de odds (theoddsapi) — CSV"
+        description: "Regiões de odds (CSV: uk,eu,us,au)"
         required: true
         default: "uk,eu,us,au"
       lookahead_days:
-        description: "Janela (dias) para buscar jogos futuros"
+        description: "Dias futuros para buscar jogos"
         required: true
         default: "3"
       bankroll:
-        description: "Bankroll inicial para Kelly"
+        description: "Bankroll inicial"
         required: true
         default: "1000"
       kelly_fraction:
@@ -32,7 +32,7 @@ on:
         required: true
         default: "14"
       round_to:
-        description: "Arredondamento (unidade monetária)"
+        description: "Arredondamento monetário"
         required: true
         default: "1"
       debug:
@@ -46,6 +46,10 @@ permissions:
 jobs:
   end2end:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
     env:
       SEASON: ${{ inputs.season }}
       REGIONS: ${{ inputs.regions }}
@@ -71,58 +75,57 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Extras necessários/ausentes em logs anteriores
+          # libs vistas faltando nos logs
           pip install pandas numpy scipy scikit-learn xgboost \
-                      requests python-dateutil pytz tqdm beautifulsoup4 \
-                      rapidfuzz Unidecode
+                     requests python-dateutil pytz tqdm beautifulsoup4 \
+                     rapidfuzz Unidecode
 
       - name: Prepare run folders and OUT_DIR
         id: prep
-        shell: bash
         run: |
           set -euo pipefail
           RUN_ID=$(date +%s)
           echo "RUN_ID=$RUN_ID" >> "$GITHUB_OUTPUT"
           echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
           mkdir -p "data/in" "${OUT_DIR}" "data/config"
-          # APIs obrigatórias
+          # Verificações de secrets obrigatórios
           [ -n "${THEODDS_API_KEY:-}" ] || { echo "::error::Faltando secret THEODDS_API_KEY"; exit 2; }
           [ -n "${X_RAPIDAPI_KEY:-}" ] || { echo "::error::Faltando secret X_RAPIDAPI_KEY"; exit 2; }
-          # NEWS opcional (não quebra o fluxo de odds/predição)
+          # NEWS é opcional
           if [ -z "${NEWSAPI_KEY:-}" ]; then
-            echo "::notice::NEWSAPI_KEY ausente — módulos de notícias serão ignorados se existirem."
+            echo "::notice::NEWSAPI_KEY ausente — módulos de notícia (se existirem) serão ignorados."
           fi
 
-      - name: Seed default config files (aliases / league_map)
-        shell: bash
+      - name: Seed default config files
         run: |
           set -euo pipefail
           mkdir -p data/config
-          # Se estiverem ausentes ou vazios, cria defaults válidos
+          # aliases.json
           if [ ! -s data/config/aliases.json ]; then
             cat > data/config/aliases.json <<'JSON'
 {"teams": {}, "leagues": {}}
 JSON
           fi
+          # league_map.json
           if [ ! -s data/config/league_map.json ]; then
             cat > data/config/league_map.json <<'JSON'
 {"mapping": {}}
 JSON
           fi
 
-      # 1) Whitelist automática pelas APIs (sem input manual)
+      # 1) Whitelist automática pelas APIs
       - name: Build whitelist from APIs (strict)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/build_whitelist_from_apis.py ] || { echo "::error::scripts/build_whitelist_from_apis.py não encontrado"; exit 3; }
+
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
 
           a=0
           until [ $a -ge 3 ]; do
@@ -131,8 +134,8 @@ JSON
               --season "${SEASON}" \
               --regions "${REGIONS}" \
               --lookahead-days "${LOOKAHEAD_DAYS}" \
-              ${DEBUG:+--debug} && break
-            a=$((a+1)); echo "retry whitelist: $a/3"; sleep $((5*a))
+              ${DEBUG_FLAG} && break
+            a=$((a+1)); echo "retry whitelist: ${a}/3"; sleep $((5*a))
           done
 
           WL="data/in/matches_whitelist.csv"
@@ -154,10 +157,10 @@ JSON
 
       # 2) Ingestão TheOddsAPI (obrigatória)
       - name: Ingest TheOddsAPI (strict)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py não encontrado."; exit 4; }
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
 
           a=0
           until [ $a -ge 3 ]; do
@@ -166,8 +169,8 @@ JSON
               --regions "${REGIONS}" \
               --aliases data/config/aliases.json \
               --league_map data/config/league_map.json \
-              ${DEBUG:+--debug} && break
-            a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
+              ${DEBUG_FLAG} && break
+            a=$((a+1)); echo "retry theodds: ${a}/3"; sleep $((5*a))
           done
 
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
@@ -179,10 +182,10 @@ JSON
 
       # 3) Ingestão API-Football (RapidAPI) — obrigatória
       - name: Ingest API-Football (strict)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py não encontrado."; exit 5; }
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
 
           a=0
           until [ $a -ge 3 ]; do
@@ -191,8 +194,8 @@ JSON
               --season "${SEASON}" \
               --aliases data/config/aliases.json \
               --league_map data/config/league_map.json \
-              ${DEBUG:+--debug} && break
-            a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
+              ${DEBUG_FLAG} && break
+            a=$((a+1)); echo "retry apifootball: ${a}/3"; sleep $((5*a))
           done
 
           OUT="${OUT_DIR}/odds_apifootball.csv"
@@ -204,15 +207,15 @@ JSON
 
       # 4) Consenso de odds (strict)
       - name: Build odds consensus (strict)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py não encontrado"; exit 6; }
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
 
           python -m scripts.consensus_odds_safe \
             --rodada "${OUT_DIR}" \
             --strict \
-            ${DEBUG:+--debug}
+            ${DEBUG_FLAG}
 
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
           test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv não gerado"; exit 6; }
@@ -225,52 +228,54 @@ JSON
 
       # 5) Predição a partir das odds
       - name: Predict from odds (market model)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/predict_from_odds.py ] || { echo "::error::scripts/predict_from_odds.py não encontrado"; exit 7; }
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
 
           python scripts/predict_from_odds.py \
             --rodada "${OUT_DIR}" \
             --allow-two-way \
-            ${DEBUG:+--debug}
+            ${DEBUG_FLAG}
 
           test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado"; exit 7; }
           head -n 20 "${OUT_DIR}/predictions_market.csv" || true
 
       # 6) Calibração
       - name: Calibrate probabilities
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py não encontrado"; exit 23; }
-          python scripts/calibrate_probs.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
+
+          python scripts/calibrate_probs.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv não gerado"; exit 23; }
           head -n 20 "${OUT_DIR}/calibrated_probs.csv" || true
 
       # 7) XG Univariado
       - name: XG Univariado
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/xg_univariado.py ] || { echo "::error::scripts/xg_univariado.py não encontrado"; exit 26; }
-          python scripts/xg_univariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
+
+          python scripts/xg_univariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv não gerado"; exit 26; }
           head -n 10 "${OUT_DIR}/features_univariado.csv" || true
 
       # 8) XG Bivariado
       - name: XG Bivariado
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariado.py ] || { echo "::error::scripts/xg_bivariado.py não encontrado"; exit 27; }
-          python scripts/xg_bivariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
+
+          python scripts/xg_bivariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv não gerado"; exit 27; }
           head -n 10 "${OUT_DIR}/features_bivariado.csv" || true
 
       # 9) Join de contexto (requer os dois XG)
       - name: Join contexto (XG + extras)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/feature_join_context.py ] || { echo "::error::scripts/feature_join_context.py não encontrado"; exit 28; }
@@ -278,37 +283,44 @@ JSON
             echo "::error::features_univariado.csv e/ou features_bivariado.csv ausentes em ${OUT_DIR}. Gere-as nas etapas de XG antes desta junção."
             exit 28
           fi
-          python scripts/feature_join_context.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
+
+          python scripts/feature_join_context.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/context_features.csv" || { echo "::error::context_features.csv não gerado"; exit 28; }
           head -n 10 "${OUT_DIR}/context_features.csv" || true
 
       # 10) Blend
       - name: Blend models
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/blend_models.py ] || { echo "::error::scripts/blend_models.py não encontrado"; exit 24; }
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
+
           python scripts/blend_models.py \
             --rodada "${OUT_DIR}" \
             --w_calib 0.65 \
             --w_market 0.35 \
             --use-context \
             --context-strength 0.15 \
-            ${DEBUG:+--debug}
+            ${DEBUG_FLAG}
+
           test -s "${OUT_DIR}/predictions_final.csv" || { echo "::error::predictions_final.csv não gerado"; exit 24; }
           head -n 20 "${OUT_DIR}/predictions_final.csv" || true
 
       # 11) Kelly
       - name: Kelly stakes
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
+
           export BANKROLL="${BANKROLL}"
           export KELLY_FRACTION="${KELLY_FRACTION}"
           export KELLY_CAP="${KELLY_CAP}"
           export KELLY_TOP_N="${KELLY_TOP_N}"
           export ROUND_TO="${ROUND_TO}"
-          python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+
+          if [ "${DEBUG}" = "true" ]; then DEBUG_FLAG="--debug"; else DEBUG_FLAG=""; fi
+
+          python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
           head -n 20 "${OUT_DIR}/kelly_stakes.csv" || true
