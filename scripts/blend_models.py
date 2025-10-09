@@ -4,265 +4,219 @@
 """
 blend_models.py
 
-Blend entre:
-- Probabilidades de mercado (predictions_market.csv) OU odds_consensus -> implícitas
-- Probabilidades calibradas (calibrated_probs.csv)
-- Ajuste de contexto (context_features.csv) opcional
+Gera predictions_final.csv a partir de:
+- predictions_blend.csv (base)
+- calibrated_probs.csv (calibração Bayes/Dirichlet)
+- context_features.csv (clima + injuries + “entropy_x_gap” + xg_diff_proxy)
 
-Saídas:
-- {OUT_DIR}/predictions_blend.csv
-- {OUT_DIR}/predictions_final.csv
+Parâmetros:
+  --rodada OUT_DIR
+  --w_calib float (peso da calibração - default 0.65)
+  --w_market float (peso do mercado dentro do predictions_blend - default 0.35)
+  --use-context (flag) ativa ajustes contextuais
+  --context-strength float [0..1] (quanto o contexto pode deslocar p; default 0.15)
+
+Saída:
+  {OUT_DIR}/predictions_final.csv com colunas:
+    match_key,home,away,p_home,p_draw,p_away,used_sources,notes
 """
 
 import argparse
+import csv
 import os
 import sys
-import math
-from typing import Optional
-import pandas as pd
+from math import isfinite
 
-
-def dbg(on: bool, *msg):
-    if on:
-        print("[blend]", *msg, flush=True)
-
-
-def read_csv_safe(path: str) -> Optional[pd.DataFrame]:
+def _read_csv(path):
     if not os.path.isfile(path):
-        return None
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        rd = csv.DictReader(f)
+        return list(rd)
+
+def _to_f(x, default=0.0):
     try:
-        df = pd.read_csv(path)
-        if df.shape[0] == 0:
-            return None
-        return df
-    except Exception:
-        return None
+        v = float(x)
+        return v if isfinite(v) else default
+    except:
+        return default
 
+def _renorm(p1, pX, p2):
+    s = p1 + pX + p2
+    if s <= 0:
+        return (1/3, 1/3, 1/3)
+    return (p1/s, pX/s, p2/s)
 
-def softmax3(a, b, c):
-    m = max(a, b, c)
-    ea, eb, ec = math.exp(a - m), math.exp(b - m), math.exp(c - m)
-    s = ea + eb + ec
-    return ea / s, eb / s, ec / s
+def load_base(rodada):
+    # predictions_blend.csv contém p_ do mercado (ou só mercado quando calib ausente)
+    base_path = os.path.join(rodada, "predictions_blend.csv")
+    rows = _read_csv(base_path)
+    out = {}
+    for r in rows:
+        key = r.get("match_id") or r.get("match_key")
+        if not key:
+            # tenta construir
+            home = r.get("team_home") or r.get("home")
+            away = r.get("team_away") or r.get("away")
+            key = f"{(home or '').strip().lower()}__vs__{(away or '').strip().lower()}"
+        out[str(key)] = {
+            "match_key": key,
+            "home": r.get("team_home") or r.get("home"),
+            "away": r.get("team_away") or r.get("away"),
+            "p_home": _to_f(r.get("p_home")),
+            "p_draw": _to_f(r.get("p_draw")),
+            "p_away": _to_f(r.get("p_away")),
+            "used_sources": r.get("used_sources") or "market",
+            "notes": []
+        }
+    return out
 
+def load_calib(rodada):
+    p = os.path.join(rodada, "calibrated_probs.csv")
+    rows = _read_csv(p)
+    out = {}
+    for r in rows:
+        mid = r.get("match_id") or ""
+        out[mid.strip().lower().replace(" ", "_")] = (
+            _to_f(r.get("calib_home")), _to_f(r.get("calib_draw")), _to_f(r.get("calib_away"))
+        )
+    return out
 
-def clamp01(x, lo=1e-6, hi=1.0 - 1e-6):
-    return max(lo, min(hi, x))
+def load_context(rodada):
+    p = os.path.join(rodada, "context_features.csv")
+    rows = _read_csv(p)
+    out = {}
+    for r in rows:
+        key = r.get("match_key") or r.get("match_id")
+        if not key:
+            home = r.get("home") or r.get("team_home")
+            away = r.get("away") or r.get("team_away")
+            key = f"{(home or '').strip().lower()}__vs__{(away or '').strip().lower()}"
+        out[str(key)] = {
+            "entropy_bits": _to_f(r.get("entropy_bits"), 0.0),
+            "xg_diff_proxy": _to_f(r.get("xg_diff_proxy"), 0.0),
+            "inj_h": _to_f(r.get("inj_home_weight"), 0.0),
+            "inj_a": _to_f(r.get("inj_away_weight"), 0.0),
+            "wind_kph": _to_f(r.get("wind_speed_kph"), 0.0),
+            "precip_mm": _to_f(r.get("precip_mm"), 0.0)
+        }
+    return out
 
+def apply_calibration(base, calib, w_calib):
+    # Combina p_base com p_calib (se houver) por convex combination
+    notes = []
+    for key, row in base.items():
+        # tenta casar calib por padrões comuns de chave
+        variants = [
+            key,
+            key.replace("__vs__", "__").replace(" ", "_"),
+            f"{(row['home'] or '').strip().replace(' ','_')}__{(row['away'] or '').strip().replace(' ','_')}".lower()
+        ]
+        cvec = None
+        for v in variants:
+            if v in calib:
+                cvec = calib[v]
+                break
+        if cvec:
+            b = (row["p_home"], row["p_draw"], row["p_away"])
+            p = (
+                (1 - w_calib) * b[0] + w_calib * cvec[0],
+                (1 - w_calib) * b[1] + w_calib * cvec[1],
+                (1 - w_calib) * b[2] + w_calib * cvec[2],
+            )
+            row["p_home"], row["p_draw"], row["p_away"] = _renorm(*p)
+            row["used_sources"] = (row["used_sources"] + "+calib").strip("+")
+            row["notes"].append(f"calib:{w_calib:.2f}")
+        else:
+            row["notes"].append("calib:absent")
+    return base
 
-def normalize_team_key(s: str) -> str:
-    if not isinstance(s, str):
-        s = str(s)
-    return " ".join(s.strip().split()).lower()
+def apply_context(base, ctx, strength):
+    # Ajustes pequenos, limitados por 'strength' (0..1).
+    # Heurísticas:
+    # - Vento > 25 kph ou precip_mm > 0.2 => +p_draw (até strength*0.05)
+    # - Entropia > 1.55 e xg_diff < 0.28 => +p_draw e -no favorito (até strength*0.07)
+    # - Injuries: se inj_weight_sum_home >> away, penaliza home (e vice-versa) (até strength*0.06)
+    for key, row in base.items():
+        c = ctx.get(key)
+        if not c:
+            row["notes"].append("ctx:none")
+            continue
+        p1, pX, p2 = row["p_home"], row["p_draw"], row["p_away"]
 
+        # clima
+        bump_draw = 0.0
+        if c["wind_kph"] > 25 or c["precip_mm"] > 0.2:
+            bump_draw += 0.02 * strength
 
-def make_homeaway_key(home: str, away: str) -> str:
-    return f"{home}__{away}"
+        # incerteza estrutural
+        if c["entropy_bits"] > 1.55 and c["xg_diff_proxy"] < 0.28:
+            bump_draw += 0.03 * strength
+            # tira um pouco do favorito (lado com maior p)
+            if p1 >= p2:
+                p1 -= 0.02 * strength
+            else:
+                p2 -= 0.02 * strength
 
+        # injuries
+        diff_inj = c["inj_h"] - c["inj_a"]  # positivo: casa mais desfalcada
+        if abs(diff_inj) > 0.9:  # só aplica quando diferença é relevante
+            delta = min(0.04 * strength, 0.01 * abs(diff_inj))
+            if diff_inj > 0:
+                p1 -= delta
+                pX += delta * 0.6
+                p2 += delta * 0.4
+            else:
+                p2 -= delta
+                pX += delta * 0.6
+                p1 += delta * 0.4
 
-def implied_probs_from_odds(row):
-    oh, od, oa = float(row["odds_home"]), float(row["odds_draw"]), float(row["odds_away"])
-    imp_h, imp_d, imp_a = 1.0 / oh, 1.0 / od, 1.0 / oa
-    total = imp_h + imp_d + imp_a
-    return imp_h / total, imp_d / total, imp_a / total
+        # aplica draw bump
+        pX += bump_draw
+        row["p_home"], row["p_draw"], row["p_away"] = _renorm(p1, pX, p2)
+        row["notes"].append(f"ctx:{strength:.2f}")
+    return base
 
-
-def load_market(rodada: str, debug: bool) -> pd.DataFrame:
-    pm_path = os.path.join(rodada, "predictions_market.csv")
-    df = read_csv_safe(pm_path)
-    if df is not None and {"match_key", "home", "away", "p_home", "p_draw", "p_away"}.issubset(df.columns):
-        df = df.copy()
-        df["key_norm"] = df["home"].apply(normalize_team_key) + "||" + df["away"].apply(normalize_team_key)
-        df["ha_key"] = df.apply(lambda r: make_homeaway_key(str(r["home"]), str(r["away"])), axis=1)
-        dbg(debug, f"market: predictions_market.csv ({len(df)} linhas)")
-        return df[["match_key", "home", "away", "p_home", "p_draw", "p_away", "key_norm", "ha_key"]]
-
-    oc_path = os.path.join(rodada, "odds_consensus.csv")
-    oc = read_csv_safe(oc_path)
-    if oc is None or not {"team_home", "team_away", "odds_home", "odds_draw", "odds_away"}.issubset(oc.columns):
-        raise FileNotFoundError("Nem predictions_market.csv nem odds_consensus.csv disponíveis para market.")
-    oc = oc.copy()
-    probs = oc.apply(implied_probs_from_odds, axis=1, result_type="expand")
-    oc[["p_home", "p_draw", "p_away"]] = probs
-    oc = oc.rename(columns={"team_home": "home", "team_away": "away"})
-    oc["match_key"] = oc["home"].astype(str).str.lower().str.replace(" ", "-") + "__vs__" + oc["away"].astype(str).str.lower().str.replace(" ", "-")
-    oc["key_norm"] = oc["home"].apply(normalize_team_key) + "||" + oc["away"].apply(normalize_team_key)
-    oc["ha_key"] = oc.apply(lambda r: make_homeaway_key(str(r["home"]), str(r["away"])), axis=1)
-    dbg(debug, f"market: odds_consensus.csv ({len(oc)} linhas)")
-    return oc[["match_key", "home", "away", "p_home", "p_draw", "p_away", "key_norm", "ha_key"]]
-
-
-def load_calibrated(rodada: str, market_df: pd.DataFrame, debug: bool) -> Optional[pd.DataFrame]:
-    path = os.path.join(rodada, "calibrated_probs.csv")
-    df = read_csv_safe(path)
-    if df is None or not {"match_id", "calib_home", "calib_draw", "calib_away"}.issubset(df.columns):
-        dbg(debug, "calibrated_probs.csv ausente ou inválido — seguindo sem calib.")
-        return None
-    df = df.copy()
-    split = df["match_id"].astype(str).str.split("__", n=1, expand=True)
-    if split.shape[1] == 2:
-        df["home"] = split[0].astype(str)
-        df["away"] = split[1].astype(str)
-    else:
-        df["home"] = df["match_id"].astype(str)
-        df["away"] = ""
-
-    df["key_norm"] = df["home"].apply(normalize_team_key) + "||" + df["away"].apply(normalize_team_key)
-    df["ha_key"] = df.apply(lambda r: make_homeaway_key(str(r["home"]), str(r["away"])), axis=1)
-    cols_keep = ["calib_home", "calib_draw", "calib_away", "key_norm", "ha_key"]
-    dbg(debug, f"calib: linhas={len(df)}")
-    return df[cols_keep]
-
-
-def ensure_context_score(ctx: pd.DataFrame, debug: bool) -> pd.DataFrame:
-    ctx = ctx.copy()
-    if "context_score" in ctx.columns:
-        return ctx
-
-    w_gap = 0.30
-    w_xg = 0.30
-    w_inj = 0.20
-    w_news = 0.15
-    w_weather = 0.05
-
-    score = pd.Series(0.0, index=ctx.index, dtype=float)
-
-    if "diff_ph_pa" in ctx.columns:
-        score = score + w_gap * ctx["diff_ph_pa"].fillna(0.0)
-    if "xg_diff_proxy" in ctx.columns:
-        score = score + w_xg * ctx["xg_diff_proxy"].fillna(0.0)
-    if {"inj_home", "inj_away"}.issubset(ctx.columns):
-        inj_h = ctx["inj_home"].fillna(0.0).astype(float)
-        inj_a = ctx["inj_away"].fillna(0.0).astype(float)
-        denom = (inj_h + inj_a).replace(0, 1.0)
-        score = score + w_inj * (inj_a - inj_h) / denom
-    if {"news_mentions_home", "news_mentions_away"}.issubset(ctx.columns):
-        n_h = ctx["news_mentions_home"].fillna(0.0).astype(float)
-        n_a = ctx["news_mentions_away"].fillna(0.0).astype(float)
-        denom = (n_h + n_a).replace(0, 1.0)
-        score = score + w_news * (n_h - n_a) / denom
-    if {"wind_speed_kph", "precip_mm"}.issubset(ctx.columns):
-        wind = ctx["wind_speed_kph"].fillna(0.0).astype(float)
-        rain = ctx["precip_mm"].fillna(0.0).astype(float)
-        penal = (wind > 30).astype(float) * 0.5 + (rain > 0.5).astype(float) * 0.5
-        score = score - w_weather * penal
-
-    score = score.clip(-1.0, 1.0)
-    ctx["context_score"] = score
-    return ctx
-
-
-def load_context(rodada: str, debug: bool) -> Optional[pd.DataFrame]:
-    path = os.path.join(rodada, "context_features.csv")
-    df = read_csv_safe(path)
-    if df is None:
-        dbg(debug, "context_features.csv ausente — blend seguirá sem contexto.")
-        return None
-    for c in ["home", "away", "match_id", "match_key"]:
-        if c in df.columns:
-            df[c] = df[c].astype(str)
-    df["key_norm"] = df["home"].apply(normalize_team_key) + "||" + df["away"].apply(normalize_team_key)
-    df["ha_key"] = df.apply(lambda r: make_homeaway_key(str(r["home"]), str(r["away"])), axis=1)
-    df = ensure_context_score(df, debug)
-    return df[["match_key", "match_id", "home", "away", "key_norm", "ha_key", "context_score"]]
-
+def write_out(rodada, base):
+    outp = os.path.join(rodada, "predictions_final.csv")
+    cols = ["match_key","home","away","p_home","p_draw","p_away","used_sources","notes"]
+    with open(outp, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for _, row in base.items():
+            w.writerow({
+                "match_key": row["match_key"],
+                "home": row["home"],
+                "away": row["away"],
+                "p_home": f"{row['p_home']:.6f}",
+                "p_draw": f"{row['p_draw']:.6f}",
+                "p_away": f"{row['p_away']:.6f}",
+                "used_sources": row["used_sources"],
+                "notes": ";".join(row["notes"])
+            })
+    print(f"[blend] OK -> {outp}")
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Diretório da rodada (ex.: data/out/123456)")
+    ap.add_argument("--rodada", required=True)
     ap.add_argument("--w_calib", type=float, default=0.65)
-    ap.add_argument("--w_market", type=float, default=0.35)
-    ap.add_argument("--use-context", dest="use_context", action="store_true", default=False)
-    ap.add_argument("--context-strength", type=float, default=0.15, help="Intensidade do tilt de contexto (0..1)")
+    ap.add_argument("--w_market", type=float, default=0.35)  # mantido por compatibilidade de logs
+    ap.add_argument("--use-context", dest="use_context", action="store_true")
+    ap.add_argument("--context-strength", type=float, default=0.15)
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
     rodada = args.rodada
-    w_calib = float(args.w_calib)
-    w_market = float(args.w_market)
-    use_context = bool(args.use_context)
-    ctx_strength = float(args.context_strength)
-    debug = args.debug
+    base = load_base(rodada)
+    calib = load_calib(rodada)
 
-    dbg(debug, f"rodada: {rodada}")
+    base = apply_calibration(base, calib, max(0.0, min(1.0, args.w_calib)))
 
-    market = load_market(rodada, debug)
-    calib = load_calibrated(rodada, market, debug)
-    ctx = load_context(rodada, debug)
+    if args.use_context:
+        ctx = load_context(rodada)
+        base = apply_context(base, ctx, max(0.0, min(1.0, args.context_strength)))
 
-    base = market.copy()
-
-    if calib is not None:
-        tmp = base.merge(calib[["calib_home", "calib_draw", "calib_away", "ha_key"]],
-                         on="ha_key", how="left")
-        miss = tmp["calib_home"].isna().sum()
-        if miss > 0:
-            tmp2 = base.merge(calib[["calib_home", "calib_draw", "calib_away", "key_norm"]],
-                              on="key_norm", how="left")
-            for c in ["calib_home", "calib_draw", "calib_away"]:
-                tmp[c] = tmp[c].fillna(tmp2[c])
-        base = tmp
-    else:
-        base["calib_home"] = base["p_home"]
-        base["calib_draw"] = base["p_draw"]
-        base["calib_away"] = base["p_away"]
-
-    if w_market < 0 or w_calib < 0:
-        raise ValueError("Pesos devem ser >= 0.")
-    if w_market + w_calib == 0:
-        raise ValueError("Soma dos pesos não pode ser 0.")
-    wsum = w_market + w_calib
-    w_market /= wsum
-    w_calib /= wsum
-
-    base["p_blend_home"] = w_market * base["p_home"] + w_calib * base["calib_home"]
-    base["p_blend_draw"] = w_market * base["p_draw"] + w_calib * base["calib_draw"]
-    base["p_blend_away"] = w_market * base["p_away"] + w_calib * base["calib_away"]
-
-    s = base["p_blend_home"] + base["p_blend_draw"] + base["p_blend_away"]
-    for c in ["p_blend_home", "p_blend_draw", "p_blend_away"]:
-        base[c] = (base[c] / s).clip(1e-6, 1 - 1e-6)
-
-    out_blend = base[["match_key", "home", "away", "p_blend_home", "p_blend_draw", "p_blend_away"]].copy()
-    out_blend = out_blend.rename(columns={
-        "p_blend_home": "p_home",
-        "p_blend_draw": "p_draw",
-        "p_blend_away": "p_away"
-    })
-    out_blend.to_csv(os.path.join(rodada, "predictions_blend.csv"), index=False)
-    dbg(debug, f"OK -> {os.path.join(rodada, 'predictions_blend.csv')}")
-
-    if use_context and ctx is not None and ctx_strength > 0:
-        base = base.merge(ctx[["ha_key", "context_score"]], on="ha_key", how="left")
-        base["context_score"] = base["context_score"].fillna(0.0).astype(float)
-        for idx, row in base.iterrows():
-            ph, pd, pa = float(row["p_blend_home"]), float(row["p_blend_draw"]), float(row["p_blend_away"])
-            ph = clamp01(ph); pd = clamp01(pd); pa = clamp01(pa)
-            lh, ld, la = math.log(ph), math.log(pd), math.log(pa)
-            tilt = ctx_strength * float(row["context_score"])
-            lh2 = lh + tilt
-            la2 = la - tilt
-            ph2, pd2, pa2 = softmax3(lh2, ld, la2)
-            base.at[idx, "p_final_home"] = ph2
-            base.at[idx, "p_final_draw"] = pd2
-            base.at[idx, "p_final_away"] = pa2
-    else:
-        base["p_final_home"] = base["p_blend_home"]
-        base["p_final_draw"] = base["p_blend_draw"]
-        base["p_final_away"] = base["p_blend_away"]
-
-    out = base[["match_key", "home", "away", "p_final_home", "p_final_draw", "p_final_away"]].copy()
-    out = out.rename(columns={"p_final_home": "p_home", "p_final_draw": "p_draw", "p_final_away": "p_away"})
-    out["used_sources"] = ["market,calib,context" if (use_context and ctx is not None) else "market,calib"] * len(out)
-    out["weights"] = [f"market:{w_market:.2f};calib:{w_calib:.2f}" + (f";context:{ctx_strength:.2f}" if (use_context and ctx is not None) else "")] * len(out)
-    out_path = os.path.join(rodada, "predictions_final.csv")
-    out.to_csv(out_path, index=False)
-    dbg(debug, f"OK -> {out_path}")
-
+    write_out(rodada, base)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"[blend][ERRO] {e}", file=sys.stderr)
-        sys.exit(1)
+    main()
