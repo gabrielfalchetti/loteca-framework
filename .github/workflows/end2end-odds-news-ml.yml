@@ -68,7 +68,6 @@ jobs:
           set -euo pipefail
           [ "${HAS_THEODDS}" = "true" ] || { echo "::error::Falta THEODDS_API_KEY"; exit 2; }
           [ "${HAS_XRAPI}"   = "true" ] || { echo "::error::Falta X_RAPIDAPI_KEY"; exit 2; }
-          # Notícias e W&B não travam o pipeline, mas registramos aviso
           [ "${HAS_NEWS}"  = "true" ] || { echo "::notice::NEWSAPI_KEY ausente — bloco de notícias será pulado."; }
           [ "${HAS_WANDB}" = "true" ] || { echo "::notice::WANDB_API_KEY ausente — tracking desligado."; }
 
@@ -103,7 +102,7 @@ jobs:
           echo "===== Preview whitelist ====="
           head -n 20 "$WL" || true
 
-      # 2) Ingest THEODDS (obrigatório)
+      # 2) Ingest THEODDS (obrigatório) — REMOVIDO --season (script não aceita)
       - name: Ingest odds — TheOddsAPI (STRICT)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
@@ -113,7 +112,6 @@ jobs:
           a=0; until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
               --rodada "${OUT_DIR}" \
-              --season "${SEASON}" \
               --regions "${REGIONS}" \
               ${DEBUG:+--debug} && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
@@ -197,8 +195,6 @@ jobs:
           set -euo pipefail
           [ -f scripts/feature_join_context.py ] || { echo "::error::scripts/feature_join_context.py não encontrado"; exit 28; }
 
-          # Se seu script exige features_univariado/bivariado, gere-as antes.
-          # Aqui validamos presença, para evitar o erro visto anteriormente.
           if [ ! -s "${OUT_DIR}/features_univariado.csv" ] || [ ! -s "${OUT_DIR}/features_bivariado.csv" ]; then
             echo "::error::features_univariado.csv e/or features_bivariado.csv ausentes em ${OUT_DIR}. Gere-as nas etapas de XG antes desta junção."
             exit 28
@@ -208,7 +204,7 @@ jobs:
           test -s "${OUT_DIR}/context_features.csv" || { echo "::error::context_features.csv não gerado"; exit 28; }
           head -n 10 "${OUT_DIR}/context_features.csv" || true
 
-      # 9) XG UNIVARIADO/BIVARIADO (treino/pred) — obrigatórios para robustez
+      # 9) XG UNIVARIADO/BIVARIADO (treino/pred) — obrigatórios
       - name: XG Univariado (train/predict)
         run: |
           set -euo pipefail
@@ -223,12 +219,11 @@ jobs:
           python scripts/xg_bivariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/pred_bivariado.csv" || { echo "::error::pred_bivariado.csv não gerado"; exit 30; }
 
-      # 10) BLEND (calibrado + mercado + contexto + XG) — use flags corretas
+      # 10) BLEND (calibrado + mercado + contexto + XG)
       - name: Blend models
         run: |
           set -euo pipefail
           [ -f scripts/blend_models.py ] || { echo "::error::scripts/blend_models.py não encontrado"; exit 24; }
-          # use-context é flag booleana (NÃO passe "true")
           python scripts/blend_models.py \
             --rodada "${OUT_DIR}" \
             --w_calib 0.65 \
