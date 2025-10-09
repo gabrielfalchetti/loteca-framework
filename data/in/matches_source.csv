@@ -1,7 +1,16 @@
 match_id,home,away,source,lat,lon
-1,Atletico-MG,Sport,manual,-19.9642,-44.0096
-2,Cuiaba,Novorizontino,manual,-15.6008,-56.1189
-3,Operario-PR,Athletic Club,manual,-25.0947,-50.1582
-4,Mirassol,Fluminense,manual,-20.8156,-49.5173
-5,Avai,Volta Redonda,manual,-27.6705,-48.5462
-6,America-MG,Vila Nova,manual,-19.9017,-43.9150
+1,Ferroviaria,Chapecoense,manual,-21.79,-48.18
+2,Coritiba,Atletico-GO,manual,-25.43,-49.27
+3,Remo,Athletico-PR,manual,-1.45,-48.49
+4,Athletic Club,Goias,manual,-21.13,-44.26
+5,Caxias do Sul,Floresta EC,manual,-29.17,-51.18
+6,Nautico,Brusque,manual,-8.05,-34.90
+7,Ponte Preta,Guarani,manual,-22.90,-47.06
+8,Londrina,Sao Bernardo,manual,-23.31,-51.16
+9,Palmeiras,Juventude,manual,-23.55,-46.66
+10,Novorizontino,Operario-PR,manual,-21.47,-49.22
+11,Criciuma,America-MG,manual,-28.68,-49.37
+12,Vila Nova,Amazonas,manual,-16.68,-49.25
+13,Cuiaba,Coritiba,manual,-15.60,-56.10
+14,Volta Redonda,Atletico-GO,manual,-22.52,-44.10
+15,CRB,Ferroviaria,manual,-9.65,-35.72
