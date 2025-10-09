@@ -21,15 +21,16 @@ on:
         default: "true"
 
 env:
-  SEASON: ${{ inputs.season || '2025' }}
-  REGIONS: ${{ inputs.regions || 'uk,eu,us,au' }}
-  LOOKAHEAD_DAYS: ${{ inputs.lookahead_days || '3' }}
+  # usa os defaults do workflow_dispatch; sem '||' pra evitar parse chato
+  SEASON: ${{ inputs.season }}
+  REGIONS: ${{ inputs.regions }}
+  LOOKAHEAD_DAYS: ${{ inputs.lookahead_days }}
   BANKROLL: "1000"
   KELLY_FRACTION: "0.5"
   KELLY_CAP: "0.1"
   KELLY_TOP_N: "14"
   ROUND_TO: "1"
-  DEBUG: ${{ inputs.debug || 'true' }}
+  DEBUG: ${{ inputs.debug }}
 
 jobs:
   e2e:
@@ -262,7 +263,7 @@ PY
         run: |
           set -euo pipefail
           if [ -f scripts/news_ingest_safe.py ]; then
-            python scripts/news_ingest_safe.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}" || true
+            python scripts/news_ingest_safe.py --rodada "${OUT_DIR}" ${DEBUG:+--debug} || true
           else
             echo "::notice::scripts/news_ingest_safe.py não encontrado — pulando"
           fi
