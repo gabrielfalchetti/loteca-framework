@@ -1,204 +1,257 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-scripts/predict_from_odds.py — STRICT MODE
-
-Objetivo:
-  Converter odds (H2H) reais em probabilidades implícitas e "justas" (removendo overround),
-  gerando picks 1X2 e uma margem de confiança simples.
-
-Política STRICT:
-  - 🚫 NÃO roda com entradas vazias/incompletas.
-  - 🚫 NÃO cria dados fictícios.
-  - ✅ Exige odds de consenso válidas para TODOS os jogos da whitelist.
-  - ✅ Falha hard (exit 98) se qualquer pré-condição não for atendida.
-
-Entradas obrigatórias (no mesmo OUT_DIR):
-  - odds_consensus.csv  [colunas: match_id,team_home,team_away,odds_home,odds_draw,odds_away]
-    (de preferência produzido pelo scripts/consensus_odds_safe.py STRICT)
-
-Saída:
-  - predictions_market.csv  [colunas: match_key,home,away,odd_home,odd_draw,odd_away,
-                             p_home,p_draw,p_away,pick_1x2,conf_margin]
-
-Uso:
-  python scripts/predict_from_odds.py --rodada data/out/<RODADA_ID> [--debug]
-"""
+# scripts/predict_from_odds.py
+from __future__ import annotations
 
 import argparse
+import csv
 import os
 import sys
+from typing import Tuple
+
 import pandas as pd
 import numpy as np
-import unicodedata
-import re
 
-EXIT_OK = 0
-EXIT_CRITICAL = 98
 
-# ========== Logging ==========
-def log(msg): print(msg, flush=True)
-def err(msg): print(f"::error::{msg}", flush=True)
-def warn(msg): print(f"Warning: {msg}", flush=True)
+REQUIRED = ["match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away"]
+OUT_COLS = [
+    "match_id",
+    "team_home",
+    "team_away",
+    "prob_home",
+    "prob_draw",
+    "prob_away",
+    "pick",
+    "margin",
+    "notes",
+]
 
-# ========== Utils ==========
-_norm_space = re.compile(r"\s+")
-_norm_punct = re.compile(r"[^\w\s]+")
 
-def normalize(s: str) -> str:
-    if not isinstance(s, str):
+def log(msg: str, flush: bool = True):
+    print(msg, flush=flush)
+
+
+def err(msg: str, code: int):
+    print(f"##[error]{msg}")
+    sys.exit(code)
+
+
+def read_consensus(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        err(f"Arquivo não encontrado: {path}", 7)
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        err(f"Falha ao ler {path}: {e}", 7)
+    return df
+
+
+def coerce_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return np.nan
+
+
+def implied_probs_3way(oh: float, od: float, oa: float) -> Tuple[float, float, float, float]:
+    """
+    Converte odds decimais (home/draw/away) em probabilidades implícitas,
+    removendo o vigorish pela normalização simples.
+    Retorna (ph, pd, pa, oi_sum) onde oi_sum = soma das probabilidades implícitas brutas (com juice).
+    """
+    inv = []
+    for o in [oh, od, oa]:
+        if o is None or np.isnan(o) or o <= 1.0:
+            inv.append(np.nan)
+        else:
+            inv.append(1.0 / o)
+    if any(np.isnan(inv)):
+        return (np.nan, np.nan, np.nan, np.nan)
+    s = sum(inv)
+    return inv[0] / s, inv[1] / s, inv[2] / s, s
+
+
+def implied_probs_2way(oh: float, oa: float) -> Tuple[float, float, float, float]:
+    """
+    Converte odds decimais (home/away) em probabilidades implícitas 2-way (sem empate).
+    Retorna (ph, 0.0, pa, oi_sum)
+    """
+    inv_h = np.nan if (oh is None or np.isnan(oh) or oh <= 1.0) else 1.0 / oh
+    inv_a = np.nan if (oa is None or np.isnan(oa) or oa <= 1.0) else 1.0 / oa
+    if np.isnan(inv_h) or np.isnan(inv_a):
+        return (np.nan, np.nan, np.nan, np.nan)
+    s = inv_h + inv_a
+    return inv_h / s, 0.0, inv_a / s, s
+
+
+def choose_pick(ph: float, pd: float, pa: float) -> str:
+    if np.isnan(ph) and np.isnan(pd) and np.isnan(pa):
         return ""
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    s = _norm_punct.sub(" ", s.lower())
-    s = _norm_space.sub(" ", s).strip()
-    return s
-
-def make_match_key(home: str, away: str) -> str:
-    return f"{normalize(home)}__vs__{normalize(away)}"
-
-def implied_from_decimal(odds):
-    """Transforma odd decimal em probabilidade implícita: 1/odd (com proteção)."""
-    with np.errstate(divide="ignore", invalid="ignore"):
-        p = 1.0 / np.clip(odds, 1e-12, None)
-    p = np.where(np.isfinite(p), p, np.nan)
-    return p
-
-def remove_overround(p_home, p_draw, p_away):
-    """Normaliza para remover overround mantendo proporções."""
-    s = p_home + p_draw + p_away
-    # se alguma prob é nan, retorna nans (será tratado adiante)
-    if np.any(~np.isfinite([p_home, p_draw, p_away])) or not np.isfinite(s) or s <= 0:
-        return np.nan, np.nan, np.nan
-    return p_home / s, p_draw / s, p_away / s
-
-def pick_1x2_row(ph, pd, pa):
     arr = np.array([ph, pd, pa], dtype=float)
-    if np.any(~np.isfinite(arr)):
-        return "?", np.nan
-    i = int(np.argmax(arr))
-    label = ["1", "X", "2"][i]
-    # margem de confiança: diferença entre maior e segundo maior
-    top = np.sort(arr)[-1]
-    second = np.sort(arr)[-2]
-    return label, float(top - second)
+    idx = int(np.nanargmax(arr))
+    return ["HOME", "DRAW", "AWAY"][idx]
 
-def must_have_columns(df, cols, path_label):
-    miss = [c for c in cols if c not in df.columns]
-    if miss:
-        err(f"[predict] Colunas ausentes em {path_label}: {miss}")
-        sys.exit(EXIT_CRITICAL)
 
-# ========== Main ==========
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Diretório da rodada (ex.: data/out/123456)")
-    ap.add_argument("--debug", action="store_true")
-    args = ap.parse_args()
+def validate_and_prepare(df: pd.DataFrame, strict: bool, allow_two_way: bool, debug: bool) -> pd.DataFrame:
+    # Renomeações defensivas (se vieram nomes alternativos)
+    ren = {}
+    lower = {c.lower(): c for c in df.columns}
+    for want in REQUIRED:
+        if want in df.columns:
+            continue
+        # mapas simples
+        alt = {
+            "team_home": ["home", "time_casa"],
+            "team_away": ["away", "time_fora"],
+            "odds_home": ["price_home", "home_odds"],
+            "odds_draw": ["price_draw", "draw_odds"],
+            "odds_away": ["price_away", "away_odds"],
+            "match_id": ["id", "game_id"],
+        }.get(want, [])
+        found = None
+        for a in alt:
+            if a in lower:
+                found = lower[a]
+                break
+        if found:
+            ren[found] = want
 
-    out_dir = args.rodada if os.path.isdir(args.rodada) else os.path.join("data", "out", str(args.rodada))
-    os.makedirs(out_dir, exist_ok=True)
-    log(f"[predict] OUT_DIR = {out_dir}")
+    if ren:
+        df = df.rename(columns=ren)
 
-    # ---- Carrega odds_consensus STRICT ----
-    oc_path = os.path.join(out_dir, "odds_consensus.csv")
-    if not os.path.isfile(oc_path):
-        err(f"[predict] odds_consensus.csv ausente em {oc_path}.")
-        sys.exit(EXIT_CRITICAL)
+    # Garantir colunas presentes (cria vazias quando não existem)
+    for c in REQUIRED:
+        if c not in df.columns:
+            df[c] = np.nan
 
-    df = pd.read_csv(oc_path)
-    if df.empty:
-        err(f"[predict] odds_consensus.csv está vazio em {oc_path}.")
-        sys.exit(EXIT_CRITICAL)
+    # Tipagens
+    df["match_id"] = df["match_id"].astype(str)
+    for c in ["team_home", "team_away"]:
+        df[c] = df[c].astype(str)
 
-    must_have_columns(
-        df,
-        ["match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away"],
-        "odds_consensus.csv"
+    for c in ["odds_home", "odds_draw", "odds_away"]:
+        df[c] = df[c].apply(coerce_float)
+
+    # Limpeza: odds <= 1.0 => NaN
+    for c in ["odds_home", "odds_draw", "odds_away"]:
+        df.loc[df[c] <= 1.0, c] = np.nan
+
+    # Marcar linhas 2-way (sem empate)
+    df["two_way"] = df["odds_draw"].isna()
+
+    if not allow_two_way and df["two_way"].any():
+        bad = df[df["two_way"]][["match_id", "team_home", "team_away"]]
+        if strict:
+            log("##[error][predict] Mercados 2-way detectados mas --allow-two-way está desabilitado.")
+            log(bad.to_string(index=False))
+            sys.exit(98)
+        # tolerante: descarta 2-way
+        df = df[~df["two_way"]].copy()
+
+    # Se uma linha 3-way tiver qualquer odd inválida, marcar para descarte
+    df["invalid_3w"] = (~df["two_way"]) & (
+        df["odds_home"].isna() | df["odds_draw"].isna() | df["odds_away"].isna()
     )
 
-    # Checa se há qualquer odd inválida (<=1) ou NaN
-    for c in ["odds_home", "odds_draw", "odds_away"]:
-        if (df[c].isna().any()) or (df[c] <= 1.0).any():
-            bad = df[df[c].isna() | (df[c] <= 1.0)][["match_id", "team_home", "team_away", c]]
-            err("[predict] Odds inválidas detectadas (NaN ou <= 1.0). Abortando.")
-            if args.debug:
-                print(bad.to_string(index=False))
-            sys.exit(EXIT_CRITICAL)
+    # Em modo estrito, se existir qualquer inválida => aborta
+    if strict and (df["invalid_3w"].any() or (not allow_two_way and df["two_way"].any())):
+        ex = df[df["invalid_3w"] | (df["two_way"] & ~df["two_way"].isna())][
+            ["match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away"]
+        ]
+        err("[predict] Odds inválidas detectadas (NaN ou <= 1.0). Abortando.\n" + ex.to_string(index=False), 98)
 
-    # ---- Calcula probabilidades implícitas e justas ----
-    df["imp_home"] = implied_from_decimal(df["odds_home"].to_numpy())
-    df["imp_draw"] = implied_from_decimal(df["odds_draw"].to_numpy())
-    df["imp_away"] = implied_from_decimal(df["odds_away"].to_numpy())
+    # Tolerante: mantemos 2-way (se permitido) e removemos apenas 3-way inválidas
+    kept = len(df)
+    df = df[~df["invalid_3w"]].copy()
+    removed = kept - len(df)
 
-    # Remove overround
-    fair = df[["imp_home", "imp_draw", "imp_away"]].to_numpy(dtype=float)
-    fair_norm = []
-    for ph, pd_, pa in fair:
-        fh, fd, fa = remove_overround(ph, pd_, pa)
-        fair_norm.append((fh, fd, fa))
-    fair_norm = np.array(fair_norm)
-    df["p_home"] = fair_norm[:, 0]
-    df["p_draw"] = fair_norm[:, 1]
-    df["p_away"] = fair_norm[:, 2]
+    if debug:
+        log(f"[predict][DEBUG] total={kept} removidos_por_invalid_3way={removed} two_way={int(df['two_way'].sum())}")
 
-    # Validação final de probabilidades
-    if df[["p_home", "p_draw", "p_away"]].isna().any().any():
-        err("[predict] Probabilidades finais contêm NaN. Abortando.")
-        if args.debug:
-            print(df[df[["p_home","p_draw","p_away"]].isna().any(axis=1)][
-                ["match_id","team_home","team_away","odds_home","odds_draw","odds_away","imp_home","imp_draw","imp_away","p_home","p_draw","p_away"]
-            ].to_string(index=False))
-        sys.exit(EXIT_CRITICAL)
+    # Se tudo caiu fora, falha
+    if len(df) == 0:
+        err("[predict] Nenhuma linha válida para gerar previsões após limpeza/validação.", 7)
 
-    # ---- Picks e margem ----
-    picks = df.apply(lambda r: pick_1x2_row(r["p_home"], r["p_draw"], r["p_away"]), axis=1)
-    df["pick_1x2"] = [p[0] for p in picks]
-    df["conf_margin"] = [p[1] for p in picks]
+    return df
 
-    # ---- Chave de jogo + saída padronizada ----
-    df["match_key"] = df.apply(lambda r: make_match_key(r["team_home"], r["team_away"]), axis=1)
 
-    out_cols = [
-        "match_key",
-        "team_home", "team_away",
-        "odds_home", "odds_draw", "odds_away",
-        "p_home", "p_draw", "p_away",
-        "pick_1x2", "conf_margin"
-    ]
-    df_out = df.rename(columns={"team_home": "home", "team_away": "away"})[[
-        "match_key", "home", "away",
-        "odds_home", "odds_draw", "odds_away",
-        "p_home", "p_draw", "p_away",
-        "pick_1x2", "conf_margin"
-    ]].copy()
+def compute_predictions(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, r in df.iterrows():
+        oh, od, oa = r["odds_home"], r["odds_draw"], r["odds_away"]
+        if pd.isna(od):  # 2-way
+            ph, pdw, pa, s = implied_probs_2way(oh, oa)
+            notes = "two_way"
+        else:  # 3-way
+            ph, pdw, pa, s = implied_probs_3way(oh, od, oa)
+            notes = "three_way"
 
-    out_path = os.path.join(out_dir, "predictions_market.csv")
-    df_out.to_csv(out_path, index=False)
+        if any(np.isnan([ph, pdw, pa])):
+            # segurança extra: pula linha
+            continue
 
-    # Sanidade: não permitir arquivo vazio
-    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
-        err("[predict] predictions_market.csv não gerado (vazio).")
-        sys.exit(EXIT_CRITICAL)
+        pick = choose_pick(ph, pdw, pa)
+        # margem simples = maior prob - segundo maior
+        arr = np.array([ph, pdw, pa], dtype=float)
+        top2 = np.sort(arr)[-2:]
+        margin = float(top2[-1] - top2[-2])
 
-    # Sanidade: toda linha deve ter pick válido (1, X ou 2)
-    if (df_out["pick_1x2"].isin(["1","X","2"]) == False).any():
-        err("[predict] Encontrado pick inválido ('?'). Abortando.")
-        if args.debug:
-            print(df_out[df_out["pick_1x2"].isin(["1","X","2"]) == False].to_string(index=False))
-        sys.exit(EXIT_CRITICAL)
+        rows.append(
+            {
+                "match_id": r["match_id"],
+                "team_home": r["team_home"],
+                "team_away": r["team_away"],
+                "prob_home": round(ph, 6),
+                "prob_draw": round(pdw, 6),
+                "prob_away": round(pa, 6),
+                "pick": pick,
+                "margin": round(margin, 6),
+                "notes": notes,
+            }
+        )
 
-    # (Opcional) Log de amostra
-    sample = df_out.head(10)
-    log(sample.to_csv(index=False))
-    sys.exit(EXIT_OK)
+    return pd.DataFrame(rows, columns=OUT_COLS)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Gera predictions_market.csv a partir de odds_consensus.csv")
+    ap.add_argument("--rodada", required=True, help="Diretório (OUT_DIR) onde está o odds_consensus.csv")
+    ap.add_argument("--strict", action="store_true", help="Falha se houver qualquer odd inválida/NaN/≤1.0")
+    ap.add_argument("--allow-two-way", dest="allow_two_way", action="store_true", help="Permite mercados sem empate (2-way).")
+    ap.add_argument("--no-allow-two-way", dest="allow_two_way", action="store_false", help="Proíbe 2-way; descarta/aborta conforme modo.")
+    ap.add_argument("--debug", action="store_true", help="Logs detalhados")
+    ap.set_defaults(allow_two_way=True)
+    args = ap.parse_args()
+
+    rodada_dir = args.rodada
+    in_path = os.path.join(rodada_dir, "odds_consensus.csv")
+    out_path = os.path.join(rodada_dir, "predictions_market.csv")
+
+    log(f"[predict] OUT_DIR = {rodada_dir}")
+
+    df = read_consensus(in_path)
+
+    # Validação + limpeza (aceita 2-way por padrão)
+    df = validate_and_prepare(df, strict=args.strict, allow_two_way=args.allow_two_way, debug=args.debug)
+
+    # Cálculo das probabilidades e picks
+    pred = compute_predictions(df)
+
+    if pred.empty:
+        err("[predict] Nenhuma previsão produzida (todas as linhas inválidas após cálculo).", 7)
+
+    # Ordena por margem desc
+    pred = pred.sort_values(by=["margin"], ascending=False).reset_index(drop=True)
+
+    # Persistência
+    os.makedirs(rodada_dir, exist_ok=True)
+    pred.to_csv(out_path, index=False, quoting=csv.QUOTE_MINIMAL)
+
+    # Preview
+    head_n = min(20, len(pred))
+    log(f"[predict] OK -> {out_path} (linhas={len(pred)})")
+    log("===== Preview predictions_market =====")
+    log(pred.head(head_n).to_string(index=False))
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as e:
-        err(f"[predict] Falha inesperada: {e}")
-        sys.exit(EXIT_CRITICAL)
+    main()
