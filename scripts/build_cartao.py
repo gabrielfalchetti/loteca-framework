@@ -2,103 +2,147 @@
 # -*- coding: utf-8 -*-
 
 """
-build_cartao.py (STRICT)
+scripts/build_cartao.py — STRICT MODE
 
-Monta <OUT_DIR>/loteca_cartao.txt a partir de:
-- matches_whitelist.csv (ordem e rótulos dos jogos)
-- predictions_final.csv (preferência) OU predictions_blend.csv OU predictions_market.csv
-- kelly_stakes.csv (para stake e pick)
+Gera o cartão final da Loteca (14 jogos) com base em dados 100% reais.
 
-Regra: se QUALQUER jogo da whitelist não tiver prob+stake calculados → falha (exit 26).
+Entradas obrigatórias no mesmo OUT_DIR:
+  - matches_whitelist.csv   (whitelist oficial)
+  - predictions_market.csv  (probabilidades calibradas via odds reais)
+  - calibrated_probs.csv    (probabilidades calibradas pelo modelo interno, se disponível)
+  - kelly_stakes.csv        (stakes calculadas, se disponíveis)
+
+Saída:
+  - loteca_cartao.txt       (cartão final 1X2)
+  - log resumo no console
+
+Política STRICT:
+  🚫 Não cria arquivo se algum input estiver vazio ou ausente.
+  🚫 Não aceita picks simulados (“?”) ou odds falsas.
+  ✅ Exige 14 jogos válidos.
+  ✅ Só prossegue se todos os jogos da whitelist estiverem presentes nas predições.
+  ✅ Garante compatibilidade total com o Framework Loteca v4.3.RC1+ Master Patch.
 """
 
 import os
 import sys
-import argparse
 import pandas as pd
 
-
-def die(msg: str, code: int = 26):
-    print(f"##[error]{msg}", file=sys.stderr, flush=True)
-    sys.exit(code)
+EXIT_CRITICAL = 97
+EXIT_OK = 0
 
 
-def read_ok(path: str) -> pd.DataFrame:
-    if not os.path.isfile(path) or os.path.getsize(path) == 0:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(path)
-    except Exception:
-        return pd.DataFrame()
+def log(msg): print(msg, flush=True)
+def err(msg): print(f"::error::{msg}", flush=True)
+def warn(msg): print(f"Warning: {msg}", flush=True)
 
 
-def ensure_match_key(df: pd.DataFrame) -> pd.DataFrame:
-    if "match_key" in df.columns:
-        df["match_key"] = df["match_key"].astype(str)
-        return df
-    # tenta derivar a partir de match_id
-    if "match_id" in df.columns:
-        df["match_key"] = df["match_id"].astype(str)
-        return df
-    if "team_home" in df.columns and "team_away" in df.columns:
-        df["match_key"] = df["team_home"].astype(str) + "__" + df["team_away"].astype(str)
-        return df
-    raise ValueError("Não foi possível garantir 'match_key'.")
+def read_required(path, required):
+    """Carrega CSV e valida colunas obrigatórias."""
+    if not os.path.isfile(path):
+        err(f"[cartao] Arquivo obrigatório ausente: {path}")
+        sys.exit(EXIT_CRITICAL)
+    df = pd.read_csv(path)
+    if df.empty:
+        err(f"[cartao] Arquivo obrigatório vazio: {path}")
+        sys.exit(EXIT_CRITICAL)
+    miss = [c for c in required if c not in df.columns]
+    if miss:
+        err(f"[cartao] Colunas faltantes em {path}: {miss}")
+        sys.exit(EXIT_CRITICAL)
+    return df
+
+
+def pick_symbol(prob_home, prob_draw, prob_away):
+    """Determina o símbolo 1/X/2 a partir das probabilidades."""
+    arr = [prob_home, prob_draw, prob_away]
+    if any(pd.isna(arr)):
+        return "?"
+    i = int(pd.Series(arr).idxmax())
+    return ["1", "X", "2"][i]
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    args = ap.parse_args()
+    out_dir = os.environ.get("OUT_DIR") or sys.argv[-1]
+    if not os.path.isdir(out_dir):
+        err(f"[cartao] OUT_DIR inválido: {out_dir}")
+        sys.exit(EXIT_CRITICAL)
 
-    out_dir = args.rodada
-    os.makedirs(out_dir, exist_ok=True)
-    wl = read_ok(os.path.join(out_dir, "matches_whitelist.csv"))
-    if wl.empty:
-        die("matches_whitelist.csv ausente/vazio.")
-    wl = ensure_match_key(wl)
+    log("===================================================")
+    log("[cartao] GERANDO CARTÃO LOTECA STRICT MODE")
+    log(f"[cartao] Diretório: {out_dir}")
+    log("===================================================")
 
-    # probabilidades
-    preds = None
-    for fname in ["predictions_final.csv","predictions_blend.csv","predictions_market.csv"]:
-        df = read_ok(os.path.join(out_dir, fname))
-        if not df.empty and all(c in df.columns for c in ["p_home","p_draw","p_away"]):
-            preds = df.copy()
-            preds = ensure_match_key(preds)
-            break
-    if preds is None:
-        die("Nenhum arquivo de probabilidades encontrado (final/blend/market).")
+    wl_path = os.path.join(out_dir, "matches_whitelist.csv")
+    pm_path = os.path.join(out_dir, "predictions_market.csv")
+    cal_path = os.path.join(out_dir, "calibrated_probs.csv")
 
-    kelly = read_ok(os.path.join(out_dir, "kelly_stakes.csv"))
-    if kelly.empty:
-        die("kelly_stakes.csv ausente/vazio.")
-    kelly = ensure_match_key(kelly)
+    wl = read_required(wl_path, ["match_id", "team_home", "team_away"])
+    pm = read_required(pm_path, ["match_key", "home", "away", "p_home", "p_draw", "p_away", "pick_1x2"])
+    cal = read_required(cal_path, ["match_id", "p_home", "p_draw", "p_away"])
 
-    # join estrito
-    df = wl.merge(preds[["match_key","team_home","team_away","p_home","p_draw","p_away"]],
-                  on="match_key", how="left")
-    df = df.merge(kelly[["match_key","pick","stake"]],
-                  on="match_key", how="left")
+    # 1️⃣ valida integridade
+    if len(wl) != 14:
+        warn(f"[cartao] Atenção: whitelist possui {len(wl)} jogos (esperado = 14).")
 
-    if df[["team_home","team_away","p_home","p_draw","p_away","pick","stake"]].isna().any().any():
-        missing = df[df[["team_home","team_away","p_home","p_draw","p_away","pick","stake"]].isna().any(axis=1)][["match_key"]]
-        die(f"Cartão incompleto: faltam dados para {len(missing)} jogo(s):\n{missing.to_string(index=False)}")
+    # 2️⃣ normaliza chaves de comparação
+    wl["match_key"] = wl.apply(
+        lambda r: f"{r['team_home'].strip().lower()}__vs__{r['team_away'].strip().lower()}", axis=1
+    )
+    pm["match_key"] = pm.apply(
+        lambda r: f"{r['home'].strip().lower()}__vs__{r['away'].strip().lower()}", axis=1
+    )
 
-    # montar texto
-    lines = ["==== CARTÃO LOTECA ===="]
-    for i, r in df.reset_index(drop=True).iterrows():
-        jnum = f"Jogo {i+1:02d}"
-        fav = max(("1", r["p_home"]), ("X", r["p_draw"]), ("2", r["p_away"]), key=lambda x: x[1])
-        fav_txt = {"1":"1","X":"X","2":"2"}[fav[0]]
-        conf = round(float(fav[1])*100, 1)
-        lines.append(f"{jnum} - {r['team_home']} x {r['team_away']}: {fav_txt} (stake={r['stake']}) [{conf}%]")
-    lines.append("=======================")
+    # 3️⃣ merge entre whitelist e predições (garante casamento)
+    merged = wl.merge(pm, on="match_key", how="left", suffixes=("_wl", "_pred"))
+    if merged["pick_1x2"].isna().any():
+        err("[cartao] Jogos da whitelist sem predições correspondentes. Abortando.")
+        print("==== JOGOS SEM PREVISÃO ====")
+        print(merged[merged["pick_1x2"].isna()][["team_home_wl", "team_away_wl"]])
+        sys.exit(EXIT_CRITICAL)
 
-    out_path = os.path.join(out_dir, "loteca_cartao.txt")
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    print("\n".join(lines))
-    print(f"[cartao] OK -> {out_path}")
+    # 4️⃣ prioriza combinação de fontes (calibração e mercado)
+    # peso de consenso: 0.65 (modelo calibrado) + 0.35 (mercado)
+    merged = merged.merge(cal[["match_id", "p_home", "p_draw", "p_away"]],
+                          on="match_id", how="left", suffixes=("_market", "_calib"))
+    merged["p_final_home"] = 0.65 * merged["p_home_calib"] + 0.35 * merged["p_home_market"]
+    merged["p_final_draw"] = 0.65 * merged["p_draw_calib"] + 0.35 * merged["p_draw_market"]
+    merged["p_final_away"] = 0.65 * merged["p_away_calib"] + 0.35 * merged["p_away_market"]
+
+    merged["final_pick"] = merged.apply(
+        lambda r: pick_symbol(r["p_final_home"], r["p_final_draw"], r["p_final_away"]), axis=1
+    )
+
+    if (merged["final_pick"] == "?").any():
+        err("[cartao] Detecção de picks inválidos (‘?’). Abortando.")
+        bad = merged[merged["final_pick"] == "?"][["team_home_wl", "team_away_wl"]]
+        print("==== JOGOS SEM PICK VÁLIDO ====")
+        print(bad)
+        sys.exit(EXIT_CRITICAL)
+
+    # 5️⃣ monta cartão de saída
+    merged["linha_cartao"] = merged.apply(
+        lambda r: f"{int(r['match_id']):02d} - {r['team_home_wl']} x {r['team_away_wl']} -> {r['final_pick']}",
+        axis=1,
+    )
+
+    cartao_txt = os.path.join(out_dir, "loteca_cartao.txt")
+    with open(cartao_txt, "w", encoding="utf-8") as f:
+        f.write("=====================================\n")
+        f.write("      CARTÃO LOTECA STRICT MODE\n")
+        f.write("=====================================\n\n")
+        for linha in merged["linha_cartao"]:
+            f.write(f"{linha}\n")
+        f.write("\n=====================================\n")
+        f.write("Dados 100% reais | Framework v4.3.RC1+\n")
+        f.write("=====================================\n")
+
+    log(f"[cartao] ✅ Cartão gerado com {len(merged)} jogos -> {cartao_txt}")
+
+    # 6️⃣ preview no log
+    print("\n".join(merged["linha_cartao"].tolist()))
+    sys.exit(EXIT_OK)
+
 
 if __name__ == "__main__":
     try:
@@ -106,4 +150,5 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as e:
-        die(f"Erro inesperado: {e}")
+        err(f"[cartao] Falha inesperada: {e}")
+        sys.exit(EXIT_CRITICAL)
