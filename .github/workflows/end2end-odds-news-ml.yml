@@ -48,6 +48,7 @@ jobs:
           set -euo pipefail
           RUN_ID=$(date +%s)
           echo "RUN_ID=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
           echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
           mkdir -p "data/in" "${OUT_DIR}"
 
@@ -250,7 +251,7 @@ jobs:
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
       # ===================== W&B (obrigatório) =====================
-      - name: Weights & Biases - Upload artifacts (STRICT)
+      - name: "Weights & Biases - Upload artifacts (STRICT)"
         shell: bash
         env:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
