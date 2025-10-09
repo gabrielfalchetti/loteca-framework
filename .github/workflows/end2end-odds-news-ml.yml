@@ -21,7 +21,6 @@ on:
         default: "true"
 
 env:
-  # usa os defaults do workflow_dispatch; sem '||' pra evitar parse chato
   SEASON: ${{ inputs.season }}
   REGIONS: ${{ inputs.regions }}
   LOOKAHEAD_DAYS: ${{ inputs.lookahead_days }}
@@ -54,7 +53,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt || true
           fi
-          # Garantir libs necessárias aos scripts
+          # Garantir libs usadas pelos scripts
           pip install pandas numpy requests PyYAML python-dateutil tqdm rapidfuzz unidecode wandb
 
       - name: Definir OUT_DIR e pastas
@@ -277,14 +276,17 @@ PY
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
-      # ===================== W&B (best-effort) =====================
-      - name: Weights and Biases - Upload artifacts (STRICT)
-        if: ${{ secrets.WANDB_API_KEY != '' }}
+      # ===================== W&B (best-effort via shell, sem if: em YAML) =====================
+      - name: Weights and Biases - Upload artifacts (best-effort)
         shell: bash
         env:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${WANDB_API_KEY:-}" ]; then
+            echo "::notice::WANDB_API_KEY ausente — pulando upload para W&B"
+            exit 0
+          fi
           python - <<'PY'
 import os, glob, wandb
 run = wandb.init(
