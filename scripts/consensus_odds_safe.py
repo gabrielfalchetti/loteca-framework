@@ -1,142 +1,231 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Gera odds_consensus.csv com normalização robusta e checagem contra whitelist.
+Gera consenso de odds a partir de múltiplas fontes (TheOddsAPI e API-Football, se existirem).
+Regras:
+- NÃO inventa dados.
+- Se nenhuma partida da whitelist casar com odds reais => sai com código 6 e diagnóstico.
+- Normalização agressiva de nomes p/ casar com mais segurança (lower, rm acentos, pontuação).
+- Aliases opcionais: se existir data/aliases/*.csv, aplica mapeamentos.
+Saída: data/out/<RID>/odds_consensus.csv com colunas:
+  match_id,team_home,team_away,odds_home,odds_draw,odds_away,source
 """
 
 from __future__ import annotations
-import argparse
-import pandas as pd
-import unicodedata as ud
+import sys
+import os
+import csv
 import re
-from pathlib import Path
+import unicodedata
+from collections import defaultdict
+from typing import Dict, Tuple, List
 
-UNICODE_SPACES = r"[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]"
+import pandas as pd
 
-ALIAS = {
-    "atletico mineiro": "atletico-mg", "atletico mg": "atletico-mg", "atletico-mineiro": "atletico-mg",
-    "américa mineiro": "america-mg", "america mineiro": "america-mg", "america-mineiro": "america-mg", "america mg": "america-mg",
-    "operario": "operario-pr", "operario pr": "operario-pr", "operario-pr": "operario-pr",
-    "gremio novorizontino": "novorizontino", "grêmio novorizontino": "novorizontino",
-    "cuiaba": "cuiaba", "cuiabá": "cuiaba",
-    "avai": "avai", "avaí": "avai",
-    "mirassol": "mirassol",
-    "fluminense": "fluminense",
-    "volta redonda": "volta redonda",
-    "vila nova": "vila nova",
-    "sport recife": "sport", "sport": "sport",
-    "athletic club": "athletic club", "athletic club (mg)": "athletic club",
-    # já normalizados
-    "atletico-mg": "atletico-mg", "america-mg": "america-mg",
-}
+EXIT_CODE = 6
 
-def strip_accents(s: str) -> str:
-    if pd.isna(s): return s
-    return "".join(ch for ch in ud.normalize("NFKD", str(s)) if not ud.combining(ch))
+def log(msg: str):
+    print(f"[consensus] {msg}")
 
-def canon(s: str) -> str:
-    if pd.isna(s): return s
-    s0 = strip_accents(s)
-    s0 = re.sub(UNICODE_SPACES, " ", s0)    # normaliza espaços invisíveis
-    s0 = s0.lower()
-    s0 = re.sub(r"[^a-z0-9\s\-()]", " ", s0)
-    s0 = re.sub(r"\s+", " ", s0).strip()
-    return ALIAS.get(s0, s0)
+def debug(msg: str):
+    print(f"[consensus][DEBUG] {msg}")
 
-def title_id(x: str) -> str:
-    return re.sub(r"\s+", " ", x).strip().title()
+def err(msg: str):
+    print(f"::error::{msg}", file=sys.stderr)
 
-def load_whitelist(rodada_dir: Path) -> pd.DataFrame:
-    wl = pd.read_csv(rodada_dir / "matches_whitelist.csv")
-    wl["team_home_n"] = wl["team_home"].apply(canon)
-    wl["team_away_n"] = wl["team_away"].apply(canon)
-    wl["match_key_n"] = wl["team_home_n"] + "__vs__" + wl["team_away_n"]
-    return wl
+def warn(msg: str):
+    print(f"Warning: {msg}")
 
-def read_theodds(rodada_dir: Path) -> pd.DataFrame:
-    p = rodada_dir / "odds_theoddsapi.csv"
-    if not p.exists(): return pd.DataFrame()
-    df = pd.read_csv(p)
-    if df.empty: return df
-    df["team_home"] = df["home"].apply(canon)
-    df["team_away"] = df["away"].apply(canon)
-    if "sport" in df.columns:
-        df = df[df["sport"].astype(str).str.contains("soccer", case=False, na=False)]
-    for c in ("odds_home","odds_draw","odds_away"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["team_home","team_away","odds_home","odds_draw","odds_away"])
-    g = df.groupby(["team_home","team_away"], as_index=False)[["odds_home","odds_draw","odds_away"]].mean(numeric_only=True)
-    g["source"] = "theoddsapi"
-    return g
+def normalize(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s).strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-def read_apifoot(rodada_dir: Path) -> pd.DataFrame:
-    p = rodada_dir / "odds_apifootball.csv"
-    if not p.exists(): return pd.DataFrame()
-    df = pd.read_csv(p)
-    if df.empty: return df
-    df["team_home"] = df["team_home"].apply(canon)
-    df["team_away"] = df["team_away"].apply(canon)
-    for c in ("odds_home","odds_draw","odds_away"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["team_home","team_away","odds_home","odds_draw","odds_away"])
-    g = df.groupby(["team_home","team_away"], as_index=False)[["odds_home","odds_draw","odds_away"]].mean(numeric_only=True)
-    g["source"] = "apifootball"
-    return g
+def load_aliases() -> Dict[str, str]:
+    """
+    Carrega aliases opcionais de data/aliases/*.csv com formato:
+    from,to
+    Ex.: "atletico mg","atletico mineiro"
+    """
+    out: Dict[str, str] = {}
+    base = "data/aliases"
+    if not os.path.isdir(base):
+        return out
+    for name in os.listdir(base):
+        if not name.endswith(".csv"):
+            continue
+        path = os.path.join(base, name)
+        try:
+            df = pd.read_csv(path)
+            for _, row in df.iterrows():
+                f = normalize(row.get("from", ""))
+                t = normalize(row.get("to", ""))
+                if f and t:
+                    out[f] = t
+        except Exception as e:
+            warn(f"Falha ao carregar aliases {path}: {e}")
+    if out:
+        debug(f"Aliases carregados: {len(out)}")
+    return out
+
+def apply_alias(s: str, aliases: Dict[str, str]) -> str:
+    ns = normalize(s)
+    return aliases.get(ns, ns)
+
+def read_whitelist(out_dir: str) -> pd.DataFrame:
+    path = os.path.join(out_dir, "matches_whitelist.csv")
+    if not os.path.isfile(path):
+        err(f"Arquivo whitelist ausente: {path}")
+        sys.exit(EXIT_CODE)
+    df = pd.read_csv(path)
+    need = {"match_id", "match_key", "team_home", "team_away"}
+    if not need.issubset(df.columns):
+        err(f"Colunas ausentes em whitelist ({path}). Esperado: {sorted(need)}")
+        sys.exit(EXIT_CODE)
+    return df
+
+def read_theodds(out_dir: str) -> pd.DataFrame:
+    path = os.path.join(out_dir, "odds_theoddsapi.csv")
+    if not os.path.isfile(path):
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    # colunas: match_id,home,away,region,sport,odds_home,odds_draw,odds_away,last_update,source
+    cols = {"home","away","odds_home","odds_draw","odds_away"}
+    if not cols.issubset(df.columns):
+        warn(f"theoddsapi colunas faltantes em {path}; ignorando.")
+        return pd.DataFrame()
+    df["src"] = "theoddsapi"
+    return df
+
+def read_apifootball(out_dir: str) -> pd.DataFrame:
+    path = os.path.join(out_dir, "odds_apifootball.csv")
+    if not os.path.isfile(path):
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    # aceitar as mesmas colunas
+    cols = {"home","away","odds_home","odds_draw","odds_away"}
+    if not cols.issubset(df.columns):
+        warn(f"apifootball colunas faltantes em {path}; ignorando.")
+        return pd.DataFrame()
+    df["src"] = "apifootball"
+    return df
+
+def consensus_for_match(rows: List[pd.Series]) -> Tuple[float,float,float]:
+    # média simples entre fontes
+    oh = [r["odds_home"] for r in rows if pd.notna(r["odds_home"])]
+    od = [r["odds_draw"] for r in rows if pd.notna(r["odds_draw"])]
+    oa = [r["odds_away"] for r in rows if pd.notna(r["odds_away"])]
+    if not oh or not od or not oa:
+        return (float("nan"), float("nan"), float("nan"))
+    return (sum(oh)/len(oh), sum(od)/len(od), sum(oa)/len(oa))
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Ex.: data/out/1759959606")
-    args = ap.parse_args()
-    out_dir = Path(args.rodada)
+    if len(sys.argv) < 3 or sys.argv[1] not in ("--rodada",):
+        print("Uso: python -m scripts.consensus_odds_safe --rodada <OUT_DIR>")
+        sys.exit(EXIT_CODE)
+    out_dir = sys.argv[2]
+    log("===================================================")
+    log("GERANDO ODDS CONSENSUS")
+    log(f"RODADA_DIR: {out_dir}")
+    log("===================================================")
 
-    print("[consensus] ===================================================")
-    print("[consensus] GERANDO ODDS CONSENSUS")
-    print(f"[consensus] RODADA_ID: {out_dir.name}")
-    print(f"[consensus] OUT_DIR  : {out_dir}")
-    print("[consensus] ===================================================")
+    aliases = load_aliases()
+    wl = read_whitelist(out_dir).copy()
+    wl["nh"] = wl["team_home"].apply(lambda s: apply_alias(s, aliases))
+    wl["na"] = wl["team_away"].apply(lambda s: apply_alias(s, aliases))
 
-    wl = load_whitelist(out_dir)
-    print(f"[consensus][DEBUG] Aliases carregados: {len(ALIAS)}")
+    # fontes
+    tdf = read_theodds(out_dir)
+    adf = read_apifootball(out_dir)
+    src_count = len(tdf) + len(adf)
 
-    d1 = read_theodds(out_dir);  print(f"[consensus][DEBUG] Carregado odds from theoddsapi: {len(d1)} linhas")
-    d2 = read_apifoot(out_dir);  print(f"[consensus][DEBUG] Carregado odds from apifootball: {len(d2)} linhas")
+    debug(f"Carregado odds from theoddsapi: {len(tdf)} linhas")
+    debug(f"Carregado odds from apifootball: {len(adf)} linhas")
 
-    df = pd.concat([d1, d2], ignore_index=True)
-    if df.empty:
-        # ainda assim gera arquivo vazio com header correto
-        (out_dir / "odds_consensus.csv").write_text("match_id,team_home,team_away,odds_home,odds_draw,odds_away,source\n", encoding="utf-8")
-        print("[consensus] Arquivo vazio -> odds_consensus.csv")
-        return
+    if src_count == 0:
+        err("Nenhuma fonte de odds disponível (theoddsapi/apifootball).")
+        sys.exit(EXIT_CODE)
 
-    base = df.groupby(["team_home","team_away"], as_index=False)[["odds_home","odds_draw","odds_away"]].mean(numeric_only=True)
-    base["match_id"] = base["team_home"].apply(title_id) + "__" + base["team_away"].apply(title_id)
-    base["source"] = "consensus"
+    all_odds = pd.concat([tdf, adf], ignore_index=True) if len(adf) else tdf
+    if all_odds.empty:
+        err("As fontes de odds foram carregadas mas estão vazias.")
+        sys.exit(EXIT_CODE)
 
-    # checa cobertura vs whitelist
-    base["match_key_n"] = base["team_home"] + "__vs__" + base["team_away"]
-    merged = wl.merge(base, how="left", on="match_key_n", suffixes=("_wl",""))
+    # normalizar
+    all_odds["nh"] = all_odds["home"].astype(str).apply(normalize)
+    all_odds["na"] = all_odds["away"].astype(str).apply(normalize)
 
-    not_matched = merged[merged["odds_home"].isna()][["match_id_wl","team_home_wl","team_away_wl","match_key_n"]]
-    if len(not_matched) > 0:
-        print("Warning: [consensus] Alguns jogos da whitelist não casaram com odds. Mostrando até 10:")
-        print(not_matched.rename(columns={
-            "match_id_wl":"match_id",
-            "team_home_wl":"team_home",
-            "team_away_wl":"team_away",
-            "match_key_n":"match_key"
-        }).head(10).to_string(index=False))
+    # join por (nh,na)
+    m = wl.merge(
+        all_odds,
+        on=["nh","na"],
+        how="left",
+        suffixes=("","")
+    )
 
-    # salva somente os confrontos que têm odds
-    out = merged.dropna(subset=["odds_home"])[["match_id","team_home","team_away","odds_home","odds_draw","odds_away","source"]]
-    out = out.sort_values(by="match_id")
-    out.to_csv(out_dir / "odds_consensus.csv", index=False)
-    print(f"[consensus] OK -> {out_dir/'odds_consensus.csv'}")
+    # filtrar somente linhas casadas
+    matched = m.dropna(subset=["odds_home","odds_draw","odds_away"])
+    if matched.empty:
+        warn("[consensus] Nenhum jogo da whitelist casou com odds.")
+        # Diagnóstico útil
+        print("==== DIAGNÓSTICO DE MATCHING ====")
+        print("WHITELIST (até 20):")
+        print(wl[["match_id","team_home","team_away"]].head(20).to_string(index=False))
+        print("\nTIMES ENCONTRADOS NAS FONTES (amostra até 20 pares únicos):")
+        uniq = all_odds[["home","away"]].drop_duplicates().head(20)
+        if uniq.empty:
+            print("(vazio)")
+        else:
+            print(uniq.to_string(index=False))
+        print("=================================")
+        # escrever arquivo vazio e falhar explicitamente
+        out = os.path.join(out_dir, "odds_consensus.csv")
+        with open(out, "w", newline="", encoding="utf-8") as f:
+            f.write("match_id,team_home,team_away,odds_home,odds_draw,odds_away,source\n")
+        err(f"odds_consensus.csv está vazio em {out}.")
+        sys.exit(EXIT_CODE)
 
-    # debug preview
-    prev = out.head(10)
-    if not prev.empty:
-        print("[consensus][DEBUG] Preview odds_consensus (até 10):")
-        print(prev.to_string(index=False))
+    # agregar por jogo original (match_id da whitelist)
+    rows = []
+    for mk, g in matched.groupby("match_id"):
+        # manter nomes “limpos” da whitelist
+        wh = wl.loc[wl["match_id"] == mk].iloc[0]
+        oh, od, oa = consensus_for_match(list(g.itertuples(index=False)))
+        if pd.isna(oh) or pd.isna(od) or pd.isna(oa):
+            continue
+        rows.append({
+            "match_id": mk,
+            "team_home": wh["team_home"],
+            "team_away": wh["team_away"],
+            "odds_home": float(oh),
+            "odds_draw": float(od),
+            "odds_away": float(oa),
+            "source": "consensus"
+        })
+
+    out = os.path.join(out_dir, "odds_consensus.csv")
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["match_id","team_home","team_away","odds_home","odds_draw","odds_away","source"])
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    if not rows:
+        err(f"odds_consensus.csv está vazio em {out}.")
+        sys.exit(EXIT_CODE)
+
+    log(f"OK -> {out} (jogos={len(rows)})")
+    debug("Preview odds_consensus (até 10):")
+    try:
+        print(pd.DataFrame(rows).head(10).to_string(index=False))
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()
