@@ -42,8 +42,7 @@ def read_csv_required(path: str) -> pd.DataFrame:
 def implied_probs_from_odds(odds_home, odds_draw, odds_away):
     """Converte odds decimais em probabilidades implícitas com normalização de vigorish."""
     o = np.array([odds_home, odds_draw, odds_away], dtype=float)
-    # evita divisões por zero ou odds inválidas
-    o[o <= 1.0] = np.nan
+    o[o <= 1.0] = np.nan  # evita divisões por zero/odds inválidas
     with np.errstate(divide="ignore", invalid="ignore"):
         ip = 1.0 / o
     if np.any(np.isnan(ip)):
@@ -52,7 +51,7 @@ def implied_probs_from_odds(odds_home, odds_draw, odds_away):
     if s <= 0:
         return np.nan, np.nan, np.nan
     p = ip / s
-    return float(p[0]), float(p[1]), float(p[2])
+    return float(p[0]), float(p[1]), float(p[2])  # p_home, p_draw, p_away
 
 
 def entropy(p):
@@ -94,7 +93,7 @@ def main():
             # normaliza nomes de colunas
             rename = {}
             for a, b in [("p_home", "prob_home"), ("p_draw", "prob_draw"), ("p_away", "prob_away")]:
-                if a in preds.columns and "prob_" + a.split("_")[1] not in preds.columns:
+                if a in preds.columns and b not in preds.columns:
                     rename[a] = b
             if rename:
                 preds = preds.rename(columns=rename)
@@ -106,14 +105,18 @@ def main():
     for _, r in cons.iterrows():
         mid = r["match_id"]
         oh, od, oa = float(r["odds_home"]), float(r["odds_draw"]), float(r["odds_away"])
-        ph, pd, pa = implied_probs_from_odds(oh, od, oa)
+        p_home, p_draw, p_away = implied_probs_from_odds(oh, od, oa)
 
-        if any(map(lambda x: x is None or (isinstance(x, float) and (math.isnan(x) or x <= 0.0)), [ph, pd, pa])):
+        if any(
+            map(
+                lambda x: x is None or (isinstance(x, float) and (math.isnan(x) or x <= 0.0)),
+                [p_home, p_draw, p_away],
+            )
+        ):
             # pula linhas inválidas
             continue
 
         fav = favorite_side(oh, od, oa)
-        # margens simples
         fav_price = min(oh, od, oa)
         dog_price = max(oh, od, oa)
         price_ratio = float(dog_price / fav_price) if fav_price > 0 else np.nan
@@ -125,10 +128,10 @@ def main():
             "odds_home": oh,
             "odds_draw": od,
             "odds_away": oa,
-            "imp_p_home": ph,
-            "imp_p_draw": pd,
-            "imp_p_away": pa,
-            "imp_entropy": entropy([ph, pd, pa]),
+            "imp_p_home": p_home,
+            "imp_p_draw": p_draw,
+            "imp_p_away": p_away,
+            "imp_entropy": entropy([p_home, p_draw, p_away]),
             "favorite_side": fav,
             "fav_price": fav_price,
             "dog_price": dog_price,
@@ -146,14 +149,16 @@ def main():
                 phat_h = float(pr.get("prob_home", np.nan))
                 phat_d = float(pr.get("prob_draw", np.nan))
                 phat_a = float(pr.get("prob_away", np.nan))
-                feat.update({
-                    "mkt_prob_home": phat_h,
-                    "mkt_prob_draw": phat_d,
-                    "mkt_prob_away": phat_a,
-                    "edge_home": phat_h - ph,
-                    "edge_draw": phat_d - pd,
-                    "edge_away": phat_a - pa,
-                })
+                feat.update(
+                    {
+                        "mkt_prob_home": phat_h,
+                        "mkt_prob_draw": phat_d,
+                        "mkt_prob_away": phat_a,
+                        "edge_home": phat_h - p_home,
+                        "edge_draw": phat_d - p_draw,
+                        "edge_away": phat_a - p_away,
+                    }
+                )
 
         rows.append(feat)
 
@@ -162,15 +167,30 @@ def main():
 
     df = pd.DataFrame(rows)
 
-    # ordena e salva
     preferred = [
-        "match_id", "team_home", "team_away",
-        "odds_home", "odds_draw", "odds_away",
-        "imp_p_home", "imp_p_draw", "imp_p_away",
-        "imp_entropy", "favorite_side", "fav_price", "dog_price", "price_ratio",
-        "log_odds_h", "log_odds_d", "log_odds_a",
-        "mkt_prob_home", "mkt_prob_draw", "mkt_prob_away",
-        "edge_home", "edge_draw", "edge_away",
+        "match_id",
+        "team_home",
+        "team_away",
+        "odds_home",
+        "odds_draw",
+        "odds_away",
+        "imp_p_home",
+        "imp_p_draw",
+        "imp_p_away",
+        "imp_entropy",
+        "favorite_side",
+        "fav_price",
+        "dog_price",
+        "price_ratio",
+        "log_odds_h",
+        "log_odds_d",
+        "log_odds_a",
+        "mkt_prob_home",
+        "mkt_prob_draw",
+        "mkt_prob_away",
+        "edge_home",
+        "edge_draw",
+        "edge_away",
     ]
     cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
     df = df[cols]
