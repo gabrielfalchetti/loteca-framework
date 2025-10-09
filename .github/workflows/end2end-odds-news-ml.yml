@@ -1,81 +1,64 @@
-name: End2End Odds+News ML (STRICT • 100% automático)
+name: End2End - Odds + Weather + News + ML (Strict)
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - ".github/workflows/end2end-odds-news-ml.yml"
-      - "scripts/**"
-      - "data/in/**"
-  pull_request:
-    paths:
-      - ".github/workflows/end2end-odds-news-ml.yml"
-      - "scripts/**"
+  schedule:
+    - cron: "15 * * * *"
 
-concurrency:
-  group: end2end-strict-${{ github.ref }}
-  cancel-in-progress: false
+env:
+  SEASON: "2025"
+  REGIONS: "uk,eu,us,au"
+  LOOKAHEAD_DAYS: "3"
+  BANKROLL: "1000"
+  KELLY_FRACTION: "0.5"
+  KELLY_CAP: "0.1"
+  KELLY_TOP_N: "14"
+  ROUND_TO: "1"
+  DEBUG: "true"
 
 jobs:
-  e2e:
+  end2end:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      SEASON: "2025"
-      REGIONS: "uk,eu,us,au"
-      LOOKAHEAD_DAYS: "3"
-      BANKROLL: "1000"
-      KELLY_FRACTION: "0.5"
-      KELLY_CAP: "0.1"
-      KELLY_TOP_N: "14"
-      ROUND_TO: "1"
-      DEBUG: "true"
-      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
-      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    timeout-minutes: 60
 
     steps:
-      # 0) Checkout e Python
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Instalar dependências
+      - name: Install deps (strict)
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install pandas numpy scipy scikit-learn xgboost requests python-dateutil pytz rapidfuzz Unidecode tqdm beautifulsoup4 lxml
+          # Se houver requirements.txt, usa. Senão, instala o mínimo necessário.
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas numpy requests pyyaml python-dateutil rapidfuzz unidecode scipy scikit-learn wandb
+          fi
 
-      # 1) Init (RUN_ID, OUT_DIR, aliases.json)
-      - name: Init run
+      - name: Create OUT_DIR and base dirs
         id: init
         run: |
           set -euo pipefail
           RUN_ID=$(date +%s)
-          echo "RUN_ID=$RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
-          mkdir -p "data/in" "${PWD}/data/out/${RUN_ID}"
-          # aliases.json default
-          if [ ! -s "data/in/aliases.json" ]; then
-            echo '{"teams":{}}' > "data/in/aliases.json"
-          fi
+          echo "RUN_ID=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "OUT_DIR=data/out/${RUN_ID}" >> $GITHUB_ENV
+          mkdir -p "data/in" "${OUT_DIR}"
 
-      # 2) Whitelist 100% automática (obrigatória)
+      # ===================== WHITELIST (obrigatória) =====================
       - name: Build whitelist from APIs (STRICT)
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         run: |
           set -euo pipefail
           [ -f scripts/build_whitelist_from_apis.py ] || { echo "::error::scripts/build_whitelist_from_apis.py não encontrado"; exit 3; }
-          a=0
-          until [ $a -ge 3 ]; do
+          a=0; until [ $a -ge 3 ]; do
             python scripts/build_whitelist_from_apis.py \
               --out data/in/matches_whitelist.csv \
               --season "${SEASON}" \
@@ -91,15 +74,15 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Whitelist sem coluna '$c'"; exit 3; }
           done
           LINES=$(wc -l < "$WL" | tr -d ' ')
-          [ "$LINES" -ge 2 ] || { echo "::error::Whitelist sem jogos (mínimo 1 linha além do cabeçalho)"; exit 3; }
+          [ "$LINES" -ge 2 ] || { echo "::error::Whitelist sem jogos"; exit 3; }
           cp "$WL" "${OUT_DIR}/matches_whitelist.csv"
           echo "===== Preview whitelist ====="
           head -n 20 "$WL" || true
 
-      # 3) Ingest Odds — TheOddsAPI (obrigatório)
-      - name: Ingest odds — TheOddsAPI (STRICT)
+      # ===================== ODDS (obrigatórias) =====================
+      - name: Ingest TheOddsAPI (STRICT)
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py não encontrado."; exit 4; }
@@ -118,10 +101,9 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_theoddsapi.csv"; exit 4; }
           done
 
-      # 4) Ingest Odds — API-Football via RapidAPI (obrigatório)
-      - name: Ingest odds — API-Football (STRICT)
+      - name: Ingest APIFootball via RapidAPI (STRICT)
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py não encontrado."; exit 5; }
@@ -139,14 +121,11 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_apifootball.csv"; exit 5; }
           done
 
-      # 5) Odds Consensus (STRICT)
       - name: Odds consensus (STRICT)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py não encontrado"; exit 6; }
-          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict ${DEBUG:+--debug}
+          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
           test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv não gerado"; exit 6; }
           header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
@@ -155,73 +134,115 @@ jobs:
           done
           head -n 20 "$OUT_FILE" || true
 
-      # 6) Predição a partir do mercado
-      - name: Predict from odds (market)
+      # ===================== WEATHER (obrigatório) =====================
+      - name: Weather per match (preferred, STRICT)
+        continue-on-error: false
+        run: |
+          set -euo pipefail
+          if [ -f scripts/weather_per_match_safe.py ]; then
+            python scripts/weather_per_match_safe.py --in "${OUT_DIR}/matches_whitelist.csv" --out-dir "${OUT_DIR}"
+            test -s "${OUT_DIR}/weather.csv" || { echo "::error::weather.csv não gerado pelo per-match"; exit 17; }
+          else
+            echo "::error::scripts/weather_per_match_safe.py não encontrado (exigido)."
+            exit 17
+          fi
+
+      # Snapshot (fallback) — só dispara se a etapa anterior falhar. Mantém obrigatoriedade.
+      - name: Weather snapshot fallback (STRICT)
+        if: failure()
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+          WEATHER_LAT: ${{ secrets.WEATHER_LAT }}
+          WEATHER_LON: ${{ secrets.WEATHER_LON }}
+        run: |
+          set -euo pipefail
+          [ -f scripts/weather_snapshot_safe.py ] || { echo "::error::scripts/weather_snapshot_safe.py não encontrado"; exit 17; }
+          [ -n "${WEATHER_LAT:-}" ] && [ -n "${WEATHER_LON:-}" ] || { echo "::error::WEATHER_LAT/WEATHER_LON não definidos"; exit 17; }
+          python scripts/weather_snapshot_safe.py --out-dir "${OUT_DIR}" --lat "${WEATHER_LAT}" --lon "${WEATHER_LON}"
+          test -s "${OUT_DIR}/weather.csv" || { echo "::error::weather.csv não gerado"; exit 17; }
+
+      # ===================== NEWS (obrigatório) =====================
+      - name: News ingest (STRICT)
+        env:
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+        run: |
+          set -euo pipefail
+          [ -f scripts/news_ingest_safe.py ] || { echo "::error::scripts/news_ingest_safe.py não encontrado (adicione este script)."; exit 18; }
+          a=0; until [ $a -ge 3 ]; do
+            python scripts/news_ingest_safe.py --rodada "${OUT_DIR}" ${DEBUG:+--debug} && break
+            a=$((a+1)); echo "retry news: $a/3"; sleep $((5*a))
+          done
+          test -s "${OUT_DIR}/news.csv" || { echo "::error::news.csv não gerado"; exit 18; }
+
+      # ===================== MARKET PREDICT + CALIBRATE =====================
+      - name: Predict from odds (STRICT)
         run: |
           set -euo pipefail
           [ -f scripts/predict_from_odds.py ] || { echo "::error::scripts/predict_from_odds.py não encontrado"; exit 7; }
           python scripts/predict_from_odds.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado"; exit 7; }
+          # valida odds_draw não-NaN
+          awk -F, 'NR==1{for(i=1;i<=NF;i++) if($i=="odds_draw") c=i} NR>1 && ($c=="" || $c=="NaN"){print "linha com odds_draw inválida: " NR; bad=1} END{exit bad}' "${OUT_DIR}/predictions_market.csv" || { echo "::error::odds_draw inválida em predictions_market.csv"; exit 98; }
 
-      # 7) Features — Univariado
-      - name: Build features — univariado
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-        run: |
-          set -euo pipefail
-          [ -f scripts/feature_build_univariado.py ] || { echo "::error::scripts/feature_build_univariado.py não encontrado"; exit 21; }
-          python scripts/feature_build_univariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
-          test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv não gerado"; exit 21; }
-
-      # 8) Features — Bivariado
-      - name: Build features — bivariado
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-        run: |
-          set -euo pipefail
-          [ -f scripts/feature_build_bivariado.py ] || { echo "::error::scripts/feature_build_bivariado.py não encontrado"; exit 22; }
-          python scripts/feature_build_bivariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
-          test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv não gerado"; exit 22; }
-
-      # 9) Join contexto
-      - name: Join features + context
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-        run: |
-          set -euo pipefail
-          [ -f scripts/feature_join_context.py ] || { echo "::error::scripts/feature_join_context.py não encontrado"; exit 28; }
-          python scripts/feature_join_context.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
-          test -s "${OUT_DIR}/context_features.csv" || { echo "::error::context_features.csv não gerado"; exit 28; }
-          head -n 10 "${OUT_DIR}/context_features.csv" || true
-
-      # 10) Calibração de probabilidades
-      - name: Calibrate probabilities (isotonic/platt)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      - name: Calibrate probabilities (STRICT)
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py não encontrado"; exit 23; }
           python scripts/calibrate_probs.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv não gerado"; exit 23; }
 
-      # 11) Kelly stakes
-      - name: Publicar Kelly (stakes)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ===================== FEATURES & CONTEXTO =====================
+      - name: Build features - Univariado (STRICT)
+        run: |
+          set -euo pipefail
+          [ -f scripts/feature_build_univariado.py ] || { echo "::error::scripts/feature_build_univariado.py não encontrado"; exit 21; }
+          python scripts/feature_build_univariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv não gerado"; exit 21; }
+
+      - name: Build features - Bivariado (STRICT)
+        run: |
+          set -euo pipefail
+          [ -f scripts/feature_build_bivariado.py ] || { echo "::error::scripts/feature_build_bivariado.py não encontrado"; exit 22; }
+          python scripts/feature_build_bivariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv não gerado"; exit 22; }
+
+      - name: Join contexto (STRICT)
+        run: |
+          set -euo pipefail
+          [ -f scripts/feature_join_context.py ] || { echo "::error::scripts/feature_join_context.py não encontrado"; exit 28; }
+          python scripts/feature_join_context.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          test -s "${OUT_DIR}/context_features.csv" || { echo "::error::context_features.csv não gerado"; exit 28; }
+
+      # ===================== BLEND & KELLY =====================
+      - name: Blend models (STRICT)
+        run: |
+          set -euo pipefail
+          [ -f scripts/blend_models.py ] || { echo "::error::scripts/blend_models.py não encontrado"; exit 24; }
+          # flags booleanas tipo store_true: não passe 'true' literal
+          python scripts/blend_models.py --rodada "${OUT_DIR}" --w_calib 0.65 --w_market 0.35 --use-context --context-strength 0.15 ${DEBUG:+--debug}
+          test -s "${OUT_DIR}/predictions_final.csv" || { echo "::error::predictions_final.csv não gerado"; exit 24; }
+          head -n 10 "${OUT_DIR}/predictions_final.csv" || true
+
+      - name: Publish Kelly (STRICT)
         run: |
           set -euo pipefail
           [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
-      # 12) Artefatos
-      - name: Publicar artefatos
-        uses: actions/upload-artifact@v4
-        with:
-          name: run-${{ steps.init.outputs.RUN_ID }}
-          path: |
-            ${{ env.OUT_DIR }}/**
-            data/in/matches_whitelist.csv
-            data/in/aliases.json
+      # ===================== W&B (obrigatório) =====================
+      - name: Weights & Biases - Upload artifacts (STRICT)
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${WANDB_API_KEY:-}" ] || { echo "::error::WANDB_API_KEY ausente nos secrets"; exit 60; }
+          python - <<'PY'
+import os, glob, wandb
+run = wandb.init(project="loteca-framework", job_type="e2e_strict", config={"run_id": os.environ.get("RUN_ID"), "out_dir": os.environ.get("OUT_DIR")})
+ad = wandb.Artifact("rodada_artifacts", type="dataset")
+out_dir = os.environ["OUT_DIR"]
+for path in glob.glob(os.path.join(out_dir, "*.csv")):
+    ad.add_file(path, name=os.path.basename(path))
+run.log_artifact(ad)
+run.finish()
+PY
