@@ -1,213 +1,173 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 predict_from_odds.py
---------------------
-Gera probabilidades e um palpite 1x2 a partir das odds de consenso.
 
-Entrada:
-- data/out/<rodada>/odds_consensus.csv
-  colunas OBRIGATÓRIAS:
-    team_home, team_away, odds_home, odds_draw, odds_away
-  colunas OPCIONAIS (criadas se faltarem):
-    match_key, match_id
-
-Saída:
-- data/out/<rodada>/predictions_market.csv
+Lê odds de data/out/<RID>/odds_consensus.csv, corrige overround e produz:
+  data/out/<RID>/predictions_market.csv
 
 Colunas de saída:
-  match_key,home,away,odd_home,odd_draw,odd_away,
-  p_home,p_draw,p_away,pick_1x2,conf_margin
+  match_key,home,away,odd_home,odd_draw,odd_away,p_home,p_draw,p_away,pick_1x2,conf_margin
+
+Robustez:
+- Aceita cabeçalhos 'team_home/team_away' ou 'home/away'
+- Gera match_key determinístico "<home>__vs__<away>" (minúsculo, sem acento)
+- Ignora linhas com odds inválidas
 """
 
+import argparse
+import csv
 import os
 import sys
-import csv
-import argparse
-import math
+import unicodedata
+from math import isfinite
+
 import pandas as pd
-from typing import Tuple
-
-REQ_COLS = ["team_home", "team_away", "odds_home", "odds_draw", "odds_away"]
 
 
-def log(msg: str, debug: bool = False):
-    if debug:
-        print(f"[predict] {msg}", flush=True)
+def ffloat(x, default=0.0):
+    try:
+        v = float(x)
+        return v if isfinite(v) else default
+    except Exception:
+        return default
 
 
-def resolve_out_dir(rodada_arg: str) -> str:
-    """Aceita tanto um ID (ex.: '17598...') quanto o caminho 'data/out/<id>'."""
-    if os.path.isdir(rodada_arg):
-        return rodada_arg
-    candidate = os.path.join("data", "out", str(rodada_arg))
-    if os.path.isdir(candidate):
-        return candidate
-    # cria se ainda não existir
-    os.makedirs(candidate, exist_ok=True)
-    return candidate
-
-
-def norm_team(s):
+def strip_accents(s: str) -> str:
     if s is None:
         return ""
-    return str(s).strip()
+    return "".join(c for c in unicodedata.normalize("NFKD", str(s)) if not unicodedata.combining(c))
 
 
-def build_match_key(home: str, away: str) -> str:
-    h = (home or "").strip().lower().replace(" ", "-")
-    a = (away or "").strip().lower().replace(" ", "-")
+def norm_name(s: str) -> str:
+    s = strip_accents(str(s or "")).strip().lower()
+    s = s.replace("  ", " ")
+    s = s.replace("_", " ").replace("-", " ")
+    s = " ".join(s.split())
+    # normalizações leves usadas no restante do pipeline
+    s = s.replace("atletico mg", "atletico-mg")
+    s = s.replace("america mg", "america-mg")
+    s = s.replace("operario pr", "operario-pr")
+    s = s.replace("athletico pr", "athletico-pr")
+    s = s.replace("atletico go", "atletico-go")
+    s = s.replace("sao bernardo", "sao bernardo")
+    s = s.replace("goias", "goias")
+    s = s.replace("cuiaba", "cuiaba")
+    return s
+
+
+def make_match_key(home: str, away: str) -> str:
+    h = norm_name(home)
+    a = norm_name(away)
     return f"{h}__vs__{a}"
 
 
-def ensure_columns(df: pd.DataFrame, out_dir: str, debug: bool = False) -> pd.DataFrame:
+def remove_overround(oh: float, od: float, oa: float):
     """
-    - Checa colunas obrigatórias.
-    - Gera match_key/match_id se não existirem.
-    - Converte odds para numérico.
-    - Renomeia headers alternativos (odd_* -> odds_*) se necessário.
+    Converte odds brutas (com overround) em probabilidades "justas".
     """
-    ren = {}
-    if "home" in df.columns and "team_home" not in df.columns:
-        ren["home"] = "team_home"
-    if "away" in df.columns and "team_away" not in df.columns:
-        ren["away"] = "team_away"
-    if "odd_home" in df.columns and "odds_home" not in df.columns:
-        ren["odd_home"] = "odds_home"
-    if "odd_draw" in df.columns and "odds_draw" not in df.columns:
-        ren["odd_draw"] = "odds_draw"
-    if "odd_away" in df.columns and "odds_away" not in df.columns:
-        ren["odd_away"] = "odds_away"
+    if oh <= 1e-9 or od <= 1e-9 or oa <= 1e-9:
+        return (1/3, 1/3, 1/3)
+    imp_h = 1.0 / oh
+    imp_d = 1.0 / od
+    imp_a = 1.0 / oa
+    over = imp_h + imp_d + imp_a
+    if over <= 0:
+        return (1/3, 1/3, 1/3)
+    return (imp_h / over, imp_d / over, imp_a / over)
 
-    if ren:
-        log(f"renomeando colunas: {ren}", debug)
-        df = df.rename(columns=ren)
 
-    missing = [c for c in REQ_COLS if c not in df.columns]
-    if missing:
-        raise ValueError(f"[predict] faltam colunas obrigatórias: {missing}")
+def pick_1x2(ph: float, pd: float, pa: float):
+    trio = [("1", ph), ("X", pd), ("2", pa)]
+    trio.sort(key=lambda t: t[1], reverse=True)
+    fav, fav_p = trio[0]
+    second_p = trio[1][1]
+    return fav, fav_p - second_p
 
-    # normaliza nomes das equipes
-    df["team_home"] = df["team_home"].map(norm_team)
-    df["team_away"] = df["team_away"].map(norm_team)
 
-    # numéricos
-    for c in ["odds_home", "odds_draw", "odds_away"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # remove linhas sem odds válidas
-    df = df.dropna(subset=["odds_home", "odds_draw", "odds_away"]).copy()
-
-    # match_key
-    if "match_key" not in df.columns:
-        df["match_key"] = df.apply(
-            lambda r: build_match_key(r["team_home"], r["team_away"]), axis=1
-        )
+def ensure_columns(df: pd.DataFrame, out_dir: str, debug: bool) -> pd.DataFrame:
+    # mapeia nomes
+    if "team_home" in df.columns and "team_away" in df.columns:
+        df["home"] = df["team_home"].astype(str)
+        df["away"] = df["team_away"].astype(str)
+    elif "home" in df.columns and "away" in df.columns:
+        df["home"] = df["home"].astype(str)
+        df["away"] = df["away"].astype(str)
     else:
-        df["match_key"] = df["match_key"].fillna("").map(str).str.strip()
-        mask_empty = df["match_key"].eq("")
-        if mask_empty.any():
-            df.loc[mask_empty, "match_key"] = df.loc[mask_empty].apply(
-                lambda r: build_match_key(r["team_home"], r["team_away"]), axis=1
-            )
+        raise ValueError("Colunas de times não encontradas (esperado team_home/team_away ou home/away)")
 
-    # match_id (opcional nos arquivos seguintes, mas útil)
-    if "match_id" not in df.columns:
-        df["match_id"] = df["team_home"].astype(str).str.strip() + "__" + df["team_away"].astype(str).str.strip()
+    # odds com vários possíveis nomes
+    def first_present(*names):
+        for n in names:
+            if n in df.columns:
+                return n
+        return None
 
-    return df
+    c_h = first_present("odds_home", "odd_home", "home_odds")
+    c_d = first_present("odds_draw", "odd_draw", "draw_odds")
+    c_a = first_present("odds_away", "odd_away", "away_odds")
+    if not all([c_h, c_d, c_a]):
+        raise ValueError("Colunas de odds não encontradas (odds_home/odds_draw/odds_away).")
 
+    df = df.copy()
+    df["odd_home"] = pd.to_numeric(df[c_h], errors="coerce")
+    df["odd_draw"] = pd.to_numeric(df[c_d], errors="coerce")
+    df["odd_away"] = pd.to_numeric(df[c_a], errors="coerce")
 
-def implied_probs(oh: float, od: float, oa: float) -> Tuple[float, float, float]:
-    """Converte odds decimais em probabilidades implícitas e normaliza para somar 1."""
-    inv = []
-    for o in (oh, od, oa):
-        try:
-            inv.append(1.0 / float(o) if o and float(o) > 0 else float("nan"))
-        except Exception:
-            inv.append(float("nan"))
-    if any(math.isnan(x) for x in inv):
-        return (float("nan"), float("nan"), float("nan"))
+    # cria match_key **como string única** (o bug estava aqui)
+    df["match_key"] = df.apply(lambda r: make_match_key(r["home"], r["away"]), axis=1)
 
-    s = sum(inv)
-    if s <= 0:
-        return (float("nan"), float("nan"), float("nan"))
-    return tuple(x / s for x in inv)  # p_home, p_draw, p_away
+    # limpa linhas inválidas
+    before = len(df)
+    df = df.dropna(subset=["odd_home", "odd_draw", "odd_away"])
+    df = df[(df["odd_home"] > 1.01) & (df["odd_draw"] > 1.01) & (df["odd_away"] > 1.01)]
+    if debug:
+        print(f"[predict][DEBUG] linhas válidas: {len(df)} (antes {before})")
 
-
-def pick_from_probs(p_home: float, p_draw: float, p_away: float) -> Tuple[str, float]:
-    """Retorna pick em {1, X, 2} e a margem de confiança (top1 - top2)."""
-    probs = [("1", p_home), ("X", p_draw), ("2", p_away)]
-    probs_sorted = sorted(probs, key=lambda x: x[1], reverse=True)
-    top = probs_sorted[0][1]
-    snd = probs_sorted[1][1]
-    margin = float("nan")
-    try:
-        margin = float(top - snd)
-    except Exception:
-        pass
-    return probs_sorted[0][0], margin
+    return df[["match_key", "home", "away", "odd_home", "odd_draw", "odd_away"]]
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="ID da rodada OU caminho data/out/<id>")
-    ap.add_argument("--debug", action="store_true", help="Imprime logs detalhados")
+    ap.add_argument("--rodada", required=True, help="Diretório da rodada (data/out/<RID>)")
+    ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
-    out_dir = resolve_out_dir(args.rodada)
-    log(f"OUT_DIR = {out_dir}", args.debug)
+    out_dir = args.rodada
+    infile = os.path.join(out_dir, "odds_consensus.csv")
+    if not os.path.isfile(infile):
+        print(f"::error::Arquivo não encontrado: {infile}", file=sys.stderr)
+        sys.exit(7)
 
-    # Entrada
-    fp_cons = os.path.join(out_dir, "odds_consensus.csv")
-    if not os.path.isfile(fp_cons):
-        raise FileNotFoundError(f"[predict] arquivo não encontrado: {fp_cons}")
-
-    df = pd.read_csv(fp_cons)
-    log(f"usando odds_consensus.csv ({fp_cons})", args.debug)
-
-    # Garantias de colunas + saneamento
+    df = pd.read_csv(infile)
     df = ensure_columns(df, out_dir, args.debug)
 
-    # Calcula probabilidades implícitas e pick
-    out_rows = []
-    for _, r in df.iterrows():
-        oh = r["odds_home"]
-        od = r["odds_draw"]
-        oa = r["odds_away"]
-        ph, pd_, pa = implied_probs(oh, od, oa)
-        pick, margin = pick_from_probs(ph, pd_, pa)
+    # prob "fair"
+    probs = df.apply(lambda r: remove_overround(r["odd_home"], r["odd_draw"], r["odd_away"]), axis=1)
+    df["p_home"] = probs.apply(lambda t: float(t[0]))
+    df["p_draw"] = probs.apply(lambda t: float(t[1]))
+    df["p_away"] = probs.apply(lambda t: float(t[2]))
 
-        out_rows.append(
-            {
-                "match_key": r["match_key"],
-                "home": r["team_home"],
-                "away": r["team_away"],
-                "odd_home": oh,
-                "odd_draw": od,
-                "odd_away": oa,
-                "p_home": ph,
-                "p_draw": pd_,
-                "p_away": pa,
-                "pick_1x2": pick,
-                "conf_margin": margin,
-            }
-        )
+    # decisão 1X2 e margem de confiança
+    picks = df.apply(lambda r: pick_1x2(r["p_home"], r["p_draw"], r["p_away"]), axis=1)
+    df["pick_1x2"] = picks.apply(lambda t: t[0])
+    df["conf_margin"] = picks.apply(lambda t: float(t[1]))
 
-    out_df = pd.DataFrame(out_rows)
-
-    # Ordena por conf_margin desc (opcional)
-    out_df = out_df.sort_values(by="conf_margin", ascending=False, na_position="last").reset_index(drop=True)
-
-    # Saída
+    out_cols = ["match_key", "home", "away", "odd_home", "odd_draw", "odd_away",
+                "p_home", "p_draw", "p_away", "pick_1x2", "conf_margin"]
     out_path = os.path.join(out_dir, "predictions_market.csv")
-    out_df.to_csv(out_path, index=False, quoting=csv.QUOTE_MINIMAL)
+    df[out_cols].to_csv(out_path, index=False)
 
-    # Log resumido
     if args.debug:
-        print(out_df.head(20).to_string(index=False))
-        print(out_df.head(20).to_csv(index=False))
+        print(df[out_cols].head(20).to_csv(index=False))
+
+    print(f"[predict] OK -> {out_path}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"[predict][ERRO] {e}", file=sys.stderr)
+        sys.exit(7)
