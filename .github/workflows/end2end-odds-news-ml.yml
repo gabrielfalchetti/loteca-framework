@@ -56,7 +56,6 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # libs extras necessárias pelos scripts
           pip install pandas numpy rapidfuzz requests pytz python-dateutil Unidecode
 
       # ---------- PREP ----------
@@ -96,8 +95,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # inputs.debug só existe no workflow_dispatch; no schedule cai em branco
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.debug || 'false' }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.debug }}" = "true" ]; then
             echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
           else
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
@@ -381,8 +379,7 @@ PY
               {
                 home=$hi; away=$ai; pick=$pi; stake=$si;
                 gsub(/^ +| +$/,"",home); gsub(/^ +| +$/,"",away);
-                # to upper (compatible)
-                cmd="printf \"%s\" \""'"'"'"'"'\" pick "\"'"'"'"'"'\" | tr a-z A-Z"; cmd | getline pickU; close(cmd);
+                pickU=toupper(pick);
                 printf("- **%s x %s** — palpite: %s  |  stake: %s\n", home, away, pickU, stake)
               }
             ' "${OUT_DIR}/kelly_stakes.csv"
