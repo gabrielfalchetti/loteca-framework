@@ -6,10 +6,6 @@ on:
 permissions:
   contents: read
 
-defaults:
-  run:
-    shell: bash
-
 env:
   SEASON: "2025"
   REGIONS: "uk,eu,us,au"
@@ -29,22 +25,23 @@ jobs:
       X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
 
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "Setup Python 3.11"
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: "Cache pip"
+      - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
-      - name: "Install dependencies (strict)"
+      - name: Install dependencies (strict)
+        shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
@@ -54,8 +51,9 @@ jobs:
             pip install requests pandas numpy pyyaml unidecode
           fi
 
-      - name: "Prepare run folders and env"
+      - name: Prepare run folders and env
         id: prep
+        shell: bash
         run: |
           set -euo pipefail
           if [ -z "${THEODDS_API_KEY:-}" ]; then echo "::error::THEODDS_API_KEY secret not set"; exit 1; fi
@@ -78,14 +76,15 @@ jobs:
             exit 2
           fi
 
-          # DEBUG_FLAG
+          # DEBUG_FLAG para reutilizar nos comandos Python
           if [ "${DEBUG:-}" = "true" ]; then
             echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
           else
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           fi
 
-      - name: "Normalize and validate matches_source -> whitelist"
+      - name: Normalize and validate matches_source -> whitelist
+        shell: bash
         run: |
           set -euo pipefail
           SRC="data/in/matches_source.csv"
@@ -102,94 +101,92 @@ jobs:
             echo "$h_low" | grep -qiE "(^|,)$need(,|$)" || { echo "::error::missing column '$need' in matches_source.csv"; exit 2; }
           done
 
-          # Escreve o script awk em arquivo (evita problemas de YAML em linhas específicas)
-          AWK_FILE="${DST_DIR}/_normalize.awk"
-          cat > "${AWK_FILE}" << 'AWK'
-          BEGIN { FS=","; OFS="," }
-          function rmuf(s){ gsub(/\/[A-Za-z]{2}($|[^A-Za-z])/, "", s); return s }
-          function deacc(s){
-            gsub(/á|à|ã|â|ä/,"a",s); gsub(/Á|À|Ã|Â|Ä/,"A",s);
-            gsub(/é|ê|è|ë/,"e",s);  gsub(/É|Ê|È|Ë/,"E",s);
-            gsub(/í|î|ì|ï/,"i",s);  gsub(/Í|Î|Ì|Ï/,"I",s);
-            gsub(/ó|ô|ò|õ|ö/,"o",s); gsub(/Ó|Ô|Ò|Õ|Ö/,"O",s);
-            gsub(/ú|û|ù|ü/,"u",s);  gsub(/Ú|Û|Ù|Ü/,"U",s);
-            gsub(/ç/,"c",s);        gsub(/Ç/,"C",s);
-            gsub(/ñ/,"n",s);        gsub(/Ñ/,"N",s);
-            return s
-          }
-          function trim(s){ sub(/^ +/,"",s); sub(/ +$/,"",s); return s }
-          function map_pt_en(s,  l){
-            l=tolower(s)
-            if(l=="estonia") return "Estonia"
-            if(l=="italia") return "Italy"
-            if(l=="bulgaria") return "Bulgaria"
-            if(l=="turquia") return "Turkey"
-            if(l=="espanha") return "Spain"
-            if(l=="georgia") return "Georgia"
-            if(l=="servia" || l=="serbia/ser" || l=="serbia") return "Serbia"
-            if(l=="albania") return "Albania"
-            if(l=="portugal") return "Portugal"
-            if(l=="irlanda") return "Ireland"
-            if(l=="holanda" || l=="paises baixos") return "Netherlands"
-            if(l=="finlandia") return "Finland"
-            if(l=="romenia") return "Romania"
-            if(l=="austria") return "Austria"
-            if(l=="dinamarca") return "Denmark"
-            if(l=="grecia") return "Greece"
-            if(l=="lituania") return "Lithuania"
-            if(l=="polonia") return "Poland"
-            if(l=="ponte preta") return "Ponte Preta"
-            if(l=="guarani") return "Guarani"
-            if(l=="palmeiras") return "Palmeiras"
-            if(l=="juventude") return "Juventude"
-            if(l=="criciuma") return "Criciuma"
-            if(l=="america/mg" || l=="america mg" || l=="america-mg" || l=="america mineiro") return "America Mineiro"
-            if(l=="cuiaba") return "Cuiaba"
-            if(l=="coritiba") return "Coritiba"
-            if(l=="novorizontino" || l=="gremio novorizontino" || l=="grêmio novorizontino") return "Gremio Novorizontino"
-            if(l=="operario" || l=="operario pr" || l=="operario/pr" || l=="operário/pr") return "Operario PR"
-            return s
-          }
-          NR==1{
-            for(i=1;i<=NF;i++){
-              k=tolower($i);
-              if(k=="match_id") mi=i;
-              if(k=="home") hi=i;
-              if(k=="away") ai=i;
+          awk -F',' -v OFS=',' '
+            function rmuf(s){ gsub(/\/[A-Za-z]{2}($|[^A-Za-z])/, "", s); return s }
+            function deacc(s){
+              gsub(/á|à|ã|â|ä/,"a",s); gsub(/Á|À|Ã|Â|Ä/,"A",s);
+              gsub(/é|ê|è|ë/,"e",s);  gsub(/É|Ê|È|Ë/,"E",s);
+              gsub(/í|î|ì|ï/,"i",s);  gsub(/Í|Î|Ì|Ï/,"I",s);
+              gsub(/ó|ô|ò|õ|ö/,"o",s); gsub(/Ó|Ô|Ò|Õ|Ö/,"O",s);
+              gsub(/ú|û|ù|ü/,"u",s);  gsub(/Ú|Û|Ù|Ü/,"U",s);
+              gsub(/ç/,"c",s);        gsub(/Ç/,"C",s);
+              gsub(/ñ/,"n",s);        gsub(/Ñ/,"N",s);
+              return s
             }
-            if(!(mi&&hi&&ai)){ print "::error::header mapping failed"; exit 2 }
-            print "match_id","home","away";
-            next
-          }
-          {
-            mid=$mi; home=$hi; away=$ai;
-            home=rmuf(home); away=rmuf(away);
-            home=deacc(home); away=deacc(away);
-            home=trim(home); away=trim(away);
-            home=map_pt_en(home); away=map_pt_en(away);
-            if(mid=="" || home=="" || away==""){ print "::error::empty field on line " NR; exit 2 }
-            if(seen[mid]++){ print "::error::duplicate match_id: " mid; exit 2 }
-            print mid,home,away
-          }
-          AWK
-
-          awk -f "${AWK_FILE}" "$DST_RAW" > "$DST_TMP"
+            function trim(s){ sub(/^ +/,"",s); sub(/ +$/,"",s); return s }
+            function map_pt_en(s,  l){
+              l=tolower(s)
+              if(l=="estonia") return "Estonia"
+              if(l=="italia") return "Italy"
+              if(l=="bulgaria") return "Bulgaria"
+              if(l=="turquia") return "Turkey"
+              if(l=="espanha") return "Spain"
+              if(l=="georgia") return "Georgia"
+              if(l=="servia" || l=="serbia/ser" || l=="serbia") return "Serbia"
+              if(l=="albania") return "Albania"
+              if(l=="portugal") return "Portugal"
+              if(l=="irlanda") return "Ireland"
+              if(l=="holanda" || l=="paises baixos") return "Netherlands"
+              if(l=="finlandia") return "Finland"
+              if(l=="romenia") return "Romania"
+              if(l=="austria") return "Austria"
+              if(l=="dinamarca") return "Denmark"
+              if(l=="grecia") return "Greece"
+              if(l=="lituania") return "Lithuania"
+              if(l=="polonia") return "Poland"
+              if(l=="ponte preta") return "Ponte Preta"
+              if(l=="guarani") return "Guarani"
+              if(l=="palmeiras") return "Palmeiras"
+              if(l=="juventude") return "Juventude"
+              if(l=="criciuma") return "Criciuma"
+              if(l=="america/mg" || l=="america mg" || l=="america-mg" || l=="america mineiro") return "America Mineiro"
+              if(l=="cuiaba") return "Cuiaba"
+              if(l=="coritiba") return "Coritiba"
+              if(l=="novorizontino" || l=="gremio novorizontino" || l=="grêmio novorizontino") return "Gremio Novorizontino"
+              if(l=="operario" || l=="operario pr" || l=="operario/pr" || l=="operário/pr") return "Operario PR"
+              return s
+            }
+            NR==1{
+              for(i=1;i<=NF;i++){
+                k=tolower($i);
+                if(k=="match_id") mi=i;
+                if(k=="home") hi=i;
+                if(k=="away") ai=i;
+              }
+              if(!(mi&&hi&&ai)){ print "::error::header mapping failed"; exit 2 }
+              print "match_id","home","away";
+              next
+            }
+            {
+              mid=$mi; home=$hi; away=$ai;
+              home=rmuf(home); away=rmuf(away);
+              home=deacc(home); away=deacc(away);
+              home=trim(home); away=trim(away);
+              home=map_pt_en(home); away=map_pt_en(away);
+              if(mid=="" || home=="" || away==""){ print "::error::empty field on line " NR; exit 2 }
+              if(seen[mid]++){ print "::error::duplicate match_id: " mid; exit 2 }
+              print mid,home,away
+            }
+          ' "$DST_RAW" > "$DST_TMP"
 
           LINES=$(wc -l < "$DST_TMP" | tr -d " ")
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
           mv "$DST_TMP" "$DST_FINAL"
+
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_FINAL" || true
 
-      - name: "Validate team names before ingest (pre-flight)"
+      - name: Validate team names before ingest (pre-flight)
+        shell: bash
         run: |
           set -euo pipefail
           WL="${OUT_DIR}/matches_whitelist.csv"
           echo "=== Unique teams from whitelist ==="
           awk -F',' 'NR>1{print $2; print $3}' "$WL" | sort -u | nl -ba
 
-      - name: "Ingest THEODDSAPI (mandatory)"
+      - name: Ingest THEODDSAPI (mandatory)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
@@ -211,7 +208,8 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
           done
 
-      - name: "Ingest API-Football (RapidAPI, mandatory)"
+      - name: Ingest API-Football (RapidAPI, mandatory)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
@@ -232,7 +230,8 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
           done
 
-      - name: "Consensus odds (STRICT)"
+      - name: Consensus odds (STRICT)
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -248,15 +247,16 @@ jobs:
           echo "=== Preview odds_consensus.csv ==="
           head -n 20 "$OUT_FILE" || true
 
-      - name: "Calibrate probabilities from consensus"
+      - name: Calibrate probabilities from consensus
+        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-import os, pandas as pd, numpy as np
+import pandas as pd, numpy as np
 from unidecode import unidecode
 from pathlib import Path
 
-out_dir = Path(os.environ["OUT_DIR"])
+out_dir = Path("${OUT_DIR}")
 wl = pd.read_csv(out_dir/"matches_whitelist.csv")
 cons = pd.read_csv(out_dir/"odds_consensus.csv")
 
@@ -268,13 +268,13 @@ wl["away_n"] = wl["away"].map(norm)
 cons["home_n"] = cons["team_home"].map(norm)
 cons["away_n"] = cons["team_away"].map(norm)
 
-m = wl.merge(cons, on=["home_n","away_n"], how="inner", suffixes=("",""))
+m = wl.merge(cons, on=["home_n","away_n"], how="inner")
 if m.empty:
     raise SystemExit("::error::no matches joined between whitelist and consensus. Check name normalization.")
 
 # implied probs and margin normalization
 for col in ("odds_home","odds_draw","odds_away"):
-    if (m[col].astype(float) <= 1).any():
+    if (m[col] <= 1).any():
         raise SystemExit(f"::error::invalid odds <=1 found in consensus: column {col}")
 
 inv = pd.DataFrame({
@@ -293,16 +293,17 @@ print("calibrated_probs.csv written with", len(m), "rows")
 PY
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv not generated"; exit 7; }
 
-      - name: "XG - Univariate (feature engineering)"
+      - name: XG - Univariate (feature engineering)
+        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-import os, pandas as pd
+import pandas as pd
 from pathlib import Path
-out_dir = Path(os.environ["OUT_DIR"])
+out_dir = Path("${OUT_DIR}")
 df = pd.read_csv(out_dir/"calibrated_probs.csv")
 
-# Proxy xG simples a partir das probabilidades:
+# Proxy xG simples (engineering, não oficial)
 df["xg_home"] = 1.8*df["p_home"] + 0.9*df["p_draw"]
 df["xg_away"] = 1.8*df["p_away"] + 0.9*df["p_draw"]
 
@@ -312,16 +313,16 @@ print("xg_univariate.csv written with", len(df))
 PY
           test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 8; }
 
-      - name: "XG - Bivariate (feature engineering)"
+      - name: XG - Bivariate (feature engineering)
+        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-import os, pandas as pd
+import pandas as pd
 from pathlib import Path
-out_dir = Path(os.environ["OUT_DIR"])
+out_dir = Path("${OUT_DIR}")
 u = pd.read_csv(out_dir/"xg_univariate.csv")
 
-# Interações simples
 u["xg_sum"] = u["xg_home"] + u["xg_away"]
 u["xg_diff"] = u["xg_home"] - u["xg_away"]
 u["p_max"] = u[["p_home","p_draw","p_away"]].max(axis=1)
@@ -332,22 +333,24 @@ print("xg_bivariate.csv written with", len(u))
 PY
           test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 9; }
 
-      - name: "Kelly stakes"
+      - name: Kelly stakes
+        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
-      - name: "Montar Cartão Loteca"
+      - name: Montar Cartão Loteca
+        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-import os, pandas as pd
+import pandas as pd
 from pathlib import Path
 from unidecode import unidecode
 
-out_dir = Path(os.environ["OUT_DIR"])
+out_dir = Path("${OUT_DIR}")
 wl  = pd.read_csv(out_dir/"matches_whitelist.csv")
 cal = pd.read_csv(out_dir/"calibrated_probs.csv")
 
@@ -379,17 +382,8 @@ PY
           echo "==== Preview loteca_card.txt ===="
           head -n 50 "${OUT_DIR}/loteca_card.txt" || true
 
-      - name: "Upload artifacts"
+      - name: Upload artifacts (entire OUT_DIR)
         uses: actions/upload-artifact@v4
         with:
           name: loteca_${{ steps.prep.outputs.RUN_ID }}
-          path: |
-            ${{ env.OUT_DIR }}/matches_whitelist.csv
-            ${{ env.OUT_DIR }}/odds_theoddsapi.csv
-            ${{ env.OUT_DIR }}/odds_apifootball.csv
-            ${{ env.OUT_DIR }}/odds_consensus.csv
-            ${{ env.OUT_DIR }}/calibrated_probs.csv
-            ${{ env.OUT_DIR }}/xg_univariate.csv
-            ${{ env.OUT_DIR }}/xg_bivariate.csv
-            ${{ env.OUT_DIR }}/kelly_stakes.csv
-            ${{ env.OUT_DIR }}/loteca_card.txt
+          path: ${{ env.OUT_DIR }}
