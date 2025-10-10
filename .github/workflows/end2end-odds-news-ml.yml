@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       debug:
-        description: "Habilitar debug"
-        type: boolean
-        default: true
+        description: "Enable debug logs"
         required: false
+        default: true
+        type: boolean
   schedule:
     - cron: "15 09 * * 4,5"
 
@@ -56,9 +56,10 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
+          # hard deps used in the steps
           pip install pandas numpy rapidfuzz requests pytz python-dateutil
 
-      # ---------- PREPARE ----------
+      # ---------- PREP ----------
       - name: Prepare run folders
         id: prep
         shell: bash
@@ -66,17 +67,14 @@ jobs:
           set -euo pipefail
           RUN_ID="$(date +%s)"
           echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
-
           OUT_DIR="data/out/${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
           mkdir -p "data/in" "${OUT_DIR}"
-
           if [ ! -s "data/in/aliases.json" ]; then
             echo '{"teams": {}}' > data/in/aliases.json
           fi
-
           if [ ! -s "data/in/matches_source.csv" ]; then
-            echo "::error::Arquivo obrigatório ausente: data/in/matches_source.csv"
+            echo "::error::Missing required file: data/in/matches_source.csv"
             exit 2
           fi
 
@@ -90,75 +88,62 @@ jobs:
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           fi
 
-      # ---------- VALIDACAO WHITELIST ----------
-      - name: Validar e normalizar nomes (whitelist)
-        id: validate_names
+      # ---------- VALIDATE WHITELIST (BASH/AWK) ----------
+      - name: Validate and normalize names
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-import csv, os, sys
-from pathlib import Path
+          SRC="data/in/matches_source.csv"
+          DST="${OUT_DIR}/matches_whitelist.csv"
 
-out_dir = os.environ.get("OUT_DIR") or ""
-src = Path("data/in/matches_source.csv")
-dst = Path(out_dir) / "matches_whitelist.csv"
-dst.parent.mkdir(parents=True, exist_ok=True)
+          # Remove CR, trim spaces around commas, collapse spaces
+          # and ensure the header has match_id,home,away (case-insensitive)
+          TMP="${OUT_DIR}/_tmp_src.csv"
+          tr -d '\r' < "$SRC" \
+          | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$TMP"
 
-if not src.exists():
-    print("::error::data/in/matches_source.csv não encontrado.")
-    sys.exit(2)
+          header="$(head -n1 "$TMP")"
+          h_low="$(echo "$header" | tr '[:upper:]' '[:lower:]')"
+          for need in match_id home away; do
+            echo "$h_low" | grep -qiE "(^|,)$need(,|$)" || { echo "::error::missing column '$need' in matches_source.csv"; exit 2; }
+          done
 
-with src.open("r", encoding="utf-8", newline="") as f:
-    reader = csv.DictReader(f)
-    if not reader.fieldnames:
-        print("::error::Cabeçalho ausente em matches_source.csv")
-        sys.exit(2)
-    fieldmap = {h.strip().lower(): h for h in reader.fieldnames}
-    req = {"match_id","home","away"}
-    miss = req - set(fieldmap.keys())
-    if miss:
-        print(f"::error::matches_source.csv sem colunas: {sorted(miss)}")
-        sys.exit(2)
-    seen = set()
-    rows = []
-    line = 1
-    for r in reader:
-        line += 1
-        mid = (r.get(fieldmap["match_id"]) or "").strip()
-        home = " ".join((r.get(fieldmap["home"]) or "").split())
-        away = " ".join((r.get(fieldmap["away"]) or "").split())
-        if not mid or not home or not away:
-            print(f"::error::Linha {line} inválida (match_id/home/away vazio)")
-            sys.exit(2)
-        if mid in seen:
-            print(f"::error::match_id duplicado: {mid}")
-            sys.exit(2)
-        seen.add(mid)
-        rows.append({"match_id": mid, "home": home, "away": away})
+          # Build whitelist (also check for duplicate match_id and empty fields)
+          awk -F',' -v OFS=',' '
+            NR==1{
+              for(i=1;i<=NF;i++){
+                k=tolower($i);
+                if(k=="match_id") mi=i;
+                if(k=="home") hi=i;
+                if(k=="away") ai=i;
+              }
+              if(!(mi&&hi&&ai)){ print "::error::header mapping failed"; exit 2 }
+              print "match_id","home","away";
+              next
+            }
+            {
+              mid=$mi; home=$hi; away=$ai;
+              gsub(/^ +| +$/,"",mid); gsub(/^ +| +$/,"",home); gsub(/^ +| +$/,"",away);
+              if(mid=="" || home=="" || away==""){ print "::error::empty field on line " NR; exit 2 }
+              if(seen[mid]++){ print "::error::duplicate match_id: " mid; exit 2 }
+              print mid,home,away
+            }
+          ' "$TMP" > "$DST"
 
-if not rows:
-    print("::error::Whitelist sem jogos")
-    sys.exit(3)
+          LINES=$(wc -l < "$DST" | tr -d ' ')
+          [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty"; exit 3; }
 
-with dst.open("w", encoding="utf-8", newline="") as g:
-    w = csv.DictWriter(g, fieldnames=["match_id","home","away"])
-    w.writeheader()
-    w.writerows(rows)
-
-print(f"[whitelist] gerada: {dst} linhas={len(rows)}")
-PY
           echo "===== Preview whitelist ====="
-          head -n 50 "${OUT_DIR}/matches_whitelist.csv" || true
+          head -n 50 "$DST" || true
 
-      # ---------- INGEST API-FOOTBALL ----------
-      - name: Ingest odds (API-Football via RapidAPI) obrigatorio
+      # ---------- INGEST API-FOOTBALL (REQUIRED) ----------
+      - name: Ingest odds (API-Football via RapidAPI) required
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py não encontrado."; exit 5; }
+          [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
           a=0; until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_apifootball_rapidapi \
               --rodada "${OUT_DIR}" \
@@ -167,30 +152,22 @@ PY
             a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
           done
           OUT="${OUT_DIR}/odds_apifootball.csv"
-          test -s "$OUT" || { echo "::error::odds_apifootball.csv não gerado"; exit 5; }
+          test -s "$OUT" || { echo "::error::odds_apifootball.csv not generated"; exit 5; }
           header="$(head -n1 "$OUT" | tr -d '\r')"
           for c in match_id home away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_apifootball.csv"; exit 5; }
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
           done
 
-      # ---------- ROBUSTEZ THEODDSAPI (OPCIONAL) ----------
-      - name: Ingest odds (TheOddsAPI soccer) opcional
+      # ---------- THEODDSAPI (OPTIONAL, SOCCER ONLY) ----------
+      - name: Ingest odds (TheOddsAPI) optional
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
           if [ ! -f scripts/ingest_odds_theoddsapi.py ]; then
-            echo "[theodds] script ausente - pulando"; exit 0
+            echo "[theodds] script missing - skipping"; exit 0
           fi
-          python - <<'PY'
-try:
-    import rapidfuzz  # noqa
-    print("[deps] rapidfuzz OK")
-except Exception:
-    import sys, subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "rapidfuzz"])
-PY
           a=0; until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
               --rodada "${OUT_DIR}" \
@@ -203,43 +180,43 @@ PY
           if [ -s "$OUT" ]; then
             header="$(head -n1 "$OUT" | tr -d '\r')"
             for c in match_id home away odds_home odds_draw odds_away; do
-              echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::warning::Coluna '$c' ausente em odds_theoddsapi.csv"; exit 0; }
+              echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::warning::missing column '$c' in odds_theoddsapi.csv"; exit 0; }
             done
           else
-            echo "[theodds] sem arquivo; seguindo apenas API-Football"
+            echo "[theodds] file not produced; proceeding with API-Football only"
           fi
 
-      # ---------- CONSENSO / MERCADO ----------
-      - name: Consensus odds safe
+      # ---------- CONSENSUS ----------
+      - name: Consensus odds
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py não encontrado"; exit 6; }
+          [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
-          test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv não gerado"; exit 6; }
+          test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv not generated"; exit 6; }
           header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
           for c in team_home team_away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_consensus.csv"; exit 6; }
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
           head -n 20 "$OUT_FILE" || true
 
-      - name: Predict from odds market
+      - name: Predict from odds
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/predict_from_odds.py ] || { echo "::error::scripts/predict_from_odds.py não encontrado"; exit 7; }
+          [ -f scripts/predict_from_odds.py ] || { echo "::error::scripts/predict_from_odds.py not found"; exit 7; }
           python scripts/predict_from_odds.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado"; exit 7; }
+          test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv not generated"; exit 7; }
 
-      # ---------- FEATURES UNIVARIADO ----------
+      # ---------- FEATURES ----------
       - name: Build features univariado
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/feature_build_univariado.py ] || { echo "::error::scripts/feature_build_univariado.py não encontrado"; exit 21; }
+          [ -f scripts/feature_build_univariado.py ] || { echo "::error::scripts/feature_build_univariado.py not found"; exit 21; }
           python scripts/feature_build_univariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv não gerado"; exit 21; }
+          test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv not generated"; exit 21; }
 
       # ---------- KELLY ----------
       - name: Publish Kelly stakes
@@ -249,39 +226,39 @@ PY
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
           set -euo pipefail
-          [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
+          [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py not found"; exit 25; }
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
+          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 25; }
 
-      # ---------- CARTAO LOTECA ----------
-      - name: Montar cartao loteca
+      # ---------- LOTECA CARD ----------
+      - name: Build loteca card
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-import pandas as pd, os, sys
-out_dir = os.environ.get("OUT_DIR") or ""
+          python - <<'PYCODE'
+import os, sys, pandas as pd
+out_dir = os.environ.get("OUT_DIR","")
 p = f"{out_dir}/kelly_stakes.csv"
 if not os.path.exists(p):
-    print("::error::kelly_stakes.csv não encontrado"); sys.exit(26)
+    print("::error::kelly_stakes.csv not found"); sys.exit(26)
 df = pd.read_csv(p)
-lines = ["# Cartão Loteca", ""]
+lines = ["# Cartao Loteca", ""]
 for _, r in df.iterrows():
-    home = r.get("team_home", "")
-    away = r.get("team_away", "")
-    pick = str(r.get("pick", "")).upper()
-    stake = r.get("stake", "")
+    home = r.get("team_home","")
+    away = r.get("team_away","")
+    pick = str(r.get("pick","")).upper()
+    stake = r.get("stake","")
     lines.append(f"- **{home} x {away}** — palpite: {pick}  |  stake: {stake}")
 content = "\n".join(lines) + "\n"
 with open(f"{out_dir}/loteca_card.md","w",encoding="utf-8") as f:
     f.write(content)
-print(f"[loteca] gerado: {out_dir}/loteca_card.md")
-PY
-          test -s "${OUT_DIR}/loteca_card.md" || { echo "::error::loteca_card.md não gerado"; exit 26; }
-          echo "===== Preview Cartao Loteca ====="
+print(f"[loteca] generated: {out_dir}/loteca_card.md")
+PYCODE
+          test -s "${OUT_DIR}/loteca_card.md" || { echo "::error::loteca_card.md not generated"; exit 26; }
+          echo "===== Preview loteca_card.md ====="
           head -n 50 "${OUT_DIR}/loteca_card.md" || true
 
-      # ---------- ARTEFATOS ----------
+      # ---------- ARTIFACTS ----------
       - name: Upload artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
