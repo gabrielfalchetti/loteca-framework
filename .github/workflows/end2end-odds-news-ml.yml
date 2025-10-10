@@ -56,6 +56,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
+          # ensure modules used by the scripts exist
           pip install pandas numpy rapidfuzz requests pytz python-dateutil Unidecode
 
       # ---------- PREP ----------
@@ -160,8 +161,8 @@ jobs:
               if(l=="america/mg" || l=="america mg" || l=="america-mg" || l=="america mineiro") return "America Mineiro"
               if(l=="cuiaba") return "Cuiaba"
               if(l=="coritiba") return "Coritiba"
-              if(l=="novorizontino" || l=="gremio novorizontino" || l=="grêmio novorizontino") return "Gremio Novorizontino"
-              if(l=="operario" || l=="operario pr" || l=="operario/pr" || l=="operário/pr") return "Operario PR"
+              if(l=="novorizontino" || l=="gremio novorizontino") return "Gremio Novorizontino"
+              if(l=="operario" || l=="operario pr" || l=="operario/pr") return "Operario PR"
               return s
             }
             NR==1{
@@ -186,7 +187,7 @@ jobs:
             }
           ' "$TMP_RAW" > "$TMP_NORM"
 
-          LINES=$(wc -l < "$TMP_NORM" | tr -d " ")
+          LINES=$(wc -l | tr -d " " < "$TMP_NORM")
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
           mv "$TMP_NORM" "$FINAL"
