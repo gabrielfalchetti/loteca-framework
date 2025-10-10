@@ -1,7 +1,14 @@
-name: End2End - Odds + News + ML
+name: end2end-odds-news-ml
 
 on:
   workflow_dispatch:
+    inputs:
+      debug:
+        description: "Habilitar debug"
+        type: boolean
+        default: true
+  schedule:
+    - cron: "15 09 * * 4,5"  # exemplo: quinta e sexta 09:15 UTC
 
 env:
   SEASON: "2025"
@@ -12,144 +19,141 @@ env:
   KELLY_CAP: "0.1"
   KELLY_TOP_N: "14"
   ROUND_TO: "1"
-  DEBUG: "true"
+  DEBUG: ${{ github.event.inputs.debug == 'true' && 'true' || '' }}
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps (with fallbacks)
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install pandas numpy python-dateutil requests rapidfuzz
-          fi
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-      - name: Init run (RUN_ID, OUT_DIR, pasta de entrada e aliases.json)
-        id: init
+      - name: Install deps
         shell: bash
         run: |
           set -euo pipefail
-          RUN_ID=$(date +%s)
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          # Garantir pacotes essenciais caso não estejam no requirements
+          pip install --upgrade pip
+          pip install pandas numpy rapidfuzz requests pytz python-dateutil
+
+      # ---------- PREPARE E VARS ----------
+      - name: Prepare run folders
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="$(date +%s)"
           echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
-          echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
+
+          OUT_DIR="data/out/${RUN_ID}"
+          export OUT_DIR
+          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
 
           mkdir -p "data/in" "${OUT_DIR}"
 
-          # Garante que o arquivo existe (mesmo que vazio)
+          # aliases.json (pode estar vazio)
           if [ ! -s "data/in/aliases.json" ]; then
             echo '{"teams": {}}' > data/in/aliases.json
           fi
 
-          # Garante que seu matches_source.csv existe
+          # matches_source.csv é obrigatório (você define os jogos)
           if [ ! -s "data/in/matches_source.csv" ]; then
             echo "::error::Arquivo obrigatório ausente: data/in/matches_source.csv"
             exit 2
           fi
 
-      - name: Build whitelist (somente dos meus jogos)
-        run: |
-          set -euo pipefail
-          [ -f scripts/build_whitelist_from_source.py ] || { echo "::error::scripts/build_whitelist_from_source.py não encontrado"; exit 3; }
-
-          # Gera whitelist EXCLUSIVA a partir de data/in/matches_source.csv
-          python scripts/build_whitelist_from_source.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
-
-          WL="${OUT_DIR}/matches_whitelist.csv"
-          test -s "$WL" || { echo "::error::Whitelist não gerada"; exit 3; }
-
-          header="$(head -n1 "$WL" | tr -d '\r')"
-          for c in match_id home away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Whitelist sem coluna '$c'"; exit 3; }
-          done
-          LINES=$(wc -l < "$WL" | tr -d ' ')
-          [ "$LINES" -ge 2 ] || { echo "::error::Whitelist sem jogos (mínimo 1 linha além do cabeçalho)"; exit 3; }
-
-          echo "===== Preview whitelist ====="
-          head -n 20 "$WL" || true
-
-      - name: Validar nomes de times (antes do ingest)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ---------- VALIDAÇÃO / NORMALIZAÇÃO DA WHITELIST ----------
+      - name: Validar e normalizar nomes (whitelist)
+        id: validate_names
         shell: bash
         run: |
           set -euo pipefail
+          python - << 'PY'
+import csv, os, sys
+from pathlib import Path
 
-          python - << 'PYCODE'
-          import json, sys, csv
-          from pathlib import Path
-          from rapidfuzz import process, fuzz
+src = Path("data/in/matches_source.csv")
+out_dir = os.environ.get("OUT_DIR", "")
+dst = Path(out_dir) / "matches_whitelist.csv"
+dst.parent.mkdir(parents=True, exist_ok=True)
 
-          OUT_DIR = Path("${{ env.OUT_DIR }}")
-          wl = OUT_DIR / "matches_whitelist.csv"
-          aliases_path = Path("data/in/aliases.json")
+if not src.exists():
+    print("::error::data/in/matches_source.csv não encontrado.")
+    sys.exit(2)
 
-          if not wl.is_file() or wl.stat().st_size == 0:
-            print("::error::Whitelist ausente ou vazia:", wl)
-            sys.exit(4)
-          if not aliases_path.is_file() or aliases_path.stat().st_size == 0:
-            print("::warning::aliases.json ausente/vazio; cria mapeamentos em data/in/aliases.json para evitar falhas no ingest.")
-            teams_map = {}
-          else:
-            with open(aliases_path, "r", encoding="utf-8") as f:
-              data = json.load(f) or {}
-              teams_map = (data.get("teams") or {})
+rows = []
+with src.open("r", encoding="utf-8", newline="") as f:
+    sniffer = csv.Sniffer()
+    sample = f.read(4096)
+    f.seek(0)
+    dialect = sniffer.sniff(sample) if sample else csv.excel
+    reader = csv.DictReader(f, dialect=dialect)
+    required = {"match_id","home","away"}
+    hdr = {h.strip().lower(): h for h in reader.fieldnames or []}
+    if not required.issubset(set(hdr.keys())):
+        missing = required - set(hdr.keys())
+        print(f"::error::matches_source.csv sem colunas obrigatórias: {sorted(missing)}")
+        sys.exit(2)
 
-          # universo conhecido (alvos para fuzzy suggest)
-          known = set(teams_map.values()) | set(teams_map.keys())
+    seen = set()
+    line_no = 1
+    for r in reader:
+        line_no += 1
+        mid = (r.get(hdr["match_id"]) or "").strip()
+        home = (r.get(hdr["home"]) or "").strip()
+        away = (r.get(hdr["away"]) or "").strip()
 
-          missing = []
-          def check_name(name:str):
-            name = name.strip()
-            if name in teams_map or name in teams_map.values():
-              return True, None
-            # sugestão fuzzy (se não estiver mapeado)
-            if known:
-              sug, score, _ = process.extractOne(name, list(known), scorer=fuzz.WRatio)
-              return False, (sug, score)
-            return False, None
+        # Normalização simples
+        home = " ".join(home.split())
+        away = " ".join(away.split())
 
-          with open(wl, "r", encoding="utf-8") as f:
-            rdr = csv.DictReader(f)
-            for i, row in enumerate(rdr, start=2):
-              for side in ("home","away"):
-                ok, hint = check_name(row[side])
-                if not ok:
-                  if hint:
-                    sug, score = hint
-                    print(f"::warning::Nome não mapeado '{row[side]}' (linha {i}). Sugestão: '{sug}' (similaridade ~{score}%).")
-                  else:
-                    print(f"::warning::Nome não mapeado '{row[side]}' (linha {i}).")
-                  missing.append((i, side, row[side]))
+        if not mid or not home or not away:
+            print(f"::error::Linha {line_no} inválida (match_id/home/away vazio).")
+            sys.exit(2)
+        if mid in seen:
+            print(f"::error::match_id duplicado: {mid}")
+            sys.exit(2)
+        seen.add(mid)
+        rows.append({"match_id": mid, "home": home, "away": away})
 
-          if missing:
-            print("::error::Existem nomes não mapeados em aliases.json. Adicione em data/in/aliases.json em 'teams'. Exemplo:")
-            print('{"teams": {"Criciúma/SC": "Criciuma", "América/MG": "America Mineiro", "Juventude/RS": "Juventude"}}')
-            sys.exit(6)
-          else:
-            print("[validate] OK - todos os nomes estão mapeados em aliases.json")
+if not rows:
+    print("::error::Whitelist sem jogos (mínimo 1 linha além do cabeçalho).")
+    sys.exit(3)
 
-          PYCODE
+with dst.open("w", encoding="utf-8", newline="") as g:
+    w = csv.DictWriter(g, fieldnames=["match_id","home","away"])
+    w.writeheader()
+    w.writerows(rows)
 
-      # ===================== INGEST =====================
+print(f"[whitelist] gerada: {dst} linhas={len(rows)}")
+PY
 
-      - name: Ingest odds - API-Football (RapidAPI)
+          echo "===== Preview whitelist ====="
+          head -n 50 "${OUT_DIR}/matches_whitelist.csv" || true
+
+      # ---------- INGEST (SOCCER SOMENTE) ----------
+      - name: Ingest odds (API-Football via RapidAPI) — obrigatório
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          SEASON: ${{ env.SEASON }}
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         shell: bash
         run: |
@@ -171,16 +175,27 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_apifootball.csv"; exit 5; }
           done
 
-      - name: Ingest odds - TheOddsAPI (opcional; ajuda no consenso)
-        if: ${{ env.THEODDS_API_KEY != '' }}
+      - name: Ingest odds (TheOddsAPI — soccer) — robustez (opcional)
+        if: always()  # não falhar o job se der ruim aqui; serve de robustez
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          REGIONS: ${{ env.REGIONS }}
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py não encontrado."; exit 4; }
+          if [ ! -f scripts/ingest_odds_theoddsapi.py ]; then
+            echo "[theodds] script ausente — pulando robustez"; exit 0
+          fi
+
+          # alguns ambientes precisam do rapidfuzz para normalização de times
+          python - <<'PY'
+try:
+    import rapidfuzz  # noqa
+    print("[deps] rapidfuzz OK")
+except Exception as e:
+    print("::warning::rapidfuzz ausente/erro — instalando agora para o ingest_theodds ...")
+    import os, sys, subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "rapidfuzz"])
+PY
 
           a=0; until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
@@ -189,20 +204,20 @@ jobs:
               --aliases "data/in/aliases.json" \
               ${DEBUG:+--debug} && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
-          done
+          done || true  # não derruba o job
 
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
-          test -s "$OUT" || { echo "::error::odds_theoddsapi.csv não gerado"; exit 4; }
-          header="$(head -n1 "$OUT" | tr -d '\r')"
-          for c in match_id home away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_theoddsapi.csv"; exit 4; }
-          done
+          if [ -s "$OUT" ]; then
+            header="$(head -n1 "$OUT" | tr -d '\r')"
+            for c in match_id home away odds_home odds_draw odds_away; do
+              echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::warning::Coluna '$c' ausente em odds_theoddsapi.csv"; exit 0; }
+            done
+          else
+            echo "[theodds] sem arquivo; seguindo apenas com API-Football"
+          fi
 
-      # ===================== CONSENSO & PRED =====================
-
-      - name: Consenso das odds
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ---------- CONSENSO / MERCADO ----------
+      - name: Consensus odds (safe)
         shell: bash
         run: |
           set -euo pipefail
@@ -216,9 +231,7 @@ jobs:
           done
           head -n 20 "$OUT_FILE" || true
 
-      - name: Predições a partir do mercado
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      - name: Predict from odds (market)
         shell: bash
         run: |
           set -euo pipefail
@@ -226,12 +239,8 @@ jobs:
           python scripts/predict_from_odds.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado"; exit 7; }
 
-      # ===================== FEATURES & CONTEXTO (opcional) =====================
-      # Se você usa XG/robustez extra, mantenha estes steps. Se não, pode removê-los.
-
-      - name: Features univariado
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ---------- FEATURES (UNIVARIADO) ----------
+      - name: Build features (univariado)
         shell: bash
         run: |
           set -euo pipefail
@@ -239,44 +248,60 @@ jobs:
           python scripts/feature_build_univariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv não gerado"; exit 21; }
 
-      - name: Join contexto (se tiver XG pronto)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ---------- KELLY ----------
+      - name: Publish Kelly stakes
         shell: bash
-        run: |
-          set -euo pipefail
-          [ -f scripts/feature_join_context.py ] || { echo "::error::scripts/feature_join_context.py não encontrado"; exit 28; }
-          if [ ! -s "${OUT_DIR}/features_univariado.csv" ] || [ ! -s "${OUT_DIR}/features_bivariado.csv" ]; then
-            echo "::warning::features_univariado.csv e/ou features_bivariado.csv ausentes; pulando join de contexto."
-            exit 0
-          fi
-          python scripts/feature_join_context.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
-          test -s "${OUT_DIR}/context_features.csv" || { echo "::error::context_features.csv não gerado"; exit 28; }
-          head -n 10 "${OUT_DIR}/context_features.csv" || true
-
-      # ===================== KELLY & PUBLICAÇÃO =====================
-
-      - name: Publicar stakes (Kelly)
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          BANKROLL: ${{ env.BANKROLL }}
-          KELLY_FRACTION: ${{ env.KELLY_FRACTION }}
-          KELLY_CAP: ${{ env.KELLY_CAP }}
-          KELLY_TOP_N: ${{ env.KELLY_TOP_N }}
-          ROUND_TO: ${{ env.ROUND_TO }}
-        shell: bash
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
           set -euo pipefail
           [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
+          # publish_kelly usa 'market' se não houver blend/final. Já garantimos predictions_market.csv lá em cima.
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
-      # (Opcional) Montar cartão Loteca ao final, se você já tiver o script:
-      - name: Cartão Loteca (opcional)
-        if: ${{ false }}  # mude para true quando tiver seu script pronto
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ---------- CARTÃO LOTECA ----------
+      - name: Montar Cartão Loteca (a partir do Kelly)
+        shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/montar_cartao_loteca.py ] || { echo "::warning::scripts/montar_cartao_loteca.py não encontrado; skip"; exit 0; }
-          python scripts/montar_cartao_loteca.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          python - << 'PY'
+import pandas as pd, os
+out_dir = os.environ["OUT_DIR"]
+csv_path = f"{out_dir}/kelly_stakes.csv"
+df = pd.read_csv(csv_path)
+# Espera colunas: match_id, team_home, team_away, pick, stake, prob_*, odds_*
+# Se sua estrutura for diferente, ajuste aqui:
+cols = [c for c in df.columns]
+req = {"match_id","team_home","team_away","pick"}
+missing = req - set(cols)
+if missing:
+    print(f"::warning::Cartão Loteca: colunas esperadas ausentes {sorted(missing)} — vou tentar o básico.")
+lines = ["# Cartão Loteca", ""]
+for _, r in df.iterrows():
+    home = r.get("team_home", "")
+    away = r.get("team_away", "")
+    pick = str(r.get("pick", "")).upper()
+    stake = r.get("stake", "")
+    lines.append(f"- **{home} x {away}** — *palpite:* {pick}  |  *stake:* {stake}")
+content = "\n".join(lines) + "\n"
+with open(f"{out_dir}/loteca_card.md","w",encoding="utf-8") as f:
+    f.write(content)
+print(f"[loteca] gerado: {out_dir}/loteca_card.md")
+PY
+          test -s "${OUT_DIR}/loteca_card.md" || { echo "::error::loteca_card.md não gerado"; exit 26; }
+          echo "===== Preview Cartão Loteca ====="
+          head -n 50 "${OUT_DIR}/loteca_card.md" || true
+
+      # ---------- ARTEFATOS ----------
+      - name: Upload artifacts (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loteca-${{ steps.prep.outputs.RUN_ID }}
+          path: |
+            ${{ env.OUT_DIR }}/**
+            data/in/matches_source.csv
+            data/in/aliases.json
+          if-no-files-found: warn
