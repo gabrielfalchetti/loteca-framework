@@ -244,11 +244,11 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-import pandas as pd, numpy as np
+import os, pandas as pd, numpy as np
 from unidecode import unidecode
 from pathlib import Path
 
-out_dir = Path("${OUT_DIR}")
+out_dir = Path(os.environ["OUT_DIR"])
 wl = pd.read_csv(out_dir/"matches_whitelist.csv")
 cons = pd.read_csv(out_dir/"odds_consensus.csv")
 
@@ -260,14 +260,13 @@ wl["away_n"] = wl["away"].map(norm)
 cons["home_n"] = cons["team_home"].map(norm)
 cons["away_n"] = cons["team_away"].map(norm)
 
-m = wl.merge(cons, on=["home_n","away_n"], how="inner",
-             suffixes=("",""))
+m = wl.merge(cons, on=["home_n","away_n"], how="inner", suffixes=("",""))
 if m.empty:
     raise SystemExit("::error::no matches joined between whitelist and consensus. Check name normalization.")
 
 # implied probs and margin normalization
 for col in ("odds_home","odds_draw","odds_away"):
-    if (m[col] <= 1).any():
+    if (m[col].astype(float) <= 1).any():
         raise SystemExit(f"::error::invalid odds <=1 found in consensus: column {col}")
 
 inv = pd.DataFrame({
@@ -290,9 +289,9 @@ PY
         run: |
           set -euo pipefail
           python - <<'PY'
-import pandas as pd
+import os, pandas as pd
 from pathlib import Path
-out_dir = Path("${OUT_DIR}")
+out_dir = Path(os.environ["OUT_DIR"])
 df = pd.read_csv(out_dir/"calibrated_probs.csv")
 
 # Proxy xG simples a partir das probabilidades:
@@ -309,9 +308,9 @@ PY
         run: |
           set -euo pipefail
           python - <<'PY'
-import pandas as pd
+import os, pandas as pd
 from pathlib import Path
-out_dir = Path("${OUT_DIR}")
+out_dir = Path(os.environ["OUT_DIR"])
 u = pd.read_csv(out_dir/"xg_univariate.csv")
 
 # Interações simples
@@ -336,11 +335,11 @@ PY
         run: |
           set -euo pipefail
           python - <<'PY'
-import pandas as pd
+import os, pandas as pd
 from pathlib import Path
 from unidecode import unidecode
 
-out_dir = Path("${OUT_DIR}")
+out_dir = Path(os.environ["OUT_DIR"])
 wl  = pd.read_csv(out_dir/"matches_whitelist.csv")
 cal = pd.read_csv(out_dir/"calibrated_probs.csv")
 
