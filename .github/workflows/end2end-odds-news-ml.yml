@@ -8,7 +8,7 @@ on:
         type: boolean
         default: true
   schedule:
-    - cron: "15 09 * * 4,5" # ajuste se quiser
+    - cron: "15 09 * * 4,5"
 
 permissions:
   contents: read
@@ -81,15 +81,14 @@ jobs:
             exit 2
           fi
 
-      - name: Set DEBUG_FLAG (on)
-        if: ${{ inputs.debug }}
+      - name: Set DEBUG_FLAG
         shell: bash
-        run: echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
-
-      - name: Set DEBUG_FLAG (off)
-        if: ${{ !inputs.debug }}
-        shell: bash
-        run: echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
+        run: |
+          if [ "${{ inputs.debug }}" = "true" ]; then
+            echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
+          else
+            echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
+          fi
 
       # ---------- VALIDAÇÃO WHITELIST ----------
       - name: Validar e normalizar nomes (whitelist)
@@ -180,7 +179,6 @@ PY
 
       # ---------- ROBUSTEZ: THEODDSAPI (OPCIONAL) ----------
       - name: Ingest odds (TheOddsAPI — soccer) — robustez (opcional)
-        if: ${{ always() }}
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         shell: bash
