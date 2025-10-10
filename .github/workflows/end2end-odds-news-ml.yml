@@ -74,7 +74,7 @@ jobs:
             exit 2
           fi
 
-          # DEBUG_FLAG para reutilizar nos comandos Python
+          # DEBUG_FLAG
           if [ "${DEBUG:-}" = "true" ]; then
             echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
           else
@@ -314,7 +314,7 @@ from pathlib import Path
 out_dir = Path("${OUT_DIR}")
 u = pd.read_csv(out_dir/"xg_univariate.csv")
 
-# Bivariada: interações simples
+# Interações simples
 u["xg_sum"] = u["xg_home"] + u["xg_away"]
 u["xg_diff"] = u["xg_home"] - u["xg_away"]
 u["p_max"] = u[["p_home","p_draw","p_away"]].max(axis=1)
@@ -338,14 +338,13 @@ PY
           python - <<'PY'
 import pandas as pd
 from pathlib import Path
+from unidecode import unidecode
 
 out_dir = Path("${OUT_DIR}")
 wl  = pd.read_csv(out_dir/"matches_whitelist.csv")
 cal = pd.read_csv(out_dir/"calibrated_probs.csv")
 
-from unidecode import unidecode
 def norm(s): return unidecode(str(s).strip().lower())
-
 wl["home_n"] = wl["home"].map(norm); wl["away_n"] = wl["away"].map(norm)
 cal["home_n"] = cal["team_home"].map(norm); cal["away_n"] = cal["team_away"].map(norm)
 m = wl.merge(cal, on=["home_n","away_n"], how="left")
@@ -378,12 +377,12 @@ PY
         with:
           name: loteca_${{ steps.prep.outputs.RUN_ID }}
           path: |
-            data/out/${{ steps.prep.outputs.RUN_ID }}/matches_whitelist.csv
-            data/out/${{ steps.prep.outputs.RUN_ID }}/odds_theoddsapi.csv
-            data/out/${{ steps.prep.outputs.RUN_ID }}/odds_apifootball.csv
-            data/out/${{ steps.prep.outputs.RUN_ID }}/odds_consensus.csv
-            data/out/${{ steps.prep.outputs.RUN_ID }}/calibrated_probs.csv
-            data/out/${{ steps.prep.outputs.RUN_ID }}/xg_univariate.csv
-            data/out/${{ steps.prep.outputs.RUN_ID }}/xg_bivariate.csv
-            data/out/${{ steps.prep.outputs.RUN_ID }}/kelly_stakes.csv
-            data/out/${{ steps.prep.outputs.RUN_ID }}/loteca_card.txt
+            ${{ env.OUT_DIR }}/matches_whitelist.csv
+            ${{ env.OUT_DIR }}/odds_theoddsapi.csv
+            ${{ env.OUT_DIR }}/odds_apifootball.csv
+            ${{ env.OUT_DIR }}/odds_consensus.csv
+            ${{ env.OUT_DIR }}/calibrated_probs.csv
+            ${{ env.OUT_DIR }}/xg_univariate.csv
+            ${{ env.OUT_DIR }}/xg_bivariate.csv
+            ${{ env.OUT_DIR }}/kelly_stakes.csv
+            ${{ env.OUT_DIR }}/loteca_card.txt
