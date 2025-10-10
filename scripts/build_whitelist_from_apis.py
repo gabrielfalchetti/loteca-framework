@@ -2,222 +2,259 @@
 # -*- coding: utf-8 -*-
 
 """
-build_whitelist_from_apis.py
-Gera data/in/matches_whitelist.csv com colunas mínimas (match_id, home, away)
-a partir da TheOddsAPI (v4), usando apenas dados reais.
+Gera data/in/matches_whitelist.csv (ou caminho passado em --out) a partir da TheOddsAPI,
+filtrando EXCLUSIVAMENTE eventos de futebol (soccer_*).
 
-Uso:
+Saída mínima exigida pelo pipeline:
+- match_id,home,away
+
+Uso típico:
   python scripts/build_whitelist_from_apis.py \
-    --out data/in/matches_whitelist.csv \
-    --season 2025 \
-    --regions "uk,eu,us,au" \
-    --lookahead-days 3 \
-    --debug
+      --out data/in/matches_whitelist.csv \
+      --regions "uk,eu,us,au" \
+      --lookahead-days 3 \
+      --sports soccer \
+      --debug
 
-Requisitos de ambiente:
-  - THEODDS_API_KEY (obrigatório)
+Requisitos:
+- Variável de ambiente THEODDS_API_KEY definida.
 """
 
-from __future__ import annotations
 import argparse
+import csv
 import hashlib
+import json
 import os
 import sys
-import time
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Tuple
 
-import json
-import csv
-import urllib.parse
-import urllib.request
-
-
-def log(msg: str) -> None:
-    print(msg, flush=True)
+try:
+    import requests
+except ImportError:
+    print("[whitelist][ERRO] 'requests' não está instalado. Adicione 'pip install requests' na etapa de setup.", file=sys.stderr)
+    sys.exit(2)
 
 
-def err(msg: str) -> None:
-    print(f"##[error]{msg}", flush=True)
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
 
 
-def debug_log(enabled: bool, msg: str) -> None:
-    if enabled:
-        print(msg, flush=True)
-
-
-def http_get_json(url: str, timeout: int = 20) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": "loteca-bot/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = resp.read()
-        return json.loads(data.decode("utf-8"))
-
-
-def to_commence_time_to_utc_z(lookahead_days: int) -> str:
+# --------------------------
+# Utilidades
+# --------------------------
+def to_commence_time_to(days_a_frente: int) -> str:
     """
-    Retorna string UTC no formato exigido pela TheOddsAPI:
-    YYYY-MM-DDTHH:MM:SSZ (sem offset +00:00)
+    A TheOddsAPI requer 'YYYY-MM-DDTHH:MM:SSZ' (sempre Z no fim, sem offset tipo +00:00).
     """
-    now_utc = datetime.now(timezone.utc)
-    target = now_utc + timedelta(days=lookahead_days)
-    # zulu format sem micros, com 'Z'
-    return target.strftime("%Y-%m-%dT%H:%M:%SZ")
+    dt = datetime.now(timezone.utc) + timedelta(days=days_a_frente)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def safe_team_name(name: Optional[str]) -> str:
-    return (name or "").strip()
+def mk_match_id(home: str, away: str) -> str:
+    base = f"{home}__{away}".lower().encode("utf-8")
+    return hashlib.md5(base).hexdigest()[:12]
 
 
-def make_match_id(home: str, away: str, commence_iso: str) -> str:
+def load_aliases(path: str) -> Dict[str, str]:
     """
-    ID determinístico curto baseado em (home, away, commence_time)
+    aliases.json opcional no formato:
+    {
+      "teams": {
+        "Man Utd": "Manchester United",
+        "CR Flamengo": "Flamengo"
+      }
+    }
     """
-    base = f"{home}|{away}|{commence_iso}".lower()
-    h = hashlib.md5(base.encode("utf-8")).hexdigest()[:12]
-    return h
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        teams = data.get("teams", {}) or {}
+        # normaliza chaves para comparação case-insensitive:
+        return {k.strip().lower(): v.strip() for k, v in teams.items() if isinstance(k, str) and isinstance(v, str)}
+    except Exception as ex:
+        eprint(f"[whitelist][WARN] Não consegui ler aliases de {path} ({ex}); seguindo sem.")
+        return {}
 
 
-def fetch_upcoming_h2h(
-    api_key: str,
-    regions: str,
-    lookahead_days: int,
-    debug: bool = False,
-) -> List[Dict[str, Any]]:
+def apply_alias(name: str, aliases: Dict[str, str]) -> str:
+    if not name:
+        return name
+    return aliases.get(name.strip().lower(), name.strip())
+
+
+def pick_home_away(ev: Dict[str, Any]) -> Tuple[str, str]:
     """
-    Chamada única à TheOddsAPI /v4/sports/upcoming/odds (markets=h2h).
-    Retorna a lista raw de eventos.
+    Eventos da TheOddsAPI (v4) trazem:
+      - 'home_team'
+      - 'away_team'
+      - 'teams' (lista)
+    Preferimos home_team/away_team; se faltarem, tentamos inferir com 'teams'.
     """
-    commence_to = to_commence_time_to_utc_z(lookahead_days)
+    home = ev.get("home_team") or ""
+    away = ev.get("away_team") or ""
+    if home and away:
+        return str(home), str(away)
+
+    teams = ev.get("teams") or []
+    if isinstance(teams, list) and len(teams) == 2:
+        # Sem garantia de ordem, mas tentamos manter consistência:
+        return str(teams[0]), str(teams[1])
+
+    return "", ""
+
+
+# --------------------------
+# Coleta TheOddsAPI
+# --------------------------
+def fetch_upcoming_odds(api_key: str, regions: str, lookahead_days: int, debug: bool) -> List[Dict[str, Any]]:
+    """
+    Consulta /v4/sports/upcoming/odds com filtros de mercado h2h e janela de tempo.
+    """
+    base = "https://api.the-odds-api.com/v4/sports/upcoming/odds"
     params = {
         "regions": regions,
         "markets": "h2h",
         "oddsFormat": "decimal",
         "dateFormat": "iso",
         "apiKey": api_key,
-        "commenceTimeTo": commence_to,  # <-- formato Z correto
+        "commenceTimeTo": to_commence_time_to(lookahead_days),
     }
-    base_url = "https://api.the-odds-api.com/v4/sports/upcoming/odds"
-    url = f"{base_url}?{urllib.parse.urlencode(params)}"
-    debug_log(debug, f"[whitelist][theodds] URL -> {url}")
+    if debug:
+        print(f"[whitelist][theodds] GET {base} {params}")
 
-    data = http_get_json(url)
-    # Em caso de erro, a API retorna dict com 'message'
-    if isinstance(data, dict) and "message" in data:
-        raise RuntimeError(
-            f"[whitelist][theodds] API error: {data.get('message')} "
-            f"(error_code={data.get('error_code')})"
-        )
-    if not isinstance(data, list):
-        raise RuntimeError("[whitelist][theodds] Resposta inesperada (não é lista).")
-    debug_log(debug, f"[whitelist][theodds] eventos retornados: {len(data)}")
-    return data
+    resp = requests.get(base, params=params, timeout=30)
+    if resp.status_code != 200:
+        eprint(f"[whitelist][theodds][ERRO] HTTP {resp.status_code}: {resp.text}")
+        return []
+
+    try:
+        data = resp.json()
+    except Exception as ex:
+        eprint(f"[whitelist][theodds][ERRO] JSON inválido: {ex}")
+        return []
+
+    if debug:
+        print(f"[whitelist][theodds] Eventos recebidos: {len(data)}")
+    return data if isinstance(data, list) else []
 
 
-def extract_h2h_rows(events: List[Dict[str, Any]], debug: bool = False) -> List[Dict[str, str]]:
+# --------------------------
+# Filtro exclusivo de futebol
+# --------------------------
+def filter_soccer_only(events: List[Dict[str, Any]], debug: bool) -> List[Dict[str, Any]]:
     """
-    Converte a resposta da TheOddsAPI em linhas (match_id, home, away)
-    usando os nomes das equipes do campo 'home_team' / 'away_team'.
+    Mantém apenas eventos com sport_key inicando em 'soccer_'.
     """
-    rows: List[Dict[str, str]] = []
-
+    out = []
     for ev in events:
-        home = safe_team_name(ev.get("home_team"))
-        away = safe_team_name(ev.get("away_team"))
-        commence = ev.get("commence_time") or ""
+        skey = str(ev.get("sport_key", ""))
+        if skey.startswith("soccer_"):
+            out.append(ev)
+    if debug:
+        print(f"[whitelist] Pós-filtro soccer_: {len(out)} eventos (de {len(events)})")
+    return out
+
+
+# --------------------------
+# Construção da whitelist
+# --------------------------
+def build_whitelist_rows(events: List[Dict[str, Any]], aliases: Dict[str, str], debug: bool) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for ev in events:
+        home, away = pick_home_away(ev)
+        home, away = home.strip(), away.strip()
+
         if not home or not away:
-            debug_log(debug, f"[whitelist][skip] evento sem home/away: {ev.get('id')}")
+            if debug:
+                eprint(f"[whitelist][SKIP] evento sem times: {ev.get('id') or ev.get('sport_key')}")
             continue
 
-        # Alguns eventos vêm com commence_time ISO com 'Z' — manter como veio
-        commence_iso = str(commence).strip()
+        # aplica aliases
+        home = apply_alias(home, aliases)
+        away = apply_alias(away, aliases)
 
-        match_id = make_match_id(home, away, commence_iso)
-        rows.append(
-            {
-                "match_id": match_id,
-                "home": home,
-                "away": away,
-                "commence_time": commence_iso,
-                "source": "theoddsapi",
-            }
-        )
+        # Garante que há odds H2H disponíveis por pelo menos uma casa (opcional, mas útil)
+        bookmakers = ev.get("bookmakers") or []
+        if not bookmakers:
+            if debug:
+                eprint(f"[whitelist][SKIP] sem bookmakers: {home} x {away}")
+            continue
 
-    # Remover duplicatas por (home, away, commence_time)
-    seen = set()
-    dedup: List[Dict[str, str]] = []
+        mid = mk_match_id(home, away)
+        rows.append({"match_id": mid, "home": home, "away": away})
+
+    # Dedup (se vierem duplicados do endpoint)
+    uniq = {}
     for r in rows:
-        key = (r["home"].lower(), r["away"].lower(), r["commence_time"])
-        if key in seen:
-            continue
-        seen.add(key)
-        dedup.append(r)
+        uniq[(r["match_id"])] = r
+    final = list(uniq.values())
 
-    debug_log(debug, f"[whitelist] linhas após dedupe: {len(dedup)}")
-    return dedup
+    if debug:
+        print(f"[whitelist] linhas finais (soccer): {len(final)}")
+    return final
 
 
-def write_csv(out_path: str, rows: List[Dict[str, str]]) -> None:
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fieldnames = ["match_id", "home", "away", "commence_time", "source"]
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for r in rows:
-            w.writerow(r)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Gera matches_whitelist.csv a partir da TheOddsAPI (v4)."
-    )
-    parser.add_argument("--out", required=True, help="Caminho do CSV de saída.")
-    parser.add_argument("--season", required=True, help="Temporada (ex.: 2025).")
-    parser.add_argument(
-        "--regions", default="uk,eu,us,au", help="Regiões da TheOddsAPI."
-    )
-    parser.add_argument(
-        "--lookahead-days", type=int, default=3, help="Janela de busca em dias (UTC)."
-    )
-    parser.add_argument(
-        "--debug", action="store_true", help="Logs extras."
-    )
+# --------------------------
+# Main
+# --------------------------
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", required=True, help="Caminho do CSV de saída (ex.: data/in/matches_whitelist.csv)")
+    parser.add_argument("--regions", required=True, help="Regiões TheOddsAPI (ex.: uk,eu,us,au)")
+    parser.add_argument("--lookahead-days", type=int, default=3, help="Janela em dias à frente para buscar jogos (padrão: 3)")
+    parser.add_argument("--sports", default="soccer", help="Sempre 'soccer' aqui; mantido como flag para compatibilidade")
+    parser.add_argument("--aliases", default="data/in/aliases.json", help="Arquivo de aliases opcional (padrão: data/in/aliases.json)")
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     api_key = os.getenv("THEODDS_API_KEY", "").strip()
     if not api_key:
-        err("THEODDS_API_KEY ausente no ambiente.")
+        eprint("[whitelist][ERRO] THEODDS_API_KEY não definido no ambiente.")
         sys.exit(3)
 
-    log(f"[whitelist] params: season={args.season}, regions={args.regions}, lookahead={args.lookahead_days}")
+    if args.sports.strip().lower() != "soccer":
+        # Mesmo que passem outra coisa, forçamos soccer:
+        if args.debug:
+            eprint(f"[whitelist][WARN] --sports='{args.sports}' ignorado. Usando 'soccer' (apenas futebol).")
 
-    try:
-        events = fetch_upcoming_h2h(
-            api_key=api_key,
-            regions=args.regions,
-            lookahead_days=args.lookahead_days,
-            debug=args.debug,
-        )
-    except Exception as e:
-        err(str(e))
-        sys.exit(3)
+    aliases = load_aliases(args.aliases)
 
-    rows = extract_h2h_rows(events, debug=args.debug)
+    # 1) Coleta bruta
+    events = fetch_upcoming_odds(api_key, args.regions, args.lookahead_days, args.debug)
 
-    if len(rows) == 0:
-        err("Nenhum jogo retornado pela TheOddsAPI dentro da janela. Whitelist vazia.")
-        sys.exit(3)
+    # 2) Aplica filtro exclusivo de futebol
+    events_soccer = filter_soccer_only(events, args.debug)
 
-    write_csv(args.out, rows)
-    # Preview curto
-    try:
-        import pandas as pd  # só para preview; se não houver, ignora
-        df = pd.read_csv(args.out)
-        debug_log(args.debug, "===== Preview whitelist (top 10) =====")
-        debug_log(args.debug, df.head(10).to_string(index=False))
-    except Exception:
-        pass
+    # 3) Constrói linhas da whitelist
+    rows = build_whitelist_rows(events_soccer, aliases, args.debug)
 
-    log(f"[whitelist] OK -> {args.out} ({len(rows)} jogos)")
+    # 4) Valida e grava
+    out_path = args.out
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+
+    if not rows:
+        eprint("[whitelist][ERRO] Nenhum jogo de futebol encontrado na janela/regions fornecidas.")
+        # Mesmo assim, escrevemos um cabeçalho mínimo para depuração (o step chamador fará o teste -s e falhará)
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["match_id", "home", "away"])
+            w.writeheader()
+        sys.exit(4)
+
+    # grava CSV
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["match_id", "home", "away"])
+        w.writeheader()
+        w.writerows(rows)
+
+    if args.debug:
+        print("===== Preview whitelist (até 20 linhas) =====")
+        for i, r in enumerate(rows[:20], start=1):
+            print(f"{i:02d}. {r['match_id']},{r['home']},{r['away']}")
+
+    print(f"[whitelist] OK -> {out_path}  linhas={len(rows)}")
 
 
 if __name__ == "__main__":
