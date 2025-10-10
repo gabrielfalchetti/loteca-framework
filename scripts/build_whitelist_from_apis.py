@@ -2,260 +2,252 @@
 # -*- coding: utf-8 -*-
 
 """
-Gera data/in/matches_whitelist.csv (ou caminho passado em --out) a partir da TheOddsAPI,
-filtrando EXCLUSIVAMENTE eventos de futebol (soccer_*).
+Gera uma whitelist de partidas a partir da The Odds API (v4) filtrando
+apenas FUTEBOL (soccer) e escrevendo CSV com colunas mínimas:
+  match_id,home,away
 
-Saída mínima exigida pelo pipeline:
-- match_id,home,away
+Compatível com o workflow existente:
+  - Aceita --season (opcional, ignorado aqui, mas mantido p/ compatibilidade)
+  - Usa --regions, --lookahead-days, --sports (default: soccer) e --aliases
+  - Corrige o formato de commenceTimeTo -> YYYY-MM-DDTHH:MM:SSZ (evita 422)
 
-Uso típico:
-  python scripts/build_whitelist_from_apis.py \
-      --out data/in/matches_whitelist.csv \
-      --regions "uk,eu,us,au" \
-      --lookahead-days 3 \
-      --sports soccer \
-      --debug
+Requer:
+  env THEODDS_API_KEY (secrets)
+  pip: requests, pandas, python-dateutil, unidecode (opcional), rapidfuzz (opcional)
 
-Requisitos:
-- Variável de ambiente THEODDS_API_KEY definida.
+Observações:
+  - O endpoint usado é /v4/sports/upcoming/odds (markets=h2h)
+  - Filtragem por futebol baseada em sport_key/sport_title contendo "soccer"
+  - Gera match_id determinístico (sha1 truncado) baseado em "home|away|commence_time"
 """
 
+from __future__ import annotations
 import argparse
 import csv
 import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
-try:
-    import requests
-except ImportError:
-    print("[whitelist][ERRO] 'requests' não está instalado. Adicione 'pip install requests' na etapa de setup.", file=sys.stderr)
-    sys.exit(2)
+import requests
+from dateutil import tz
 
+DEBUG = False
 
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
+THE_ODDS_BASE = "https://api.the-odds-api.com/v4"
 
 
-# --------------------------
-# Utilidades
-# --------------------------
-def to_commence_time_to(days_a_frente: int) -> str:
-    """
-    A TheOddsAPI requer 'YYYY-MM-DDTHH:MM:SSZ' (sempre Z no fim, sem offset tipo +00:00).
-    """
-    dt = datetime.now(timezone.utc) + timedelta(days=days_a_frente)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+def log(msg: str) -> None:
+    print(msg, flush=True)
 
 
-def mk_match_id(home: str, away: str) -> str:
-    base = f"{home}__{away}".lower().encode("utf-8")
-    return hashlib.md5(base).hexdigest()[:12]
+def dlog(msg: str) -> None:
+    if DEBUG:
+        log(msg)
 
 
-def load_aliases(path: str) -> Dict[str, str]:
-    """
-    aliases.json opcional no formato:
-    {
-      "teams": {
-        "Man Utd": "Manchester United",
-        "CR Flamengo": "Flamengo"
-      }
-    }
-    """
-    if not path or not os.path.exists(path):
+def load_aliases(path: Optional[str]) -> Dict[str, str]:
+    """Carrega aliases em formato {"teams": { "Alias A": "Nome Canonico", ... }}"""
+    if not path:
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        teams = data.get("teams", {}) or {}
-        # normaliza chaves para comparação case-insensitive:
+            data = json.load(f)
+        teams = data.get("teams", {})
+        # normaliza chaves para comparação case-insensitive
         return {k.strip().lower(): v.strip() for k, v in teams.items() if isinstance(k, str) and isinstance(v, str)}
-    except Exception as ex:
-        eprint(f"[whitelist][WARN] Não consegui ler aliases de {path} ({ex}); seguindo sem.")
+    except FileNotFoundError:
+        log(f"[whitelist][WARN] aliases não encontrado: {path}")
+        return {}
+    except Exception as e:
+        log(f"[whitelist][WARN] falha lendo aliases: {e}")
         return {}
 
 
 def apply_alias(name: str, aliases: Dict[str, str]) -> str:
     if not name:
         return name
-    return aliases.get(name.strip().lower(), name.strip())
+    key = name.strip().lower()
+    return aliases.get(key, name).strip()
 
 
-def pick_home_away(ev: Dict[str, Any]) -> Tuple[str, str]:
-    """
-    Eventos da TheOddsAPI (v4) trazem:
-      - 'home_team'
-      - 'away_team'
-      - 'teams' (lista)
-    Preferimos home_team/away_team; se faltarem, tentamos inferir com 'teams'.
-    """
-    home = ev.get("home_team") or ""
-    away = ev.get("away_team") or ""
-    if home and away:
-        return str(home), str(away)
-
-    teams = ev.get("teams") or []
-    if isinstance(teams, list) and len(teams) == 2:
-        # Sem garantia de ordem, mas tentamos manter consistência:
-        return str(teams[0]), str(teams[1])
-
-    return "", ""
+def iso_utc_with_Z(dt_obj: datetime) -> str:
+    """Formata datetime UTC para 'YYYY-MM-DDTHH:MM:SSZ' (ex.: 2025-10-12T16:05:00Z)."""
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+    dt_utc = dt_obj.astimezone(timezone.utc)
+    return dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# --------------------------
-# Coleta TheOddsAPI
-# --------------------------
-def fetch_upcoming_odds(api_key: str, regions: str, lookahead_days: int, debug: bool) -> List[Dict[str, Any]]:
-    """
-    Consulta /v4/sports/upcoming/odds com filtros de mercado h2h e janela de tempo.
-    """
-    base = "https://api.the-odds-api.com/v4/sports/upcoming/odds"
+def short_hash(s: str, n: int = 12) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:n]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", required=True, help="Arquivo CSV de saída (match_id,home,away)")
+    parser.add_argument("--regions", required=True, help="Regiões da TheOdds API (ex.: uk,eu,us,au)")
+    parser.add_argument("--lookahead-days", type=int, default=3, help="Dias à frente para buscar jogos")
+    parser.add_argument("--sports", default="soccer", help="Filtro de esporte (default: soccer)")
+    parser.add_argument("--aliases", default=None, help="JSON com {'teams': {...}} para normalização de nomes")
+    # Mantido por compatibilidade com o workflow (não usado neste script)
+    parser.add_argument("--season", default=None, help="Temporada (compatibilidade; não usado nesta coleta)")
+    parser.add_argument("--debug", action="store_true")
+    return parser.parse_args()
+
+
+def fetch_upcoming_odds(
+    api_key: str,
+    regions: str,
+    commence_to_utc_z: str,
+    page: int = 1,
+) -> Tuple[int, List[Dict[str, Any]]]:
+    """Chama /sports/upcoming/odds (markets=h2h) para uma página."""
+    url = f"{THE_ODDS_BASE}/sports/upcoming/odds"
     params = {
         "regions": regions,
         "markets": "h2h",
         "oddsFormat": "decimal",
         "dateFormat": "iso",
         "apiKey": api_key,
-        "commenceTimeTo": to_commence_time_to(lookahead_days),
+        "commenceTimeTo": commence_to_utc_z,
+        "page": page,
     }
-    if debug:
-        print(f"[whitelist][theodds] GET {base} {params}")
-
-    resp = requests.get(base, params=params, timeout=30)
-    if resp.status_code != 200:
-        eprint(f"[whitelist][theodds][ERRO] HTTP {resp.status_code}: {resp.text}")
-        return []
-
+    dlog(f"[whitelist][theodds] GET {url} params={params}")
+    r = requests.get(url, params=params, timeout=25)
+    status = r.status_code
+    if status != 200:
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {"message": r.text}
+        log(f"##[error][whitelist][theodds] HTTP {status}: {json.dumps(payload)}")
+        return status, []
     try:
-        data = resp.json()
-    except Exception as ex:
-        eprint(f"[whitelist][theodds][ERRO] JSON inválido: {ex}")
-        return []
-
-    if debug:
-        print(f"[whitelist][theodds] Eventos recebidos: {len(data)}")
-    return data if isinstance(data, list) else []
+        data = r.json()
+    except Exception as e:
+        log(f"##[error][whitelist][theodds] resposta inválida: {e}")
+        return 500, []
+    return status, data
 
 
-# --------------------------
-# Filtro exclusivo de futebol
-# --------------------------
-def filter_soccer_only(events: List[Dict[str, Any]], debug: bool) -> List[Dict[str, Any]]:
+def is_soccer_record(rec: Dict[str, Any], sports_filter: str = "soccer") -> bool:
+    """Filtra apenas futebol com base em sport_key e sport_title contendo 'soccer'."""
+    sfilter = (sports_filter or "soccer").strip().lower()
+    skey = str(rec.get("sport_key", "")).lower()
+    stitle = str(rec.get("sport_title", "")).lower()
+    return (sfilter in skey) or (sfilter in stitle)
+
+
+def extract_pair(rec: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
     """
-    Mantém apenas eventos com sport_key inicando em 'soccer_'.
+    Extrai (home, away, commence_time) de um registro do odds endpoint.
+    O schema típico tem: home_team, away_team, commence_time.
     """
-    out = []
-    for ev in events:
-        skey = str(ev.get("sport_key", ""))
-        if skey.startswith("soccer_"):
-            out.append(ev)
-    if debug:
-        print(f"[whitelist] Pós-filtro soccer_: {len(out)} eventos (de {len(events)})")
-    return out
+    home = rec.get("home_team")
+    away = rec.get("away_team")
+    ctime = rec.get("commence_time")  # ISO 8601
+    if not (home and away and ctime):
+        return None
+    return str(home).strip(), str(away).strip(), str(ctime).strip()
 
 
-# --------------------------
-# Construção da whitelist
-# --------------------------
-def build_whitelist_rows(events: List[Dict[str, Any]], aliases: Dict[str, str], debug: bool) -> List[Dict[str, str]]:
-    rows: List[Dict[str, str]] = []
-    for ev in events:
-        home, away = pick_home_away(ev)
-        home, away = home.strip(), away.strip()
+def main() -> None:
+    global DEBUG
+    args = parse_args()
+    DEBUG = bool(args.debug)
 
-        if not home or not away:
-            if debug:
-                eprint(f"[whitelist][SKIP] evento sem times: {ev.get('id') or ev.get('sport_key')}")
-            continue
-
-        # aplica aliases
-        home = apply_alias(home, aliases)
-        away = apply_alias(away, aliases)
-
-        # Garante que há odds H2H disponíveis por pelo menos uma casa (opcional, mas útil)
-        bookmakers = ev.get("bookmakers") or []
-        if not bookmakers:
-            if debug:
-                eprint(f"[whitelist][SKIP] sem bookmakers: {home} x {away}")
-            continue
-
-        mid = mk_match_id(home, away)
-        rows.append({"match_id": mid, "home": home, "away": away})
-
-    # Dedup (se vierem duplicados do endpoint)
-    uniq = {}
-    for r in rows:
-        uniq[(r["match_id"])] = r
-    final = list(uniq.values())
-
-    if debug:
-        print(f"[whitelist] linhas finais (soccer): {len(final)}")
-    return final
-
-
-# --------------------------
-# Main
-# --------------------------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--out", required=True, help="Caminho do CSV de saída (ex.: data/in/matches_whitelist.csv)")
-    parser.add_argument("--regions", required=True, help="Regiões TheOddsAPI (ex.: uk,eu,us,au)")
-    parser.add_argument("--lookahead-days", type=int, default=3, help="Janela em dias à frente para buscar jogos (padrão: 3)")
-    parser.add_argument("--sports", default="soccer", help="Sempre 'soccer' aqui; mantido como flag para compatibilidade")
-    parser.add_argument("--aliases", default="data/in/aliases.json", help="Arquivo de aliases opcional (padrão: data/in/aliases.json)")
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
-
-    api_key = os.getenv("THEODDS_API_KEY", "").strip()
+    api_key = os.environ.get("THEODDS_API_KEY", "").strip()
     if not api_key:
-        eprint("[whitelist][ERRO] THEODDS_API_KEY não definido no ambiente.")
+        log("##[error]THEODDS_API_KEY ausente em secrets/ambiente")
         sys.exit(3)
 
-    if args.sports.strip().lower() != "soccer":
-        # Mesmo que passem outra coisa, forçamos soccer:
-        if args.debug:
-            eprint(f"[whitelist][WARN] --sports='{args.sports}' ignorado. Usando 'soccer' (apenas futebol).")
-
+    regions = args.regions.strip()
+    lookahead = max(1, int(args.lookahead_days))
+    sports_filter = (args.sports or "soccer").strip().lower()
     aliases = load_aliases(args.aliases)
 
-    # 1) Coleta bruta
-    events = fetch_upcoming_odds(api_key, args.regions, args.lookahead_days, args.debug)
+    # Construir commenceTimeTo no formato correto (Z)
+    now_utc = datetime.now(tz=timezone.utc)
+    to_utc = now_utc + timedelta(days=lookahead)
+    commence_to = iso_utc_with_Z(to_utc)
+    log(f"[whitelist] params: regions={regions}, lookahead={lookahead}, sports={sports_filter}")
 
-    # 2) Aplica filtro exclusivo de futebol
-    events_soccer = filter_soccer_only(events, args.debug)
+    # Paginação simples: até 5 páginas ou até retornar vazio
+    all_rows: List[Tuple[str, str, str]] = []
+    max_pages = 5
+    for page in range(1, max_pages + 1):
+        status, payload = fetch_upcoming_odds(api_key, regions, commence_to, page=page)
+        if status != 200:
+            # erro já logado; deixar o workflow fazer retry total (step)
+            break
+        if not payload:
+            dlog(f"[whitelist] page={page} vazia; encerrando paginação.")
+            break
 
-    # 3) Constrói linhas da whitelist
-    rows = build_whitelist_rows(events_soccer, aliases, args.debug)
+        kept = 0
+        for rec in payload:
+            if not is_soccer_record(rec, sports_filter):
+                continue
+            pair = extract_pair(rec)
+            if not pair:
+                continue
+            home, away, ctime = pair
+            # aplica aliases
+            home = apply_alias(home, aliases)
+            away = apply_alias(away, aliases)
+            # salva
+            all_rows.append((home, away, ctime))
+            kept += 1
+        dlog(f"[whitelist] page={page} kept={kept} total_acum={len(all_rows)}")
 
-    # 4) Valida e grava
+        # Heurística: se veio menos de 5, talvez esgotou
+        if len(payload) < 5:
+            break
+
+        # rate-limit simples
+        time.sleep(0.5)
+
+    if not all_rows:
+        log("##[error]Nenhum jogo de futebol encontrado na janela solicitada.")
+        sys.exit(3)
+
+    # Construir DataFrame leve com CSV nativo (evita depender de pandas aqui)
+    # match_id determinístico: sha1(f"{home}|{away}|{commence_time}")[:12]
     out_path = args.out
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-    if not rows:
-        eprint("[whitelist][ERRO] Nenhum jogo de futebol encontrado na janela/regions fornecidas.")
-        # Mesmo assim, escrevemos um cabeçalho mínimo para depuração (o step chamador fará o teste -s e falhará)
-        with open(out_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["match_id", "home", "away"])
-            w.writeheader()
-        sys.exit(4)
+    # Remover duplicados (home,away,ctime)
+    dedup = {}
+    for home, away, ctime in all_rows:
+        key = (home, away, ctime)
+        dedup[key] = True
 
-    # grava CSV
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["match_id", "home", "away"])
-        w.writeheader()
-        w.writerows(rows)
+    rows_final: List[Tuple[str, str, str]] = []
+    for (home, away, ctime) in dedup.keys():
+        mid = short_hash(f"{home}|{away}|{ctime}", 12)
+        rows_final.append((mid, home, away))
 
-    if args.debug:
-        print("===== Preview whitelist (até 20 linhas) =====")
-        for i, r in enumerate(rows[:20], start=1):
-            print(f"{i:02d}. {r['match_id']},{r['home']},{r['away']}")
+    # Ordena por home/away para estabilidade
+    rows_final.sort(key=lambda x: (x[1].lower(), x[2].lower()))
 
-    print(f"[whitelist] OK -> {out_path}  linhas={len(rows)}")
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["match_id", "home", "away"])
+        for mid, home, away in rows_final:
+            w.writerow([mid, home, away])
+
+    log(f"[whitelist] escrito: {out_path}  linhas={len(rows_final)}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        log(f"##[error]Falha inesperada na whitelist: {e}")
+        sys.exit(3)
