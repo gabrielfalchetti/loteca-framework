@@ -19,7 +19,6 @@ env:
   KELLY_CAP: "0.1"
   KELLY_TOP_N: "14"
   ROUND_TO: "1"
-  DEBUG: ${{ github.event.inputs.debug == 'true' && 'true' || '' }}
 
 jobs:
   run:
@@ -52,7 +51,6 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Garantir pacotes essenciais caso não estejam no requirements
           pip install --upgrade pip
           pip install pandas numpy rapidfuzz requests pytz python-dateutil
 
@@ -66,9 +64,7 @@ jobs:
           echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
 
           OUT_DIR="data/out/${RUN_ID}"
-          export OUT_DIR
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
-
           mkdir -p "data/in" "${OUT_DIR}"
 
           # aliases.json (pode estar vazio)
@@ -80,6 +76,13 @@ jobs:
           if [ ! -s "data/in/matches_source.csv" ]; then
             echo "::error::Arquivo obrigatório ausente: data/in/matches_source.csv"
             exit 2
+          fi
+
+          # DEBUG_FLAG global para os próximos steps
+          if [ "${{ github.event.inputs.debug || 'false' }}" = "true" ]; then
+            echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
+          else
+            echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           fi
 
       # ---------- VALIDAÇÃO / NORMALIZAÇÃO DA WHITELIST ----------
@@ -103,13 +106,12 @@ if not src.exists():
 
 rows = []
 with src.open("r", encoding="utf-8", newline="") as f:
-    sniffer = csv.Sniffer()
     sample = f.read(4096)
     f.seek(0)
-    dialect = sniffer.sniff(sample) if sample else csv.excel
-    reader = csv.DictReader(f, dialect=dialect)
+    # Delimitador padrão como vírgula; se quiser ; troque aqui
+    reader = csv.DictReader(f)
     required = {"match_id","home","away"}
-    hdr = {h.strip().lower(): h for h in reader.fieldnames or []}
+    hdr = {h.strip().lower(): h for h in (reader.fieldnames or [])}
     if not required.issubset(set(hdr.keys())):
         missing = required - set(hdr.keys())
         print(f"::error::matches_source.csv sem colunas obrigatórias: {sorted(missing)}")
@@ -164,7 +166,7 @@ PY
             python -m scripts.ingest_odds_apifootball_rapidapi \
               --rodada "${OUT_DIR}" \
               --season "${SEASON}" \
-              ${DEBUG:+--debug} && break
+              ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
           done
 
@@ -176,7 +178,7 @@ PY
           done
 
       - name: Ingest odds (TheOddsAPI — soccer) — robustez (opcional)
-        if: always()  # não falhar o job se der ruim aqui; serve de robustez
+        if: always()  # não falha o job se der ruim; apenas agrega
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         shell: bash
@@ -186,14 +188,13 @@ PY
             echo "[theodds] script ausente — pulando robustez"; exit 0
           fi
 
-          # alguns ambientes precisam do rapidfuzz para normalização de times
+          # garantir rapidfuzz (alguns scripts usam para matching)
           python - <<'PY'
 try:
     import rapidfuzz  # noqa
     print("[deps] rapidfuzz OK")
-except Exception as e:
-    print("::warning::rapidfuzz ausente/erro — instalando agora para o ingest_theodds ...")
-    import os, sys, subprocess
+except Exception:
+    import sys, subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "rapidfuzz"])
 PY
 
@@ -202,7 +203,7 @@ PY
               --rodada "${OUT_DIR}" \
               --regions "${REGIONS}" \
               --aliases "data/in/aliases.json" \
-              ${DEBUG:+--debug} && break
+              ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
           done || true  # não derruba o job
 
@@ -236,7 +237,7 @@ PY
         run: |
           set -euo pipefail
           [ -f scripts/predict_from_odds.py ] || { echo "::error::scripts/predict_from_odds.py não encontrado"; exit 7; }
-          python scripts/predict_from_odds.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          python scripts/predict_from_odds.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv não gerado"; exit 7; }
 
       # ---------- FEATURES (UNIVARIADO) ----------
@@ -245,7 +246,7 @@ PY
         run: |
           set -euo pipefail
           [ -f scripts/feature_build_univariado.py ] || { echo "::error::scripts/feature_build_univariado.py não encontrado"; exit 21; }
-          python scripts/feature_build_univariado.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          python scripts/feature_build_univariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv não gerado"; exit 21; }
 
       # ---------- KELLY ----------
@@ -257,8 +258,7 @@ PY
         run: |
           set -euo pipefail
           [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
-          # publish_kelly usa 'market' se não houver blend/final. Já garantimos predictions_market.csv lá em cima.
-          python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG:+--debug}
+          python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
       # ---------- CARTÃO LOTECA ----------
@@ -271,13 +271,12 @@ import pandas as pd, os
 out_dir = os.environ["OUT_DIR"]
 csv_path = f"{out_dir}/kelly_stakes.csv"
 df = pd.read_csv(csv_path)
-# Espera colunas: match_id, team_home, team_away, pick, stake, prob_*, odds_*
-# Se sua estrutura for diferente, ajuste aqui:
-cols = [c for c in df.columns]
+# Espera colunas: match_id, team_home, team_away, pick, stake
+cols = set(df.columns)
 req = {"match_id","team_home","team_away","pick"}
-missing = req - set(cols)
+missing = req - cols
 if missing:
-    print(f"::warning::Cartão Loteca: colunas esperadas ausentes {sorted(missing)} — vou tentar o básico.")
+    print(f"::warning::Cartão Loteca: colunas esperadas ausentes {sorted(missing)} — tentando o básico.")
 lines = ["# Cartão Loteca", ""]
 for _, r in df.iterrows():
     home = r.get("team_home", "")
