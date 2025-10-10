@@ -8,7 +8,10 @@ on:
         type: boolean
         default: true
   schedule:
-    - cron: "15 09 * * 4,5"  # exemplo: quinta e sexta 09:15 UTC
+    - cron: "15 09 * * 4,5" # exemplo
+
+permissions:
+  contents: read
 
 env:
   SEASON: "2025"
@@ -48,13 +51,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          pip install --upgrade pip
           pip install pandas numpy rapidfuzz requests pytz python-dateutil
 
-      # ---------- PREPARE E VARS ----------
+      # ---------- PREPARE ----------
       - name: Prepare run folders
         id: prep
         shell: bash
@@ -72,26 +75,29 @@ jobs:
             echo '{"teams": {}}' > data/in/aliases.json
           fi
 
-          # matches_source.csv é obrigatório (você define os jogos)
+          # matches_source.csv é obrigatório
           if [ ! -s "data/in/matches_source.csv" ]; then
             echo "::error::Arquivo obrigatório ausente: data/in/matches_source.csv"
             exit 2
           fi
 
-          # DEBUG_FLAG global para os próximos steps
-          if [ "${{ github.event.inputs.debug || 'false' }}" = "true" ]; then
-            echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
-          else
-            echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
-          fi
+      - name: Set DEBUG_FLAG (on)
+        if: ${{ inputs.debug }}
+        shell: bash
+        run: echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
 
-      # ---------- VALIDAÇÃO / NORMALIZAÇÃO DA WHITELIST ----------
+      - name: Set DEBUG_FLAG (off)
+        if: ${{ !inputs.debug }}
+        shell: bash
+        run: echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
+
+      # ---------- VALIDAÇÃO WHITELIST ----------
       - name: Validar e normalizar nomes (whitelist)
         id: validate_names
         shell: bash
         run: |
           set -euo pipefail
-          python - << 'PY'
+          python - <<'PY'
 import csv, os, sys
 from pathlib import Path
 
@@ -106,14 +112,14 @@ if not src.exists():
 
 rows = []
 with src.open("r", encoding="utf-8", newline="") as f:
-    sample = f.read(4096)
-    f.seek(0)
-    # Delimitador padrão como vírgula; se quiser ; troque aqui
     reader = csv.DictReader(f)
     required = {"match_id","home","away"}
-    hdr = {h.strip().lower(): h for h in (reader.fieldnames or [])}
-    if not required.issubset(set(hdr.keys())):
-        missing = required - set(hdr.keys())
+    if not reader.fieldnames:
+        print("::error::Cabecalho ausente em matches_source.csv")
+        sys.exit(2)
+    hdr = {h.strip().lower(): h for h in reader.fieldnames}
+    missing = required - set(hdr.keys())
+    if missing:
         print(f"::error::matches_source.csv sem colunas obrigatórias: {sorted(missing)}")
         sys.exit(2)
 
@@ -122,13 +128,8 @@ with src.open("r", encoding="utf-8", newline="") as f:
     for r in reader:
         line_no += 1
         mid = (r.get(hdr["match_id"]) or "").strip()
-        home = (r.get(hdr["home"]) or "").strip()
-        away = (r.get(hdr["away"]) or "").strip()
-
-        # Normalização simples
-        home = " ".join(home.split())
-        away = " ".join(away.split())
-
+        home = " ".join((r.get(hdr["home"]) or "").split())
+        away = " ".join((r.get(hdr["away"]) or "").split())
         if not mid or not home or not away:
             print(f"::error::Linha {line_no} inválida (match_id/home/away vazio).")
             sys.exit(2)
@@ -153,7 +154,7 @@ PY
           echo "===== Preview whitelist ====="
           head -n 50 "${OUT_DIR}/matches_whitelist.csv" || true
 
-      # ---------- INGEST (SOCCER SOMENTE) ----------
+      # ---------- INGEST: API-FOOTBALL (OBRIGATÓRIO) ----------
       - name: Ingest odds (API-Football via RapidAPI) — obrigatório
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
@@ -177,8 +178,9 @@ PY
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::Coluna '$c' ausente em odds_apifootball.csv"; exit 5; }
           done
 
+      # ---------- ROBUSTEZ: THEODDSAPI (OPCIONAL) ----------
       - name: Ingest odds (TheOddsAPI — soccer) — robustez (opcional)
-        if: always()  # não falha o job se der ruim; apenas agrega
+        if: always()
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         shell: bash
@@ -188,7 +190,6 @@ PY
             echo "[theodds] script ausente — pulando robustez"; exit 0
           fi
 
-          # garantir rapidfuzz (alguns scripts usam para matching)
           python - <<'PY'
 try:
     import rapidfuzz  # noqa
@@ -205,7 +206,7 @@ PY
               --aliases "data/in/aliases.json" \
               ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
-          done || true  # não derruba o job
+          done || true
 
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
           if [ -s "$OUT" ]; then
@@ -266,17 +267,15 @@ PY
         shell: bash
         run: |
           set -euo pipefail
-          python - << 'PY'
+          python - <<'PY'
 import pandas as pd, os
 out_dir = os.environ["OUT_DIR"]
 csv_path = f"{out_dir}/kelly_stakes.csv"
 df = pd.read_csv(csv_path)
-# Espera colunas: match_id, team_home, team_away, pick, stake
-cols = set(df.columns)
 req = {"match_id","team_home","team_away","pick"}
-missing = req - cols
+missing = req - set(df.columns)
 if missing:
-    print(f"::warning::Cartão Loteca: colunas esperadas ausentes {sorted(missing)} — tentando o básico.")
+    print(f"::warning::Cartão: colunas ausentes {sorted(missing)} — tentando mesmo assim.")
 lines = ["# Cartão Loteca", ""]
 for _, r in df.iterrows():
     home = r.get("team_home", "")
