@@ -30,17 +30,17 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Setup Python
+      - name: "Setup Python"
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Cache pip
+      - name: "Cache pip"
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -48,7 +48,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install deps
+      - name: "Install deps"
         shell: bash
         run: |
           set -euo pipefail
@@ -56,11 +56,11 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Garantimos libs usadas pelos scripts
+          # libs garantidas
           pip install pandas numpy rapidfuzz requests pytz python-dateutil Unidecode
 
       # ---------- PREP ----------
-      - name: Prepare run folders
+      - name: "Prepare run folders"
         id: prep
         shell: bash
         run: |
@@ -71,7 +71,7 @@ jobs:
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
           mkdir -p "data/in" "${OUT_DIR}"
 
-          # arquivos e segredos obrigatórios
+          # arquivos/segredos obrigatórios
           if [ ! -s "data/in/matches_source.csv" ]; then
             echo "::error::Missing required file: data/in/matches_source.csv"
             exit 2
@@ -85,12 +85,12 @@ jobs:
             exit 2
           fi
 
-          # aliases padrão se não existir
+          # aliases padrão, se ausente
           if [ ! -s "data/in/aliases.json" ]; then
             echo '{"teams": {}}' > data/in/aliases.json
           fi
 
-      - name: Set DEBUG_FLAG
+      - name: "Set DEBUG_FLAG"
         shell: bash
         run: |
           set -euo pipefail
@@ -101,7 +101,7 @@ jobs:
           fi
 
       # ---------- VALIDATE + NORMALIZE NAMES ----------
-      - name: Validate and normalize whitelist names
+      - name: "Validate and normalize whitelist names"
         shell: bash
         run: |
           set -euo pipefail
@@ -188,13 +188,12 @@ jobs:
           LINES=$(wc -l < "$TMP_NORM" | tr -d " ")
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
-          # move para o nome final (evita cp same-file)
           mv "$TMP_NORM" "$FINAL"
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$FINAL" || true
 
       # ---------- API-FOOTBALL (OBRIGATÓRIA) ----------
-      - name: Ingest odds (API-Football via RapidAPI) REQUIRED
+      - name: "Ingest odds (API-Football via RapidAPI) REQUIRED"
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         shell: bash
@@ -216,7 +215,7 @@ jobs:
           done
 
       # ---------- THEODDSAPI (OBRIGATÓRIA) ----------
-      - name: Ingest odds (TheOddsAPI) REQUIRED
+      - name: "Ingest odds (TheOddsAPI) REQUIRED"
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         shell: bash
@@ -239,7 +238,7 @@ jobs:
           done
 
       # ---------- CONSENSUS ----------
-      - name: Consensus odds (REQUIRED)
+      - name: "Consensus odds (REQUIRED)"
         shell: bash
         run: |
           set -euo pipefail
@@ -254,7 +253,7 @@ jobs:
           head -n 20 "$OUT_FILE" || true
 
       # ---------- MARKET PREDICTIONS ----------
-      - name: Predict from odds (REQUIRED)
+      - name: "Predict from odds (REQUIRED)"
         shell: bash
         run: |
           set -euo pipefail
@@ -263,7 +262,7 @@ jobs:
           test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv not generated"; exit 7; }
 
       # ---------- FEATURES: UNIVARIADO ----------
-      - name: Build features (univariado) REQUIRED
+      - name: "Build features (univariado) REQUIRED"
         shell: bash
         run: |
           set -euo pipefail
@@ -272,7 +271,7 @@ jobs:
           test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv not generated"; exit 21; }
 
       # ---------- FEATURES: BIVARIADO ----------
-      - name: Build features (bivariado) REQUIRED
+      - name: "Build features (bivariado) REQUIRED"
         shell: bash
         run: |
           set -euo pipefail
@@ -287,7 +286,7 @@ jobs:
           test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv not generated"; exit 22; }
 
       # ---------- xG: UNIVARIADO ----------
-      - name: Build xG (univariado) REQUIRED
+      - name: "Build xG (univariado) REQUIRED"
         shell: bash
         run: |
           set -euo pipefail
@@ -302,7 +301,7 @@ jobs:
           test -s "${OUT_DIR}/xg_univariado.csv" || { echo "::error::xg_univariado.csv not generated"; exit 31; }
 
       # ---------- xG: BIVARIADO ----------
-      - name: Build xG (bivariado) REQUIRED
+      - name: "Build xG (bivariado) REQUIRED"
         shell: bash
         run: |
           set -euo pipefail
@@ -317,7 +316,7 @@ jobs:
           test -s "${OUT_DIR}/xg_bivariado.csv" || { echo "::error::xg_bivariado.csv not generated"; exit 32; }
 
       # ---------- MERGE FEATURES (sempre gera output) ----------
-      - name: Merge features -> features_all.csv (REQUIRED output)
+      - name: "Merge features -> features_all.csv (REQUIRED output)"
         shell: bash
         run: |
           set -euo pipefail
@@ -344,7 +343,7 @@ PY
           test -s "${OUT_DIR}/features_all.csv" || { echo "::error::features_all.csv not generated"; exit 23; }
 
       # ---------- KELLY ----------
-      - name: Publish Kelly stakes (REQUIRED)
+      - name: "Publish Kelly stakes (REQUIRED)"
         shell: bash
         env:
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
@@ -356,7 +355,7 @@ PY
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 25; }
 
       # ---------- LOTECA CARD ----------
-      - name: Build loteca card (REQUIRED)
+      - name: "Build loteca card (REQUIRED)"
         shell: bash
         run: |
           set -euo pipefail
@@ -387,7 +386,7 @@ PY
           head -n 50 "${OUT_DIR}/loteca_card.md" || true
 
       # ---------- ARTIFACTS ----------
-      - name: Upload artifacts
+      - name: "Upload artifacts"
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
