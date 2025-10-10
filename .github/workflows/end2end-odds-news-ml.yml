@@ -8,7 +8,7 @@ on:
         type: boolean
         default: true
   schedule:
-    - cron: "15 09 * * 4,5" # exemplo
+    - cron: "15 09 * * 4,5" # ajuste se quiser
 
 permissions:
   contents: read
@@ -180,7 +180,7 @@ PY
 
       # ---------- ROBUSTEZ: THEODDSAPI (OPCIONAL) ----------
       - name: Ingest odds (TheOddsAPI — soccer) — robustez (opcional)
-        if: always()
+        if: ${{ always() }}
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         shell: bash
@@ -294,7 +294,7 @@ PY
 
       # ---------- ARTEFATOS ----------
       - name: Upload artifacts (debug)
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: loteca-${{ steps.prep.outputs.RUN_ID }}
