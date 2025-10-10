@@ -56,7 +56,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          pip install pandas numpy rapidfuzz requests pytz python-dateutil
+          pip install pandas numpy rapidfuzz requests pytz python-dateutil Unidecode
 
       # ---------- PREP ----------
       - name: Prepare run folders
@@ -87,25 +87,68 @@ jobs:
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           fi
 
-      # ---------- VALIDATE WHITELIST (BASH/AWK) ----------
-      - name: Validate and normalize names
+      # ---------- VALIDATE + NORMALIZE NAMES (forte) ----------
+      - name: Validate and normalize whitelist names
         shell: bash
         run: |
           set -euo pipefail
           SRC="data/in/matches_source.csv"
-          DST="${OUT_DIR}/matches_whitelist.csv"
-          TMP="${OUT_DIR}/_tmp_src.csv"
+          DST_RAW="${OUT_DIR}/matches_whitelist_raw.csv"
+          DST_NORM="${OUT_DIR}/matches_whitelist.csv"
 
-          tr -d '\r' < "$SRC" \
-          | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$TMP"
+          tr -d '\r' < "$SRC" | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$DST_RAW"
 
-          header="$(head -n1 "$TMP")"
+          header="$(head -n1 "$DST_RAW")"
           h_low="$(echo "$header" | tr '[:upper:]' '[:lower:]')"
           for need in match_id home away; do
             echo "$h_low" | grep -qiE "(^|,)$need(,|$)" || { echo "::error::missing column '$need' in matches_source.csv"; exit 2; }
           done
 
           awk -F',' -v OFS=',' '
+            function rmuf(s){ gsub(/\/[A-Za-z]{2}($|[^A-Za-z])/, "", s); return s }
+            function deacc(s){
+              gsub(/á|à|ã|â|ä/,"a",s); gsub(/Á|À|Ã|Â|Ä/,"A",s);
+              gsub(/é|ê|è|ë/,"e",s);  gsub(/É|Ê|È|Ë/,"E",s);
+              gsub(/í|î|ì|ï/,"i",s);  gsub(/Í|Î|Ì|Ï/,"I",s);
+              gsub(/ó|ô|ò|õ|ö/,"o",s); gsub(/Ó|Ô|Ò|Õ|Ö/,"O",s);
+              gsub(/ú|û|ù|ü/,"u",s);  gsub(/Ú|Û|Ù|Ü/,"U",s);
+              gsub(/ç/,"c",s);        gsub(/Ç/,"C",s);
+              gsub(/ñ/,"n",s);        gsub(/Ñ/,"N",s);
+              return s
+            }
+            function trim(s){ sub(/^ +/,"",s); sub(/ +$/,"",s); return s }
+            function map_pt_en(s,  l){
+              l=tolower(s)
+              if(l=="estonia") return "Estonia"
+              if(l=="italia") return "Italy"
+              if(l=="bulgaria") return "Bulgaria"
+              if(l=="turquia") return "Turkey"
+              if(l=="espanha") return "Spain"
+              if(l=="georgia") return "Georgia"
+              if(l=="servia" || l=="serbia/ser" || l=="serbia") return "Serbia"
+              if(l=="albania") return "Albania"
+              if(l=="portugal") return "Portugal"
+              if(l=="irlanda") return "Ireland"
+              if(l=="holanda" || l=="paises baixos") return "Netherlands"
+              if(l=="finlandia") return "Finland"
+              if(l=="romenia") return "Romania"
+              if(l=="austria") return "Austria"
+              if(l=="dinamarca") return "Denmark"
+              if(l=="grecia") return "Greece"
+              if(l=="lituania") return "Lithuania"
+              if(l=="polonia") return "Poland"
+              if(l=="ponte preta") return "Ponte Preta"
+              if(l=="guarani") return "Guarani"
+              if(l=="palmeiras") return "Palmeiras"
+              if(l=="juventude") return "Juventude"
+              if(l=="criciuma") return "Criciuma"
+              if(l=="america/mg" || l=="america mg" || l=="america-mg" || l=="america mineiro") return "America Mineiro"
+              if(l=="cuiaba") return "Cuiaba"
+              if(l=="coritiba") return "Coritiba"
+              if(l=="novorizontino" || l=="gremio novorizontino" || l=="grêmio novorizontino") return "Gremio Novorizontino"
+              if(l=="operario" || l=="operario pr" || l=="operario/pr" || l=="operário/pr") return "Operario PR"
+              return s
+            }
             NR==1{
               for(i=1;i<=NF;i++){
                 k=tolower($i);
@@ -119,18 +162,22 @@ jobs:
             }
             {
               mid=$mi; home=$hi; away=$ai;
-              gsub(/^ +| +$/,"",mid); gsub(/^ +| +$/,"",home); gsub(/^ +| +$/,"",away);
+              home=rmuf(home); away=rmuf(away);
+              home=deacc(home); away=deacc(away);
+              home=trim(home); away=trim(away);
+              home=map_pt_en(home); away=map_pt_en(away);
               if(mid=="" || home=="" || away==""){ print "::error::empty field on line " NR; exit 2 }
               if(seen[mid]++){ print "::error::duplicate match_id: " mid; exit 2 }
               print mid,home,away
             }
-          ' "$TMP" > "$DST"
+          ' "$DST_RAW" > "$DST_NORM"
 
-          LINES=$(wc -l < "$DST" | tr -d ' ')
-          [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty"; exit 3; }
+          LINES=$(wc -l < "$DST_NORM" | tr -d " ")
+          [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
-          echo "===== Preview whitelist ====="
-          head -n 50 "$DST" || true
+          cp "$DST_NORM" "${OUT_DIR}/matches_whitelist.csv"
+          echo "===== Preview normalized whitelist ====="
+          head -n 30 "$DST_NORM" || true
 
       # ---------- API-FOOTBALL (REQUIRED) ----------
       - name: Ingest odds (API-Football via RapidAPI) required
@@ -183,8 +230,34 @@ jobs:
             echo "[theodds] file not produced; proceeding with API-Football only"
           fi
 
+      # ---------- EXTRAS: NEWS (opcional, presente) ----------
+      - name: Enrich with News (optional)
+        env:
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/extras_news_sentiment.py ]; then
+            python scripts/extras_news_sentiment.py --rodada "${OUT_DIR}" ${DEBUG_FLAG} || echo "[news] non-fatal error; continuing"
+          else
+            echo "[news] script missing - skipping"
+          fi
+
+      # ---------- EXTRAS: WEATHER (opcional, presente) ----------
+      - name: Enrich with Weather (optional)
+        env:
+          WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/extras_weather_context.py ]; then
+            python scripts/extras_weather_context.py --rodada "${OUT_DIR}" ${DEBUG_FLAG} || echo "[weather] non-fatal error; continuing"
+          else
+            echo "[weather] script missing - skipping"
+          fi
+
       # ---------- CONSENSUS ----------
-      - name: Consensus odds
+      - name: Consensus odds (required)
         shell: bash
         run: |
           set -euo pipefail
@@ -198,7 +271,8 @@ jobs:
           done
           head -n 20 "$OUT_FILE" || true
 
-      - name: Predict from odds
+      # ---------- MARKET PREDICTIONS ----------
+      - name: Predict from odds (required)
         shell: bash
         run: |
           set -euo pipefail
@@ -206,8 +280,8 @@ jobs:
           python scripts/predict_from_odds.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/predictions_market.csv" || { echo "::error::predictions_market.csv not generated"; exit 7; }
 
-      # ---------- FEATURES ----------
-      - name: Build features univariado
+      # ---------- FEATURES: UNIVARIADO ----------
+      - name: Build features (univariado) required
         shell: bash
         run: |
           set -euo pipefail
@@ -215,8 +289,64 @@ jobs:
           python scripts/feature_build_univariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/features_univariado.csv" || { echo "::error::features_univariado.csv not generated"; exit 21; }
 
+      # ---------- FEATURES: BIVARIADO ----------
+      - name: Build features (bivariado) required
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/feature_build_bivariado.py ]; then
+            python scripts/feature_build_bivariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          elif [ -f scripts/feature_bivariado.py ]; then
+            python scripts/feature_bivariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          else
+            echo "::error::bivariate features script not found (feature_build_bivariado.py or feature_bivariado.py)"
+            exit 22
+          fi
+          test -s "${OUT_DIR}/features_bivariado.csv" || { echo "::error::features_bivariado.csv not generated"; exit 22; }
+
+      # ---------- xG: UNIVARIADO ----------
+      - name: Build xG (univariado) required
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/feature_xg_univariado.py ]; then
+            python scripts/feature_xg_univariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          elif [ -f scripts/xg_univariado.py ]; then
+            python scripts/xg_univariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          else
+            echo "::error::xG univariado script not found (feature_xg_univariado.py or xg_univariado.py)"
+            exit 31
+          fi
+          test -s "${OUT_DIR}/xg_univariado.csv" || { echo "::error::xg_univariado.csv not generated"; exit 31; }
+
+      # ---------- xG: BIVARIADO ----------
+      - name: Build xG (bivariado) required
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/feature_xg_bivariado.py ]; then
+            python scripts/feature_xg_bivariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          elif [ -f scripts/xg_bivariado.py ]; then
+            python scripts/xg_bivariado.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          else
+            echo "::error::xG bivariado script not found (feature_xg_bivariado.py or xg_bivariado.py)"
+            exit 32
+          fi
+          test -s "${OUT_DIR}/xg_bivariado.csv" || { echo "::error::xg_bivariado.csv not generated"; exit 32; }
+
+      # ---------- (Opcional) Merge de features, se existir script dedicado ----------
+      - name: Merge features (optional)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/merge_features.py ]; then
+            python scripts/merge_features.py --rodada "${OUT_DIR}" ${DEBUG_FLAG} || { echo "::warning::merge_features failed (non-fatal)"; }
+          else
+            echo "[merge] script missing - skipping"
+          fi
+
       # ---------- KELLY ----------
-      - name: Publish Kelly stakes
+      - name: Publish Kelly stakes (required)
         shell: bash
         env:
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
@@ -227,8 +357,21 @@ jobs:
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 25; }
 
-      # ---------- LOTECA CARD (no heredoc) ----------
-      - name: Build loteca card
+      # ---------- EXTRAS: WANDB LOG (opcional) ----------
+      - name: Log to Weights & Biases (optional)
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/wandb_log.py ]; then
+            python scripts/wandb_log.py --rodada "${OUT_DIR}" ${DEBUG_FLAG} || echo "[wandb] non-fatal error; continuing"
+          else
+            echo "[wandb] script missing - skipping"
+          fi
+
+      # ---------- LOTECA CARD ----------
+      - name: Build loteca card (required)
         shell: bash
         run: |
           set -euo pipefail
@@ -250,7 +393,7 @@ jobs:
               {
                 home=$hi; away=$ai; pick=$pi; stake=$si;
                 gsub(/^ +| +$/,"",home); gsub(/^ +| +$/,"",away);
-                pl=pick; if(pl=="") pl=""; 
+                pl=pick; if(pl=="") pl="";
                 printf("- **%s x %s** — palpite: %s  |  stake: %s\n", home, away, toupper(pl), stake)
               }
             ' "${OUT_DIR}/kelly_stakes.csv"
