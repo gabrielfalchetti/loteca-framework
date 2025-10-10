@@ -56,7 +56,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # garantimos lib para scripts (ex.: unidecode)
+          # Garantimos libs usadas pelos scripts
           pip install pandas numpy rapidfuzz requests pytz python-dateutil Unidecode
 
       # ---------- PREP ----------
@@ -71,7 +71,7 @@ jobs:
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
           mkdir -p "data/in" "${OUT_DIR}"
 
-          # exige source + secrets das APIs
+          # arquivos e segredos obrigatórios
           if [ ! -s "data/in/matches_source.csv" ]; then
             echo "::error::Missing required file: data/in/matches_source.csv"
             exit 2
@@ -100,7 +100,7 @@ jobs:
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           fi
 
-      # ---------- VALIDATE + NORMALIZE NAMES (forte) ----------
+      # ---------- VALIDATE + NORMALIZE NAMES ----------
       - name: Validate and normalize whitelist names
         shell: bash
         run: |
@@ -188,7 +188,7 @@ jobs:
           LINES=$(wc -l < "$TMP_NORM" | tr -d " ")
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
-          # agora move para o nome final (evita cp same-file)
+          # move para o nome final (evita cp same-file)
           mv "$TMP_NORM" "$FINAL"
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$FINAL" || true
@@ -316,7 +316,7 @@ jobs:
           fi
           test -s "${OUT_DIR}/xg_bivariado.csv" || { echo "::error::xg_bivariado.csv not generated"; exit 32; }
 
-      # ---------- (Opcional mesmo script — mas mantido OBRIGATÓRIO dar output) ----------
+      # ---------- MERGE FEATURES (sempre gera output) ----------
       - name: Merge features -> features_all.csv (REQUIRED output)
         shell: bash
         run: |
@@ -324,16 +324,17 @@ jobs:
           if [ -f scripts/merge_features.py ]; then
             python scripts/merge_features.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           else
-            # fallback: junta via csv simples
             python - << 'PY'
-import pandas as pd, os, glob
+import os, pandas as pd
 out=os.environ["OUT_DIR"]
+cands=["features_univariado.csv","features_bivariado.csv","xg_univariado.csv","xg_bivariado.csv","predictions_market.csv"]
 dfs=[]
-for f in ["features_univariado.csv","features_bivariado.csv","xg_univariado.csv","xg_bivariado.csv","predictions_market.csv"]:
+for f in cands:
     p=os.path.join(out,f)
     if os.path.exists(p) and os.path.getsize(p)>0:
         dfs.append(pd.read_csv(p))
-assert dfs, "no features to merge"
+if not dfs:
+    raise SystemExit("::error::no features to merge")
 base=dfs[0]
 for d in dfs[1:]:
     base=base.merge(d, how="outer")
