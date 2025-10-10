@@ -1,70 +1,34 @@
-name: End2End Odds + News + ML
+name: End-to-end Odds + News + ML (Loteca)
 
 on:
   workflow_dispatch:
-    inputs:
-      season:
-        description: "Season year"
-        required: true
-        default: "2025"
-      regions:
-        description: "TheOdds regions (comma)"
-        required: true
-        default: "uk,eu,us,au"
-      lookahead_days:
-        description: "Days ahead to look"
-        required: true
-        default: "3"
-      bankroll:
-        description: "Bankroll base"
-        required: true
-        default: "1000"
-      kelly_fraction:
-        description: "Kelly fraction"
-        required: true
-        default: "0.5"
-      kelly_cap:
-        description: "Kelly cap"
-        required: true
-        default: "0.1"
-      kelly_top_n:
-        description: "Kelly top N"
-        required: true
-        default: "14"
-      round_to:
-        description: "Round stakes to"
-        required: true
-        default: "1"
-      debug:
-        description: "Enable debug logs"
-        required: true
-        default: "true"
-  push:
-    branches:
-      - main
-      - master
+
+permissions:
+  contents: read
 
 env:
-  SEASON: ${{ github.event.inputs.season || '2025' }}
-  REGIONS: ${{ github.event.inputs.regions || 'uk,eu,us,au' }}
-  LOOKAHEAD_DAYS: ${{ github.event.inputs.lookahead_days || '3' }}
-  BANKROLL: ${{ github.event.inputs.bankroll || '1000' }}
-  KELLY_FRACTION: ${{ github.event.inputs.kelly_fraction || '0.5' }}
-  KELLY_CAP: ${{ github.event.inputs.kelly_cap || '0.1' }}
-  KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n || '14' }}
-  ROUND_TO: ${{ github.event.inputs.round_to || '1' }}
-  DEBUG: ${{ github.event.inputs.debug || 'true' }}
+  SEASON: "2025"
+  REGIONS: "uk,eu,us,au"
+  LOOKAHEAD_DAYS: "3"
+  BANKROLL: "1000"
+  KELLY_FRACTION: "0.5"
+  KELLY_CAP: "0.1"
+  KELLY_TOP_N: "14"
+  ROUND_TO: "1"
+  DEBUG: "true"
 
 jobs:
-  odds-news-ml:
+  end2end:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    env:
+      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -73,61 +37,59 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
 
       - name: Install dependencies (strict)
-        shell: bash
         run: |
           set -euo pipefail
-          python -V
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
+          else
+            pip install requests pandas numpy pyyaml unidecode
           fi
-          # garantias mínimas
-          pip install requests pandas numpy unidecode pyyaml
 
-      # ---------- PREP & INPUTS ----------
       - name: Prepare run folders and env
         id: prep
-        shell: bash
         run: |
           set -euo pipefail
-          RUN_ID=$(date +%s)
+          if [ -z "${THEODDS_API_KEY:-}" ]; then echo "::error::THEODDS_API_KEY secret not set"; exit 1; fi
+          if [ -z "${X_RAPIDAPI_KEY:-}" ]; then echo "::error::X_RAPIDAPI_KEY secret not set"; exit 1; fi
+
+          RUN_ID="$(date +%s)"
           echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
           echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
-          mkdir -p "data/in" "${GITHUB_WORKSPACE}/data/out/${RUN_ID}"
 
-          # Aliases padrão (se faltar)
+          mkdir -p "data/in" "data/out/${RUN_ID}"
+
+          # aliases.json
           if [ ! -s "data/in/aliases.json" ]; then
             echo '{"teams": {}}' > data/in/aliases.json
           fi
 
-          # matches_source.csv é obrigatório
+          # matches_source.csv obrigatório
           if [ ! -s "data/in/matches_source.csv" ]; then
             echo "::error::Arquivo obrigatório ausente: data/in/matches_source.csv"
             exit 2
           fi
 
-          # flag de debug
-          if [ "${DEBUG}" = "true" ]; then
+          # DEBUG_FLAG para reutilizar nos comandos Python
+          if [ "${DEBUG:-}" = "true" ]; then
             echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
           else
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           fi
 
-      # ---------- NORMALIZAÇÃO & VALIDAÇÃO (ANTES DO INGEST) ----------
-      - name: Normalize and validate matches_source (REQUIRED)
-        shell: bash
+      - name: Normalize and validate matches_source -> whitelist
         run: |
           set -euo pipefail
           SRC="data/in/matches_source.csv"
-          DST_RAW="${OUT_DIR}/matches_whitelist_raw.csv"
-          DST_NORM="${OUT_DIR}/matches_whitelist.csv"
+          DST_DIR="${OUT_DIR}"
+          DST_RAW="${DST_DIR}/matches_whitelist_raw.csv"
+          DST_TMP="${DST_DIR}/matches_whitelist_tmp.csv"
+          DST_FINAL="${DST_DIR}/matches_whitelist.csv"
 
-          # normaliza CRLF, espaços e vírgulas
           tr -d '\r' < "$SRC" | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$DST_RAW"
 
           header="$(head -n1 "$DST_RAW")"
@@ -136,7 +98,6 @@ jobs:
             echo "$h_low" | grep -qiE "(^|,)$need(,|$)" || { echo "::error::missing column '$need' in matches_source.csv"; exit 2; }
           done
 
-          # mapeia PT->EN básico e remove UF
           awk -F',' -v OFS=',' '
             function rmuf(s){ gsub(/\/[A-Za-z]{2}($|[^A-Za-z])/, "", s); return s }
             function deacc(s){
@@ -203,56 +164,27 @@ jobs:
               if(seen[mid]++){ print "::error::duplicate match_id: " mid; exit 2 }
               print mid,home,away
             }
-          ' "$DST_RAW" > "$DST_NORM"
+          ' "$DST_RAW" > "$DST_TMP"
 
-          LINES=$(wc -l < "$DST_NORM" | tr -d " ")
+          LINES=$(wc -l < "$DST_TMP" | tr -d " ")
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
+          mv "$DST_TMP" "$DST_FINAL"
+
           echo "===== Preview normalized whitelist ====="
-          head -n 30 "$DST_NORM" || true
+          head -n 30 "$DST_FINAL" || true
 
-      - name: Validate team names list (REQUIRED)
-        shell: bash
+      - name: Validate team names before ingest (pre-flight)
         run: |
           set -euo pipefail
-          file="${OUT_DIR}/matches_whitelist.csv"
-          test -s "$file" || { echo "::error::matches_whitelist.csv not found"; exit 3; }
-          echo "===== Unique teams (home+away) ====="
-          awk -F',' 'NR>1{print $2; print $3}' "$file" | sort -u | nl -ba
+          WL="${OUT_DIR}/matches_whitelist.csv"
+          echo "=== Unique teams from whitelist ==="
+          awk -F',' 'NR>1{print $2; print $3}' "$WL" | sort -u | nl -ba
 
-      # ---------- INGEST APIs (OBRIGATÓRIAS) ----------
-      - name: Ingest API-Football (RapidAPI) (REQUIRED)
-        shell: bash
-        env:
-          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
-        run: |
-          set -euo pipefail
-          [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
-          [ -n "${X_RAPIDAPI_KEY:-}" ] || { echo "::error::X_RAPIDAPI_KEY secret not set"; exit 5; }
-
-          a=0; until [ $a -ge 3 ]; do
-            python -m scripts.ingest_odds_apifootball_rapidapi \
-              --rodada "${OUT_DIR}" \
-              --season "${SEASON}" \
-              ${DEBUG_FLAG} && break
-            a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
-          done
-
-          OUT="${OUT_DIR}/odds_apifootball.csv"
-          test -s "$OUT" || { echo "::error::odds_apifootball.csv not generated"; exit 5; }
-          header="$(head -n1 "$OUT" | tr -d '\r')"
-          for c in match_id home away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
-          done
-
-      - name: Ingest TheOddsAPI (REQUIRED)
-        shell: bash
-        env:
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      - name: Ingest THEODDSAPI (mandatory)
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
-          [ -n "${THEODDS_API_KEY:-}" ] || { echo "::error::THEODDS_API_KEY secret not set"; exit 5; }
 
           a=0; until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
@@ -265,103 +197,196 @@ jobs:
 
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
           test -s "$OUT" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
+
           header="$(head -n1 "$OUT" | tr -d '\r')"
           for c in match_id home away odds_home odds_draw odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
           done
 
-      # ---------- CONSENSO ----------
+      - name: Ingest API-Football (RapidAPI, mandatory)
+        run: |
+          set -euo pipefail
+          [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
+
+          a=0; until [ $a -ge 3 ]; do
+            python -m scripts.ingest_odds_apifootball_rapidapi \
+              --rodada "${OUT_DIR}" \
+              --season "${SEASON}" \
+              ${DEBUG_FLAG} && break
+            a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
+          done
+
+          OUT="${OUT_DIR}/odds_apifootball.csv"
+          test -s "$OUT" || { echo "::error::odds_apifootball.csv not generated"; exit 5; }
+
+          header="$(head -n1 "$OUT" | tr -d '\r')"
+          for c in match_id home away odds_home odds_draw odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
+          done
+
       - name: Consensus odds (STRICT)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
+
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
           test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv not generated"; exit 6; }
           header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
           for c in team_home team_away odds_home odds_draw odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
-          echo "===== Preview odds_consensus.csv ====="
+
+          echo "=== Preview odds_consensus.csv ==="
           head -n 20 "$OUT_FILE" || true
 
-      # ---------- XG (UNI & BI) ----------
-      - name: XG features - Univariate (REQUIRED)
-        shell: bash
+      - name: Calibrate probabilities from consensus
         run: |
           set -euo pipefail
-          [ -f scripts/xg_univariate.py ] || { echo "::error::scripts/xg_univariate.py not found"; exit 7; }
-          python -m scripts.xg_univariate --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
+          python - <<'PY'
+import pandas as pd, numpy as np
+from unidecode import unidecode
+from pathlib import Path
 
-      - name: XG features - Bivariate (REQUIRED)
-        shell: bash
+out_dir = Path("${OUT_DIR}")
+wl = pd.read_csv(out_dir/"matches_whitelist.csv")
+cons = pd.read_csv(out_dir/"odds_consensus.csv")
+
+def norm(s):
+    return unidecode(str(s).strip().lower())
+
+wl["home_n"] = wl["home"].map(norm)
+wl["away_n"] = wl["away"].map(norm)
+cons["home_n"] = cons["team_home"].map(norm)
+cons["away_n"] = cons["team_away"].map(norm)
+
+m = wl.merge(cons, on=["home_n","away_n"], how="inner",
+             suffixes=("",""))
+if m.empty:
+    raise SystemExit("::error::no matches joined between whitelist and consensus. Check name normalization.")
+
+# implied probs and margin normalization
+for col in ("odds_home","odds_draw","odds_away"):
+    if (m[col] <= 1).any():
+        raise SystemExit(f"::error::invalid odds <=1 found in consensus: column {col}")
+
+inv = pd.DataFrame({
+    "ih": 1.0/m["odds_home"].astype(float),
+    "ix": 1.0/m["odds_draw"].astype(float),
+    "ia": 1.0/m["odds_away"].astype(float),
+})
+s = inv.sum(axis=1).replace(0, np.nan)
+m["p_home"] = inv["ih"]/s
+m["p_draw"] = inv["ix"]/s
+m["p_away"] = inv["ia"]/s
+
+cols = ["match_id","home","away","team_home","team_away","odds_home","odds_draw","odds_away","p_home","p_draw","p_away"]
+m[cols].to_csv(out_dir/"calibrated_probs.csv", index=False)
+print("calibrated_probs.csv written with", len(m), "rows")
+PY
+          test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv not generated"; exit 7; }
+
+      - name: XG - Univariate (feature engineering)
         run: |
           set -euo pipefail
-          [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
-          python -m scripts.xg_bivariate --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
+          python - <<'PY'
+import pandas as pd
+from pathlib import Path
+out_dir = Path("${OUT_DIR}")
+df = pd.read_csv(out_dir/"calibrated_probs.csv")
 
-      # ---------- KELLY ----------
-      - name: Kelly stakes (REQUIRED)
-        shell: bash
+# Proxy xG simples a partir das probabilidades (não é xG oficial, é engineering):
+# xg_home ~ 1.8*p_home + 0.9*p_draw
+# xg_away ~ 1.8*p_away + 0.9*p_draw
+df["xg_home"] = 1.8*df["p_home"] + 0.9*df["p_draw"]
+df["xg_away"] = 1.8*df["p_away"] + 0.9*df["p_draw"]
+
+cols = ["match_id","team_home","team_away","p_home","p_draw","p_away","xg_home","xg_away"]
+df[cols].to_csv(out_dir/"xg_univariate.csv", index=False)
+print("xg_univariate.csv written with", len(df))
+PY
+          test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 8; }
+
+      - name: XG - Bivariate (feature engineering)
         run: |
           set -euo pipefail
-          [ -f scripts/kelly_stake.py ] || { echo "::error::scripts/kelly_stake.py not found"; exit 9; }
-          python -m scripts.kelly_stake \
-            --rodada "${OUT_DIR}" \
-            --bankroll "${BANKROLL}" \
-            --fraction "${KELLY_FRACTION}" \
-            --cap "${KELLY_CAP}" \
-            --top-n "${KELLY_TOP_N}" \
-            --round-to "${ROUND_TO}" \
-            ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 9; }
+          python - <<'PY'
+import pandas as pd
+from pathlib import Path
+out_dir = Path("${OUT_DIR}")
+u = pd.read_csv(out_dir/"xg_univariate.csv")
 
-      # ---------- CARTÃO LOTECA ----------
-      - name: Build loteca card (REQUIRED)
-        shell: bash
+# Bivariada: algumas interações simples
+u["xg_sum"] = u["xg_home"] + u["xg_away"]
+u["xg_diff"] = u["xg_home"] - u["xg_away"]
+u["p_max"] = u[["p_home","p_draw","p_away"]].max(axis=1)
+
+cols = ["match_id","team_home","team_away","xg_home","xg_away","xg_sum","xg_diff","p_max"]
+u[cols].to_csv(out_dir/"xg_bivariate.csv", index=False)
+print("xg_bivariate.csv written with", len(u))
+PY
+          test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 9; }
+
+      - name: Kelly stakes
         run: |
           set -euo pipefail
-          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not found"; exit 26; }
+          [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
+          python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
-          # cria cabeçalho markdown seguro para YAML
-          cat <<'EOF' > "${OUT_DIR}/loteca_card.md"
-# Cartao Loteca
+      - name: Montar Cartão Loteca
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+import pandas as pd
+from pathlib import Path
 
-EOF
+out_dir = Path("${OUT_DIR}")
+wl  = pd.read_csv(out_dir/"matches_whitelist.csv")
+cal = pd.read_csv(out_dir/"calibrated_probs.csv")
 
-          # acrescenta linhas com awk (formatação segura p/ YAML)
-          awk -F',' '
-            BEGIN { OFS="," }
-            NR==1 {
-              for (i=1; i<=NF; i++) {
-                k=tolower($i)
-                if (k=="team_home") hi=i
-                if (k=="team_away") ai=i
-                if (k=="pick") pi=i
-                if (k=="stake") si=i
-              }
-              next
-            }
-            {
-              home=$hi; away=$ai; pick=$pi; stake=$si
-              gsub(/^ +| +$/,"",home); gsub(/^ +| +$/,"",away)
-              pickU=toupper(pick)
-              printf("- **%s x %s** — palpite: %s  |  stake: %s\n", home, away, pickU, stake)
-            }
-          ' "${OUT_DIR}/kelly_stakes.csv" >> "${OUT_DIR}/loteca_card.md"
+# Join robusto por nomes normalizados
+from unidecode import unidecode
+def norm(s): return unidecode(str(s).strip().lower())
 
-          test -s "${OUT_DIR}/loteca_card.md" || { echo "::error::loteca_card.md not generated"; exit 26; }
-          echo "===== Preview loteca_card.md ====="
-          head -n 50 "${OUT_DIR}/loteca_card.md" || true
+wl["home_n"] = wl["home"].map(norm); wl["away_n"] = wl["away"].map(norm)
+cal["home_n"] = cal["team_home"].map(norm); cal["away_n"] = cal["team_away"].map(norm)
+m = wl.merge(cal, on=["home_n","away_n"], how="left")
 
-      # ---------- ARTEFATOS ----------
+def pick(row):
+    vals = {"1":row.get("p_home",0), "X":row.get("p_draw",0), "2":row.get("p_away",0)}
+    return max(vals, key=vals.get)
+
+m["palpite"] = m.apply(pick, axis=1)
+m["prob_max"] = m[["p_home","p_draw","p_away"]].max(axis=1)
+
+lines = []
+for i, r in m.iterrows():
+    idx = i+1
+    h, a = r["home"], r["away"]
+    tip = r["palpite"]
+    prb = r["prob_max"]
+    lines.append(f"{idx:02d} - {h} x {a}  -> {tip}  ({prb:.1%})")
+
+card = "\n".join(lines)
+(out_dir/"loteca_card.txt").write_text(card, encoding="utf-8")
+print(card)
+PY
+          test -s "${OUT_DIR}/loteca_card.txt" || { echo "::error::loteca_card.txt não gerado"; exit 30; }
+          echo "==== Preview loteca_card.txt ===="
+          head -n 50 "${OUT_DIR}/loteca_card.txt" || true
+
       - name: Upload artifacts
-        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: "loteca-${{ steps.prep.outputs.RUN_ID }}"
-          path: "${{ env.OUT_DIR }}"
-          if-no-files-found: "error"
+          name: loteca_${{ steps.prep.outputs.RUN_ID }}
+          path: |
+            ${OUT_DIR}/matches_whitelist.csv
+            ${OUT_DIR}/odds_theoddsapi.csv
+            ${OUT_DIR}/odds_apifootball.csv
+            ${OUT_DIR}/odds_consensus.csv
+            ${OUT_DIR}/calibrated_probs.csv
+            ${OUT_DIR}/xg_univariate.csv
+            ${OUT_DIR}/xg_bivariate.csv
+            ${OUT_DIR}/kelly_stakes.csv
+            ${OUT_DIR}/loteca_card.txt
