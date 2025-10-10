@@ -41,7 +41,6 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
 
       - name: Install dependencies (strict)
-        shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
@@ -53,7 +52,6 @@ jobs:
 
       - name: Prepare run folders and env
         id: prep
-        shell: bash
         run: |
           set -euo pipefail
           if [ -z "${THEODDS_API_KEY:-}" ]; then echo "::error::THEODDS_API_KEY secret not set"; exit 1; fi
@@ -65,15 +63,18 @@ jobs:
 
           mkdir -p "data/in" "data/out/${RUN_ID}"
 
+          # aliases.json
           if [ ! -s "data/in/aliases.json" ]; then
             echo '{"teams": {}}' > data/in/aliases.json
           fi
 
+          # matches_source.csv obrigatório
           if [ ! -s "data/in/matches_source.csv" ]; then
             echo "::error::Arquivo obrigatório ausente: data/in/matches_source.csv"
             exit 2
           fi
 
+          # DEBUG_FLAG para reutilizar nos comandos Python
           if [ "${DEBUG:-}" = "true" ]; then
             echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
           else
@@ -81,7 +82,6 @@ jobs:
           fi
 
       - name: Normalize and validate matches_source -> whitelist
-        shell: bash
         run: |
           set -euo pipefail
           SRC="data/in/matches_source.csv"
@@ -175,7 +175,6 @@ jobs:
           head -n 30 "$DST_FINAL" || true
 
       - name: Validate team names before ingest (pre-flight)
-        shell: bash
         run: |
           set -euo pipefail
           WL="${OUT_DIR}/matches_whitelist.csv"
@@ -183,7 +182,6 @@ jobs:
           awk -F',' 'NR>1{print $2; print $3}' "$WL" | sort -u | nl -ba
 
       - name: Ingest THEODDSAPI (mandatory)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
@@ -206,7 +204,6 @@ jobs:
           done
 
       - name: Ingest API-Football (RapidAPI, mandatory)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
@@ -228,7 +225,6 @@ jobs:
           done
 
       - name: Consensus odds (STRICT)
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -245,15 +241,14 @@ jobs:
           head -n 20 "$OUT_FILE" || true
 
       - name: Calibrate probabilities from consensus
-        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-import os, pandas as pd, numpy as np
+import pandas as pd, numpy as np
 from unidecode import unidecode
 from pathlib import Path
 
-out_dir = Path(os.environ["OUT_DIR"])
+out_dir = Path("${OUT_DIR}")
 wl = pd.read_csv(out_dir/"matches_whitelist.csv")
 cons = pd.read_csv(out_dir/"odds_consensus.csv")
 
@@ -265,22 +260,25 @@ wl["away_n"] = wl["away"].map(norm)
 cons["home_n"] = cons["team_home"].map(norm)
 cons["away_n"] = cons["team_away"].map(norm)
 
-m = wl.merge(cons, on=["home_n","away_n"], how="inner")
+m = wl.merge(cons, on=["home_n","away_n"], how="inner",
+             suffixes=("",""))
 if m.empty:
     raise SystemExit("::error::no matches joined between whitelist and consensus. Check name normalization.")
 
+# implied probs and margin normalization
 for col in ("odds_home","odds_draw","odds_away"):
     if (m[col] <= 1).any():
         raise SystemExit(f"::error::invalid odds <=1 found in consensus: column {col}")
 
-ih = 1.0/m["odds_home"].astype(float)
-ix = 1.0/m["odds_draw"].astype(float)
-ia = 1.0/m["odds_away"].astype(float)
-s = (ih+ix+ia).replace(0, np.nan)
-
-m["p_home"] = ih/s
-m["p_draw"] = ix/s
-m["p_away"] = ia/s
+inv = pd.DataFrame({
+    "ih": 1.0/m["odds_home"].astype(float),
+    "ix": 1.0/m["odds_draw"].astype(float),
+    "ia": 1.0/m["odds_away"].astype(float),
+})
+s = inv.sum(axis=1).replace(0, np.nan)
+m["p_home"] = inv["ih"]/s
+m["p_draw"] = inv["ix"]/s
+m["p_away"] = inv["ia"]/s
 
 cols = ["match_id","home","away","team_home","team_away","odds_home","odds_draw","odds_away","p_home","p_draw","p_away"]
 m[cols].to_csv(out_dir/"calibrated_probs.csv", index=False)
@@ -289,15 +287,15 @@ PY
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv not generated"; exit 7; }
 
       - name: XG - Univariate (feature engineering)
-        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-import os, pandas as pd
+import pandas as pd
 from pathlib import Path
-out_dir = Path(os.environ["OUT_DIR"])
+out_dir = Path("${OUT_DIR}")
 df = pd.read_csv(out_dir/"calibrated_probs.csv")
 
+# Proxy xG simples a partir das probabilidades:
 df["xg_home"] = 1.8*df["p_home"] + 0.9*df["p_draw"]
 df["xg_away"] = 1.8*df["p_away"] + 0.9*df["p_draw"]
 
@@ -308,15 +306,15 @@ PY
           test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 8; }
 
       - name: XG - Bivariate (feature engineering)
-        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-import os, pandas as pd
+import pandas as pd
 from pathlib import Path
-out_dir = Path(os.environ["OUT_DIR"])
+out_dir = Path("${OUT_DIR}")
 u = pd.read_csv(out_dir/"xg_univariate.csv")
 
+# Bivariada: interações simples
 u["xg_sum"] = u["xg_home"] + u["xg_away"]
 u["xg_diff"] = u["xg_home"] - u["xg_away"]
 u["p_max"] = u[["p_home","p_draw","p_away"]].max(axis=1)
@@ -328,26 +326,24 @@ PY
           test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 9; }
 
       - name: Kelly stakes
-        shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py nao encontrado"; exit 25; }
+          [ -f scripts/publish_kelly.py ] || { echo "::error::scripts/publish_kelly.py não encontrado"; exit 25; }
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv nao gerado"; exit 25; }
+          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
-      - name: Montar Cartao Loteca
-        shell: bash
+      - name: Montar Cartão Loteca
         run: |
           set -euo pipefail
           python - <<'PY'
-import os, pandas as pd
+import pandas as pd
 from pathlib import Path
-from unidecode import unidecode
 
-out_dir = Path(os.environ["OUT_DIR"])
+out_dir = Path("${OUT_DIR}")
 wl  = pd.read_csv(out_dir/"matches_whitelist.csv")
 cal = pd.read_csv(out_dir/"calibrated_probs.csv")
 
+from unidecode import unidecode
 def norm(s): return unidecode(str(s).strip().lower())
 
 wl["home_n"] = wl["home"].map(norm); wl["away_n"] = wl["away"].map(norm)
@@ -366,14 +362,14 @@ for i, r in m.iterrows():
     idx = i+1
     h, a = r["home"], r["away"]
     tip = r["palpite"]
-    prb = r["prob_max"] if pd.notnull(r["prob_max"]) else 0.0
+    prb = r["prob_max"]
     lines.append(f"{idx:02d} - {h} x {a}  -> {tip}  ({prb:.1%})")
 
 card = "\n".join(lines)
 (out_dir/"loteca_card.txt").write_text(card, encoding="utf-8")
 print(card)
 PY
-          test -s "${OUT_DIR}/loteca_card.txt" || { echo "::error::loteca_card.txt nao gerado"; exit 30; }
+          test -s "${OUT_DIR}/loteca_card.txt" || { echo "::error::loteca_card.txt não gerado"; exit 30; }
           echo "==== Preview loteca_card.txt ===="
           head -n 50 "${OUT_DIR}/loteca_card.txt" || true
 
