@@ -2,327 +2,291 @@
 # -*- coding: utf-8 -*-
 
 """
-Gera apostas pelo critério de Kelly usando apenas dados reais (sem placeholders).
+Gera stakes via Kelly a partir de probabilidades/odds disponíveis.
 
-Prioridade de fontes dentro de <RODADA>:
-1) calibrated_probs.csv            -> p_home,p_draw,p_away (preferida)
-2) predictions_final.csv           -> p_* OU odds_*
-3) predictions_blend.csv           -> p_* OU odds_*   (opcional)
-4) predictions_market.csv          -> odds_*
-5) odds_consensus.csv              -> odds_*
+Ordem de fontes (a primeira que atender aos requisitos é usada):
+  1) calibrated_probs.csv
+  2) final_probs.csv
+  3) predictions_market.csv
+  4) odds_consensus.csv  (converte odds -> probs)
 
-Se uma fonte não trouxer team_home/team_away, tentamos:
-- Normalizar aliases (home, away, home_team, away_team, etc.)
-- Enriquecer via <RODADA>/matches_whitelist.csv (merge por match_id)
+Requisitos mínimos para seguir com cálculo (3-way H/D/A):
+  - Colunas obrigatórias após normalização:
+      match_id, team_home, team_away
+  - E UM dos conjuntos abaixo:
+      a) prob_home, prob_draw, prob_away
+      b) odds_home, odds_draw, odds_away  (serão convertidas em probs)
 
 Saída:
-- <RODADA>/kelly_stakes.csv
-
-Flags (ou via env):
---bankroll (BANKROLL=1000)
---kelly_fraction (KELLY_FRACTION=0.5)
---kelly_cap (KELLY_CAP=0.1)
---top_n (KELLY_TOP_N=14)
---round_to (ROUND_TO=1)
-
-Erros "duros" e claros se:
-- Nenhuma fonte válida
-- Odds inválidas (NaN ou <=1.0) quando necessárias
-- Probabilidades fora de [0,1] ou soma zerada
+  {OUT_DIR}/kelly_stakes.csv  com colunas:
+    match_id,team_home,team_away,pick,prob,odds,edge,kelly_raw,stake
 """
 
-import argparse
 import os
 import sys
 import math
+import argparse
 import pandas as pd
-from typing import Optional
 
-REQ_TEAM = ["match_id", "team_home", "team_away"]
-P_COLS = ["p_home", "p_draw", "p_away"]
-O_COLS = ["odds_home", "odds_draw", "odds_away"]
+EXIT_CODE = 25
 
-TEAM_ALIASES = [
-    ("home", "team_home"), ("away", "team_away"),
-    ("home_team", "team_home"), ("away_team", "team_away"),
-    ("homeName", "team_home"), ("awayName", "team_away"),
-    ("home_name", "team_home"), ("away_name", "team_away"),
-    ("TeamHome", "team_home"), ("TeamAway", "team_away"),
-    ("teamHome", "team_home"), ("teamAway", "team_away"),
-    ("localteam_name", "team_home"), ("visitorteam_name", "team_away"),
-    ("Home", "team_home"), ("Away", "team_away"),
-]
+def eprint(*a, **k):
+    print(*a, file=sys.stderr, **k)
 
-ID_ALIASES = ["match_id", "fixture_id", "game_id", "id", "matchId", "fixtureId"]
-
-P_ALIASES = [
-    ("prob_home", "p_home"), ("prob_draw", "p_draw"), ("prob_away", "p_away"),
-    ("ph", "p_home"), ("pd", "p_draw"), ("pa", "p_away"),
-    ("home_prob", "p_home"), ("draw_prob", "p_draw"), ("away_prob", "p_away"),
-]
-
-O_ALIASES = [
-    ("home_odds", "odds_home"), ("draw_odds", "odds_draw"), ("away_odds", "odds_away"),
-    ("odd_home", "odds_home"), ("odd_draw", "odds_draw"), ("odd_away", "odds_away"),
-    ("o_home", "odds_home"), ("o_draw", "odds_draw"), ("o_away", "odds_away"),
-]
-
-def die(msg: str, code: int = 25):
-    print(f"[kelly][ERRO] {msg}", file=sys.stderr)
-    sys.exit(code)
-
-def read_csv(path: str) -> Optional[pd.DataFrame]:
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return None
-    try:
-        df = pd.read_csv(path)
-        if df is None or df.empty:
+def read_csv_if_exists(path):
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        try:
+            return pd.read_csv(path)
+        except Exception as ex:
+            eprint(f"[kelly][WARN] Falha ao ler {path}: {ex}")
             return None
-        return df
-    except Exception as e:
-        print(f"[kelly][WARN] Falha lendo {path}: {e}", file=sys.stderr)
-        return None
+    return None
 
-def rename_by_aliases(df: pd.DataFrame, aliases: list[tuple[str, str]]) -> pd.DataFrame:
-    to_rename = {}
-    cols_lower = {c.lower(): c for c in df.columns}
-    for src, dst in aliases:
-        # match case-insensitive
-        if src in df.columns:
-            to_rename[src] = dst
-        elif src.lower() in cols_lower:
-            to_rename[cols_lower[src.lower()]] = dst
-    if to_rename:
-        df = df.rename(columns=to_rename)
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    cols_map = {c.lower(): c for c in df.columns}
+    # normaliza match_id
+    if "match_id" not in df.columns:
+        for c in list(df.columns):
+            if c.lower() == "match_id":
+                df = df.rename(columns={c: "match_id"})
+                break
+    # normaliza home/away
+    # aceita: home/away ou team_home/team_away
+    if "team_home" not in df.columns:
+        for c in list(df.columns):
+            if c.lower() == "home":
+                df = df.rename(columns={c: "team_home"})
+                break
+    if "team_away" not in df.columns:
+        for c in list(df.columns):
+            if c.lower() == "away":
+                df = df.rename(columns={c: "team_away"})
+                break
     return df
 
-def ensure_match_id(df: pd.DataFrame) -> pd.DataFrame:
-    # já existe match_id?
-    if "match_id" in df.columns:
-        return df
-    # tenta aliases
-    for c in ID_ALIASES:
-        if c in df.columns:
-            df = df.rename(columns={c: "match_id"})
-            return df
-        # case-insensitive
-        lower_map = {x.lower(): x for x in df.columns}
-        if c.lower() in lower_map:
-            df = df.rename(columns={lower_map[c.lower()]: "match_id"})
-            return df
-    die("Fonte sem coluna de identificação do jogo (match_id/fixture_id/game_id/id).")
+def has_probs(df: pd.DataFrame) -> bool:
+    need = {"prob_home", "prob_draw", "prob_away"}
+    return need.issubset(set(df.columns))
 
-def normalize_teams(df: pd.DataFrame) -> pd.DataFrame:
-    # amplia normalização de times
-    df = rename_by_aliases(df, TEAM_ALIASES)
-    # alguns dumps trazem "homeTeam"/"awayTeam"
-    df = rename_by_aliases(df, [("homeTeam", "team_home"), ("awayTeam", "team_away")])
+def has_odds(df: pd.DataFrame) -> bool:
+    need = {"odds_home", "odds_draw", "odds_away"}
+    return need.issubset(set(df.columns))
 
+def decimal_odds_to_probs(df: pd.DataFrame) -> pd.DataFrame:
+    """Converte odds decimais para probs normalizadas (remove overround)."""
+    if not has_odds(df):
+        raise ValueError("decimal_odds_to_probs chamado sem odds_* completas.")
+    for c in ["odds_home","odds_draw","odds_away"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    # valida odds > 1.0
+    mask_ok = (df["odds_home"] > 1.0) & (df["odds_draw"] > 1.0) & (df["odds_away"] > 1.0)
+    if not mask_ok.any():
+        raise ValueError("Todas as odds válidas ( > 1.0 ) estão ausentes/inválidas.")
+    df = df.loc[mask_ok].copy()
+
+    inv = pd.DataFrame({
+        "ih": 1.0 / df["odds_home"],
+        "id": 1.0 / df["odds_draw"],
+        "ia": 1.0 / df["odds_away"],
+    })
+    s = inv.sum(axis=1)
+    # normaliza
+    df["prob_home"] = inv["ih"] / s
+    df["prob_draw"] = inv["id"] / s
+    df["prob_away"] = inv["ia"] / s
     return df
 
-def normalize_probs_and_odds(df: pd.DataFrame) -> pd.DataFrame:
-    df = rename_by_aliases(df, P_ALIASES)
-    df = rename_by_aliases(df, O_ALIASES)
-    # também tenta mapear qualquer coisa que comece com 'prob_' para p_*
-    for c in list(df.columns):
-        lc = c.lower().strip()
-        if lc.startswith("prob_"):
-            if "home" in lc and "p_home" not in df.columns:
-                df = df.rename(columns={c: "p_home"})
-            elif "draw" in lc and "p_draw" not in df.columns:
-                df = df.rename(columns={c: "p_draw"})
-            elif "away" in lc and "p_away" not in df.columns:
-                df = df.rename(columns={c: "p_away"})
-    return df
+def choose_pick_row(row):
+    """Define o pick = outcome com maior valor de Kelly (ou maior prob se odds iguais)."""
+    # odds e probs
+    probs = {
+        "H": row["prob_home"],
+        "D": row["prob_draw"],
+        "A": row["prob_away"],
+    }
+    odds = {
+        "H": row.get("odds_home", float("nan")),
+        "D": row.get("odds_draw", float("nan")),
+        "A": row.get("odds_away", float("nan")),
+    }
 
-def enrich_teams_from_whitelist(rodada: str, df: pd.DataFrame) -> pd.DataFrame:
-    """Se faltar team_home/team_away, tenta enriquecer via matches_whitelist.csv."""
-    if all(c in df.columns for c in ["team_home", "team_away"]):
-        return df
-    wl_path = os.path.join(rodada, "matches_whitelist.csv")
-    wl = read_csv(wl_path)
-    if wl is None:
-        # tenta em data/in como fallback (tudo real também)
-        wl = read_csv(os.path.join("data", "in", "matches_whitelist.csv"))
-    if wl is None or wl.empty:
-        return df
-    # normaliza whitelist (home/away -> team_home/team_away)
-    if "team_home" not in wl.columns and "home" in wl.columns:
-        wl = wl.rename(columns={"home": "team_home"})
-    if "team_away" not in wl.columns and "away" in wl.columns:
-        wl = wl.rename(columns={"away": "team_away"})
-    if not all(c in wl.columns for c in REQ_TEAM):
-        return df
-    base = df.copy()
-    base = ensure_match_id(base)
-    m = base.merge(wl[REQ_TEAM], on="match_id", how="left", suffixes=("", "_wl"))
-    # preenche apenas quando faltar
-    for tgt in ["team_home", "team_away"]:
-        if tgt not in base.columns or base[tgt].isna().any():
-            src = tgt
-            if src not in m.columns:
-                src = f"{tgt}_wl"
-            if src in m.columns:
-                m[tgt] = m[tgt].fillna(m[src])
-    return m
+    # calcula Kelly bruto outcome a outcome (assumindo aposta decimal; b = odds-1)
+    kelly_vals = {}
+    for k in ["H","D","A"]:
+        p = probs[k]
+        o = odds[k]
+        if not (isinstance(o, (int,float)) and o > 1.0):
+            # se não houver odds confiável para o outcome, aproxima com fair odds = 1/p
+            if isinstance(p, (int,float)) and p > 0:
+                o = 1.0 / p
+            else:
+                o = float("nan")
+        b = o - 1.0
+        q = 1.0 - p
+        # fórmula clássica: k = (b*p - q) / b
+        try:
+            k = (b * p - q) / b
+        except Exception:
+            k = float("nan")
+        kelly_vals[k] = k
 
-def validate_team_cols(df: pd.DataFrame, src: str, rodada: str) -> pd.DataFrame:
-    df = ensure_match_id(df)
-    df = normalize_teams(df)
-    missing = [c for c in ["team_home", "team_away"] if c not in df.columns]
-    if missing:
-        df = enrich_teams_from_whitelist(rodada, df)
-    missing2 = [c for c in REQ_TEAM if c not in df.columns]
-    if missing2:
-        die(f"{src} sem colunas mínimas {REQ_TEAM}. Faltando: {sorted(missing2)}")
-    return df
+    # escolhe maior Kelly; se todos NaN, escolhe maior probabilidade
+    best_outcome = max(kelly_vals, key=lambda k: (kelly_vals[k] if isinstance(kelly_vals[k], (int,float)) else -1e9))
+    best_k = kelly_vals[best_outcome]
+    if not (isinstance(best_k, (int,float)) and math.isfinite(best_k)):
+        # fallback: maior prob
+        best_outcome = max(probs, key=lambda k: probs[k])
 
-def odds_to_probs(df: pd.DataFrame, src: str) -> pd.DataFrame:
-    if not all(c in df.columns for c in O_COLS):
-        die(f"{src} não possui odds_* completas para inferir probabilidades.")
-    bad = (
-        df["odds_home"].isna() | df["odds_draw"].isna() | df["odds_away"].isna() |
-        (df["odds_home"] <= 1.0) | (df["odds_draw"] <= 1.0) | (df["odds_away"] <= 1.0)
-    )
-    if bad.any():
-        sample = df.loc[bad, ["match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away"]].head(10)
-        die(f"Odds inválidas em {src} (NaN ou <=1.0). Amostra:\n{sample.to_string(index=False)}", code=98)
-    ph = 1.0 / df["odds_home"].astype(float)
-    pd_ = 1.0 / df["odds_draw"].astype(float)
-    pa = 1.0 / df["odds_away"].astype(float)
-    s = ph + pd_ + pa
-    df["p_home"] = ph / s
-    df["p_draw"] = pd_ / s
-    df["p_away"] = pa / s
-    return df
-
-def ensure_probs(df: pd.DataFrame, src: str) -> pd.DataFrame:
-    df = normalize_probs_and_odds(df)
-    if all(c in df.columns for c in P_COLS):
-        for c in P_COLS:
-            if df[c].isna().any():
-                die(f"{src} contém NaN em {c}.", code=98)
-            if (df[c] < 0).any() or (df[c] > 1).any():
-                die(f"{src} contém {c} fora de [0,1].", code=98)
-        s = (df["p_home"] + df["p_draw"] + df["p_away"])
-        if (s <= 0).any():
-            die(f"{src} com soma de probabilidades <= 0.", code=98)
-        # normaliza por linha
-        df["p_home"] = df["p_home"] / s
-        df["p_draw"] = df["p_draw"] / s
-        df["p_away"] = df["p_away"] / s
-        return df
-    # caso contrário, exige odds_*
-    return odds_to_probs(df, src)
-
-def load_best_source(rodada: str) -> tuple[pd.DataFrame, str]:
-    candidates = [
-        ("calibrated_probs.csv", True),
-        ("predictions_final.csv", False),
-        ("predictions_blend.csv", False),
-        ("predictions_market.csv", False),
-        ("odds_consensus.csv", False),
-    ]
-    for fname, expect_probs in candidates:
-        path = os.path.join(rodada, fname)
-        df = read_csv(path)
-        if df is None:
-            continue
-        # valida/normaliza IDs e times
-        df = validate_team_cols(df, fname, rodada)
-        # normaliza prob/odds
-        df = ensure_probs(df, fname) if (not expect_probs or ("p_home" in df.columns)) else ensure_probs(df, fname)
-        return df, fname
-    die("Nenhuma fonte de probabilidades disponível (calibrated/final/blend/market/consensus).")
-
-def best_kelly_for_row(row: pd.Series, bankroll: float, frac: float, cap: float) -> Optional[dict]:
-    options = [
-        ("home", row["p_home"], row.get("odds_home", float("nan"))),
-        ("draw", row["p_draw"], row.get("odds_draw", float("nan"))),
-        ("away", row["p_away"], row.get("odds_away", float("nan"))),
-    ]
-    have_market = all((c in row and isinstance(row[c], (int, float))) for c in O_COLS)
-    results = []
-    for sel, p, o in options:
-        if p is None or not (0 <= p <= 1) or (isinstance(p, float) and math.isnan(p)):
-            continue
-        if have_market and (o is not None) and (not (isinstance(o, float) and math.isnan(o))) and o > 1.0:
-            b = o - 1.0
-            k = (p * o - 1.0) / b
-            k_eff = max(0.0, min(k, cap))
-            stake = bankroll * frac * k_eff if k_eff > 0 else 0.0
-            edge = p * o - 1.0
-            results.append({"selection": sel, "prob": p, "odds": o, "kelly_fraction": k_eff, "stake": stake, "edge": edge})
-        else:
-            results.append({"selection": sel, "prob": p, "odds": float("nan"), "kelly_fraction": 0.0, "stake": 0.0, "edge": float("nan")})
-    if not results:
-        return None
-    results.sort(key=lambda d: (d["kelly_fraction"], (d["edge"] if not math.isnan(d["edge"]) else -1e9)), reverse=True)
-    return results[0]
+    return best_outcome
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--bankroll", type=float, default=float(os.getenv("BANKROLL", "1000")))
-    ap.add_argument("--kelly_fraction", type=float, default=float(os.getenv("KELLY_FRACTION", "0.5")))
-    ap.add_argument("--kelly_cap", type=float, default=float(os.getenv("KELLY_CAP", "0.1")))
-    ap.add_argument("--top_n", type=int, default=int(os.getenv("KELLY_TOP_N", "14")))
-    ap.add_argument("--round_to", type=float, default=float(os.getenv("ROUND_TO", "1")))
+    ap.add_argument("--rodada", required=True, help="Diretório da rodada (OUT_DIR)")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
-    df, src = load_best_source(args.rodada)
-    if args.debug:
-        print(f"[kelly] Fonte usada: {src} ({len(df)} linhas)")
+    out_dir = args.rodada
+    os.makedirs(out_dir, exist_ok=True)
 
-    picks = []
-    for _, row in df.iterrows():
-        best = best_kelly_for_row(row, args.bankroll, args.kelly_fraction, args.kelly_cap)
-        if best is None:
+    # parâmetros do ambiente
+    bankroll = float(os.environ.get("BANKROLL", "1000"))
+    kelly_fraction = float(os.environ.get("KELLY_FRACTION", "0.5"))
+    kelly_cap = float(os.environ.get("KELLY_CAP", "0.1"))  # fração máxima por aposta (ex: 0.1 = 10%)
+    round_to = float(os.environ.get("ROUND_TO", "1"))
+    top_n = int(float(os.environ.get("KELLY_TOP_N", "0"))) if os.environ.get("KELLY_TOP_N") else 0
+
+    # tenta carregar fontes na ordem de prioridade
+    cand = [
+        ("calibrated_probs.csv", True),
+        ("final_probs.csv", True),
+        ("predictions_market.csv", False),
+        ("odds_consensus.csv", False),
+    ]
+    df = None
+    picked_source = None
+    for fname, expect_probs in cand:
+        path = os.path.join(out_dir, fname)
+        tmp = read_csv_if_exists(path)
+        if tmp is None:
             continue
+        tmp = normalize_columns(tmp)
+        need_base = {"match_id", "team_home", "team_away"}
+        if not need_base.issubset(set(tmp.columns)):
+            # tenta renomeações oportunistas
+            pass
+        if not need_base.issubset(set(tmp.columns)):
+            eprint(f"[kelly][WARN] {fname} sem chaves mínimas {need_base}; ignorando.")
+            continue
+
+        # verifica se já tem prob_*; senão tenta odds_* -> probs
+        has_p = has_probs(tmp)
+        has_o = has_odds(tmp)
+
+        if expect_probs and not (has_p or has_o):
+            eprint(f"[kelly][WARN] {fname} sem prob_* ou odds_*; tentando próxima fonte.")
+            continue
+
+        # se não tem prob mas tem odds, cria prob
+        if not has_p and has_o:
+            try:
+                tmp = decimal_odds_to_probs(tmp)
+                has_p = True
+            except Exception as ex:
+                eprint(f"[kelly][WARN] Falha ao converter odds em {fname}: {ex}")
+                continue
+
+        if has_p:
+            df = tmp.copy()
+            picked_source = fname
+            break
+
+    if df is None:
+        eprint("::error::Nenhum arquivo de probabilidades disponível (calibrated/final/market/consensus).")
+        sys.exit(EXIT_CODE)
+
+    # Garante tipos numéricos
+    for c in ["prob_home","prob_draw","prob_away","odds_home","odds_draw","odds_away"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Filtra linhas com probs válidas (3-way)
+    mask_prob = df[["prob_home","prob_draw","prob_away"]].apply(lambda s: s.notna() & (s >= 0) & (s <= 1)).all(axis=1)
+    df = df.loc[mask_prob].copy()
+    if df.empty:
+        eprint("::error::Após normalização, não há probabilidades válidas (0..1) para calcular Kelly.")
+        sys.exit(EXIT_CODE)
+
+    # Se odds ausentes, aproxima por fair odds (1/p)
+    for side in ["home","draw","away"]:
+        oc = f"odds_{side}"
+        pc = f"prob_{side}"
+        if oc not in df.columns:
+            df[oc] = 1.0 / df[pc]
+        else:
+            # completa NaN com fair odds
+            df[oc] = df[oc].where(df[oc].notna() & (df[oc] > 1.0), 1.0 / df[pc])
+
+    # Escolhe pick por linha
+    picks = []
+    for _, r in df.iterrows():
+        pick = choose_pick_row(r)
+        if pick == "H":
+            prob = r["prob_home"]; odds = r["odds_home"]
+        elif pick == "D":
+            prob = r["prob_draw"]; odds = r["odds_draw"]
+        else:
+            prob = r["prob_away"]; odds = r["odds_away"]
+
+        b = max(odds - 1.0, 1e-12)
+        q = 1.0 - prob
+        k_raw = (b * prob - q) / b  # Kelly teórico
+        # edge (esperado) = b*p - q
+        edge = b * prob - q
+
         picks.append({
-            "match_id": row["match_id"],
-            "team_home": row["team_home"],
-            "team_away": row["team_away"],
-            "selection": best["selection"],
-            "prob": best["prob"],
-            "odds": best["odds"],
-            "kelly_fraction": best["kelly_fraction"],
-            "stake": best["stake"],
-            "edge": best["edge"],
-            "source": src,
+            "match_id": r["match_id"],
+            "team_home": r["team_home"],
+            "team_away": r["team_away"],
+            "pick": pick,
+            "prob": prob,
+            "odds": odds,
+            "edge": edge,
+            "kelly_raw": k_raw
         })
 
-    if not picks:
-        die("Nenhuma aposta elegível (provável ausência de odds_* reais ou probs inválidas).")
-
     out = pd.DataFrame(picks)
-    if (out["stake"] <= 0).all():
-        print("[kelly][AVISO] Nenhuma stake positiva calculada (pode faltar odds_* reais).", file=sys.stderr)
 
-    # ordena
-    if (out["stake"] > 0).any():
-        out = out.sort_values(["stake", "edge"], ascending=[False, False])
-    else:
-        out = out.sort_values(["prob"], ascending=False)
+    # aplica fração, cap e bankroll
+    out["kelly_raw"] = pd.to_numeric(out["kelly_raw"], errors="coerce").fillna(0.0)
+    # valores negativos -> 0 (não apostar)
+    out.loc[out["kelly_raw"] < 0, "kelly_raw"] = 0.0
 
-    # top N
-    if args.top_n and args.top_n > 0:
-        out = out.head(args.top_n).copy()
+    # cap por aposta
+    if kelly_cap > 0:
+        out["kelly_raw"] = out["kelly_raw"].clip(upper=kelly_cap)
 
-    # arredonda stake
-    if args.round_to and args.round_to > 0:
-        def _round(x):
-            return (math.floor(x / args.round_to + 0.5) * args.round_to) if x > 0 else 0
-        out["stake"] = out["stake"].apply(_round)
+    # stake $$ = bankroll * kelly_fraction * kelly_raw
+    out["stake"] = bankroll * kelly_fraction * out["kelly_raw"]
 
-    out_path = os.path.join(args.rodada, "kelly_stakes.csv")
+    # arredonda
+    if round_to and round_to > 0:
+        out["stake"] = (out["stake"] / round_to).round() * round_to
+
+    # ordena por stake desc e aplica TOP_N
+    out = out.sort_values(["stake","edge","prob"], ascending=[False, False, False]).reset_index(drop=True)
+    if top_n and top_n > 0:
+        out = out.head(top_n)
+
+    out_path = os.path.join(out_dir, "kelly_stakes.csv")
     out.to_csv(out_path, index=False)
 
+    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+        eprint("::error::kelly_stakes.csv não gerado")
+        sys.exit(EXIT_CODE)
+
     if args.debug:
-        print(f"[kelly] config: bankroll={args.bankroll}, frac={args.kelly_fraction}, cap={args.kelly_cap}, top_n={args.top_n}, round_to={args.round_to}")
-        print(f"[kelly] gravado: {out_path} ({len(out)} linhas)")
-        print(out.head(20).to_string(index=False))
+        eprint(f"[kelly] Fonte usada: {picked_source}")
+        eprint(f"[kelly] Gerado: {out_path}  linhas={len(out)}")
 
 if __name__ == "__main__":
     main()
