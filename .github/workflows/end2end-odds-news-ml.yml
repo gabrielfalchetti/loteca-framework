@@ -56,7 +56,6 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # hard deps used in the steps
           pip install pandas numpy rapidfuzz requests pytz python-dateutil
 
       # ---------- PREP ----------
@@ -82,7 +81,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ inputs.debug }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.debug }}" = "true" ]; then
             echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
           else
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
@@ -95,10 +94,8 @@ jobs:
           set -euo pipefail
           SRC="data/in/matches_source.csv"
           DST="${OUT_DIR}/matches_whitelist.csv"
-
-          # Remove CR, trim spaces around commas, collapse spaces
-          # and ensure the header has match_id,home,away (case-insensitive)
           TMP="${OUT_DIR}/_tmp_src.csv"
+
           tr -d '\r' < "$SRC" \
           | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$TMP"
 
@@ -108,7 +105,6 @@ jobs:
             echo "$h_low" | grep -qiE "(^|,)$need(,|$)" || { echo "::error::missing column '$need' in matches_source.csv"; exit 2; }
           done
 
-          # Build whitelist (also check for duplicate match_id and empty fields)
           awk -F',' -v OFS=',' '
             NR==1{
               for(i=1;i<=NF;i++){
@@ -136,7 +132,7 @@ jobs:
           echo "===== Preview whitelist ====="
           head -n 50 "$DST" || true
 
-      # ---------- INGEST API-FOOTBALL (REQUIRED) ----------
+      # ---------- API-FOOTBALL (REQUIRED) ----------
       - name: Ingest odds (API-Football via RapidAPI) required
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
@@ -166,7 +162,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -f scripts/ingest_odds_theoddsapi.py ]; then
-            echo "[theodds] script missing - skipping"; exit 0
+            echo "[theodds] script missing - skipping"
+            exit 0
           fi
           a=0; until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
@@ -230,30 +227,34 @@ jobs:
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 25; }
 
-      # ---------- LOTECA CARD ----------
+      # ---------- LOTECA CARD (no heredoc) ----------
       - name: Build loteca card
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PYCODE'
-import os, sys, pandas as pd
-out_dir = os.environ.get("OUT_DIR","")
-p = f"{out_dir}/kelly_stakes.csv"
-if not os.path.exists(p):
-    print("::error::kelly_stakes.csv not found"); sys.exit(26)
-df = pd.read_csv(p)
-lines = ["# Cartao Loteca", ""]
-for _, r in df.iterrows():
-    home = r.get("team_home","")
-    away = r.get("team_away","")
-    pick = str(r.get("pick","")).upper()
-    stake = r.get("stake","")
-    lines.append(f"- **{home} x {away}** — palpite: {pick}  |  stake: {stake}")
-content = "\n".join(lines) + "\n"
-with open(f"{out_dir}/loteca_card.md","w",encoding="utf-8") as f:
-    f.write(content)
-print(f"[loteca] generated: {out_dir}/loteca_card.md")
-PYCODE
+          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not found"; exit 26; }
+          {
+            echo "# Cartao Loteca"
+            echo
+            awk -F',' '
+              NR==1{
+                for(i=1;i<=NF;i++){
+                  k=tolower($i)
+                  if(k=="team_home") hi=i
+                  if(k=="team_away") ai=i
+                  if(k=="pick") pi=i
+                  if(k=="stake") si=i
+                }
+                next
+              }
+              {
+                home=$hi; away=$ai; pick=$pi; stake=$si;
+                gsub(/^ +| +$/,"",home); gsub(/^ +| +$/,"",away);
+                pl=pick; if(pl=="") pl=""; 
+                printf("- **%s x %s** — palpite: %s  |  stake: %s\n", home, away, toupper(pl), stake)
+              }
+            ' "${OUT_DIR}/kelly_stakes.csv"
+          } > "${OUT_DIR}/loteca_card.md"
           test -s "${OUT_DIR}/loteca_card.md" || { echo "::error::loteca_card.md not generated"; exit 26; }
           echo "===== Preview loteca_card.md ====="
           head -n 50 "${OUT_DIR}/loteca_card.md" || true
@@ -264,8 +265,5 @@ PYCODE
         uses: actions/upload-artifact@v4
         with:
           name: loteca-${{ steps.prep.outputs.RUN_ID }}
-          path: |
-            ${{ env.OUT_DIR }}/**
-            data/in/matches_source.csv
-            data/in/aliases.json
+          path: ${{ env.OUT_DIR }}
           if-no-files-found: warn
