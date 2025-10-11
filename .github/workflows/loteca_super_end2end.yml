@@ -61,11 +61,34 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=data/out/${RUN_ID}"
 
-      - name: Validar aliases.json (se existir)
+      - name: Validar/Sanitizar aliases.json (tolerante)
         run: |
           set -euo pipefail
           if [ -f "${ALIASES_JSON}" ]; then
-            python -c "import json,sys; json.load(open('${ALIASES_JSON}','r',encoding='utf-8')); print('[ok] aliases.json valido')"
+            python - <<'PY'
+import json, os, re, sys
+p = os.environ.get("ALIASES_JSON")
+raw = open(p, 'r', encoding='utf-8').read()
+# remove BOM
+raw = raw.lstrip('\ufeff')
+# remove /* ... */ comments
+raw = re.sub(r'/\*.*?\*/', '', raw, flags=re.S)
+# strip // comments (keep content before //)
+raw = '\n'.join([line.split('//',1)[0] for line in raw.splitlines()])
+# remove trailing commas before ] or }
+raw = re.sub(r',(\s*[}\]])', r'\1', raw)
+try:
+    data = json.loads(raw)
+except Exception as e:
+    print(f"::warning::aliases.json inválido ({e}); desabilitando aliases nesta run.")
+    # limpar var de ambiente para próximos passos
+    with open(os.environ["GITHUB_ENV"], "a") as f:
+        f.write("ALIASES_JSON=\n")
+    sys.exit(0)
+# regravar já saneado
+open(p, 'w', encoding='utf-8').write(json.dumps(data, ensure_ascii=False, indent=2))
+print("[ok] aliases.json validado/sanitizado")
+PY
           else
             echo "::notice::Sem aliases.json — normalizacao automatica sera usada."
           fi
@@ -76,12 +99,17 @@ jobs:
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
 
+          ALIASES_ARG=""
+          if [ -n "${ALIASES_JSON:-}" ] && [ -f "${ALIASES_JSON}" ]; then
+            ALIASES_ARG="--aliases ${ALIASES_JSON}"
+          fi
+
           a=0
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_apifootball \
               --rodada "${OUT_DIR}" \
               --season "${SEASON}" \
-              --aliases "${ALIASES_JSON}" \
+              ${ALIASES_ARG} \
               ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
           done
@@ -101,12 +129,17 @@ jobs:
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
 
+          ALIASES_ARG=""
+          if [ -n "${ALIASES_JSON:-}" ] && [ -f "${ALIASES_JSON}" ]; then
+            ALIASES_ARG="--aliases ${ALIASES_JSON}"
+          fi
+
           a=0
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
               --rodada "${OUT_DIR}" \
               --regions "${REGIONS}" \
-              --aliases "${ALIASES_JSON}" \
+              ${ALIASES_ARG} \
               ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
           done
