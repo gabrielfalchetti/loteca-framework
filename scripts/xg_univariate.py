@@ -72,7 +72,7 @@ def implied_probs(oh, od, oa):
     s = ih + idr + ia
     if s <= 0:
         return None, None, None
-    return ih / s, idr / s, ia / s
+    return ih / s, idr / s, ia / s  # p_home, p_draw, p_away
 
 def main():
     ap = argparse.ArgumentParser()
@@ -97,7 +97,6 @@ def main():
         log("CRITICAL", f"odds_consensus.csv sem colunas: {missing_cols}")
         sys.exit(7)
 
-    # índices normalizados
     wl = wl[["match_id", "team_home", "team_away"]].copy()
     wl["key"] = (wl["team_home"].apply(norm_key_tokens) + "|" +
                  wl["team_away"].apply(norm_key_tokens))
@@ -106,7 +105,6 @@ def main():
     oc["key"] = (oc["team_home"].apply(norm_key_tokens) + "|" +
                  oc["team_away"].apply(norm_key_tokens))
 
-    # join por chave normalizada; se duplicado, prioriza primeira ocorrência
     wl_idx = wl.drop_duplicates(subset=["key"]).set_index("key")
     oc_idx = oc.drop_duplicates(subset=["key"]).set_index("key")
 
@@ -121,9 +119,9 @@ def main():
         oh = secure_float(ocr["odds_home"])
         od = secure_float(ocr["odds_draw"])
         oa = secure_float(ocr["odds_away"])
-        ph, pd, pa = implied_probs(oh, od, oa)
+        ph, pdr, pa = implied_probs(oh, od, oa)  # <- pdr (draw) para não conflitar com pandas
 
-        if None in (oh, od, oa, ph, pd, pa):
+        if None in (oh, od, oa, ph, pdr, pa):
             missing.append((wlr["match_id"], wlr["team_home"], wlr["team_away"]))
             continue
 
@@ -135,11 +133,11 @@ def main():
             "odds_draw": od,
             "odds_away": oa,
             "p_home": round(ph, 6),
-            "p_draw": round(pd, 6),
+            "p_draw": round(pdr, 6),
             "p_away": round(pa, 6),
         })
 
-    # também tenta casar por strings cruas (fallback) para casos não normalizados
+    # Fallback por join direto se nada casou pelas chaves normalizadas
     if not rows:
         log("WARN", "Nenhum match por chave normalizada; tentando fallback por strings cruas…")
         merged = wl.merge(oc, on=["team_home", "team_away"], how="inner")
@@ -147,8 +145,8 @@ def main():
             oh = secure_float(r["odds_home"])
             od = secure_float(r["odds_draw"])
             oa = secure_float(r["odds_away"])
-            ph, pd, pa = implied_probs(oh, od, oa)
-            if None in (oh, od, oa, ph, pd, pa):
+            ph, pdr, pa = implied_probs(oh, od, oa)
+            if None in (oh, od, oa, ph, pdr, pa):
                 continue
             rows.append({
                 "match_id": r["match_id"],
@@ -158,7 +156,7 @@ def main():
                 "odds_draw": od,
                 "odds_away": oa,
                 "p_home": round(ph, 6),
-                "p_draw": round(pd, 6),
+                "p_draw": round(pdr, 6),
                 "p_away": round(pa, 6),
             })
 
