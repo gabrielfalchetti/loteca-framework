@@ -1,304 +1,254 @@
-# scripts/ingest_odds_apifootball_rapidapi.py
-import argparse
-import csv
-import json
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
 import sys
+import csv
+import json
 import time
-from datetime import datetime, timedelta, timezone
+import math
+import logging
+import datetime as dt
+from typing import Dict, List, Tuple, Optional
 
 import requests
+from rapidfuzz import fuzz, process
 from unidecode import unidecode
 
+logging.basicConfig(level=logging.INFO, format='[apifootball][%(levelname)s] %(message)s')
+LOG = logging.getLogger("apifootball")
+
 API_HOST = "api-football-v1.p.rapidapi.com"
-BASE_URL = f"https://{API_HOST}/v3"
+BASE = f"https://{API_HOST}/v3"
 
-def log(msg, level="INFO"):
-    print(f"[apifootball][{level}] {msg}")
+XKEY = os.getenv("X_RAPIDAPI_KEY", "").strip()
+if not XKEY:
+    LOG.error("X_RAPIDAPI_KEY ausente nos secrets.")
+    sys.exit(5)
 
-def load_aliases(path):
-    if not path or not os.path.isfile(path):
-        log(f"aliases.json não encontrado em {path} — prosseguindo sem aliases", "WARN")
-        return {"teams": {}, "leagues": {}, "normalize_rules": []}
+ALIASES_PATH = os.getenv("ALIASES_JSON", "data/aliases.json")
+LOOKAHEAD_DAYS = int(os.getenv("LOOKAHEAD_DAYS", "3"))
+if LOOKAHEAD_DAYS <= 0:
+    LOOKAHEAD_DAYS = 3
+
+HEADERS = {"X-RapidAPI-Key": XKEY, "X-RapidAPI-Host": API_HOST}
+
+def load_aliases(path: str) -> Dict[str, List[str]]:
+    if not os.path.isfile(path):
+        LOG.warning("aliases.json não encontrado em %s — prosseguindo sem aliases", path)
+        return {}
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        j = json.load(f)
+    teams = j.get("teams", {})
+    return {normalize_name(k): list(set([normalize_name(x) for x in v+[k]])) for k, v in teams.items()}
 
-def norm_name(s: str) -> str:
-    if s is None:
-        return ""
+def normalize_name(s: str) -> str:
+    s = s or ""
     s = s.strip()
-    s = unidecode(s)  # remove acentos
-    s = s.replace(".", " ").replace("-", " ").replace("/", " ")
+    # remove /UF no final
+    s = unidecode(s)
+    s = s.replace("\u00a0", " ")
     s = " ".join(s.split())
-    return s
+    # tira sufixos de UF comuns
+    for suf in ["/BR","/PR","/SP","/RS","/SC","/MG"]:
+        if s.lower().endswith(suf.lower()):
+            s = s[: -len(suf)]
+            s = s.strip()
+    return s.lower()
 
-# fallback PT->EN para seleções e clubes que causaram erro nos logs
-FALLBACK_MAP = {
-    "Servia/Ser": "Serbia",
-    "Servia": "Serbia",
-    "Serbia/Ser": "Serbia",
-    "Paises Baixos": "Netherlands",
-    "Holanda": "Netherlands",
-    "Irlanda": "Ireland",
-    "Italia": "Italy",
-    "Romenia": "Romania",
-    "Polonia": "Poland",
-    "Lituania": "Lithuania",
-    "Grecia": "Greece",
-    "Dinamarca": "Denmark",
-    "Espanha": "Spain",
-    "Turquia": "Turkey",
-    "Georgia": "Georgia",
-    "Estonia": "Estonia",
-    # clubes BR:
-    "Novorizontino": "Gremio Novorizontino",
-    "Gremio Novorizontino": "Gremio Novorizontino",
-    "Criciuma": "Criciuma",
-    "America": "America Mineiro",
-    "America/MG": "America Mineiro",
-    "America MG": "America Mineiro",
-    "América Mineiro": "America Mineiro",
-    "Operario PR": "Operario PR",
-    "Operario/PR": "Operario PR",
-}
-
-def apply_alias(name: str, aliases: dict) -> str:
-    if not name:
-        return name
-    n = norm_name(name)
-    # primeiro, lookup direto em "teams"
-    teams = aliases.get("teams", {})
-    if n in teams:
-        return teams[n]
-    # tenta com casing original
-    if name in teams:
-        return teams[name]
-    # fallback map
-    if n in FALLBACK_MAP:
-        return FALLBACK_MAP[n]
-    if name in FALLBACK_MAP:
-        return FALLBACK_MAP[name]
-    return n
-
-def req(session, path, params, key):
-    headers = {
-        "X-RapidAPI-Key": key,
-        "X-RapidAPI-Host": API_HOST,
+def alt_names(name: str, aliases: Dict[str, List[str]]) -> List[str]:
+    n = normalize_name(name)
+    out = [n]
+    # inclui variantes do dicionário
+    for canon, arr in aliases.items():
+        if n == canon or n in arr:
+            out.extend(arr)
+            out.append(canon)
+    # alguns hard-fixes
+    hard = {
+        "gremio novorizontino": ["novorizontino"],
+        "america mineiro": ["america mineiro", "america mg", "america-mg"],
+        "operario pr": ["operario ferroviario", "operario"],
+        "republic of ireland": ["ireland"]
     }
-    url = f"{BASE_URL}{path}"
-    r = session.get(url, headers=headers, params=params, timeout=20)
+    if n in hard:
+        out.extend(hard[n])
+    return list(dict.fromkeys(out))  # unique keep order
+
+def http_get(url: str, params: Dict) -> dict:
+    for i in range(3):
+        r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+        if r.status_code == 200:
+            return r.json()
+        time.sleep(1 + i)
     r.raise_for_status()
-    return r.json()
+    return {}
 
-def search_team_id(session, key, team_name):
-    """Busca team_id por nome. Tenta seleções e clubes."""
-    if not team_name:
-        return None
-    # 1) teams?search=
-    try:
-        data = req(session, "/teams", {"search": team_name}, key)
-        for it in data.get("response", []):
-            name = norm_name(it.get("team", {}).get("name", ""))
-            if name.lower() == norm_name(team_name).lower():
-                return it.get("team", {}).get("id")
-        # se não bateu exatamente, retorna o primeiro similar
-        if data.get("response"):
-            return data["response"][0].get("team", {}).get("id")
-    except Exception as e:
-        log(f"Falha search_team_id(search) {team_name}: {e}", "WARN")
-
-    # 2) tenta /teams?name=
-    try:
-        data = req(session, "/teams", {"name": team_name}, key)
-        if data.get("response"):
-            return data["response"][0].get("team", {}).get("id")
-    except Exception as e:
-        log(f"Falha search_team_id(name) {team_name}: {e}", "WARN")
+def pick_fixture_by_names(candidates: List[dict], home: str, away: str) -> Optional[dict]:
+    # usa fuzzy tanto no time home quanto away
+    home_l = normalize_name(home)
+    away_l = normalize_name(away)
+    best = None
+    best_score = -1.0
+    for fx in candidates:
+        try:
+            t1 = normalize_name(fx["teams"]["home"]["name"])
+            t2 = normalize_name(fx["teams"]["away"]["name"])
+        except Exception:
+            continue
+        s1 = max(fuzz.token_sort_ratio(home_l, t1), fuzz.token_sort_ratio(home_l, t2))
+        s2 = max(fuzz.token_sort_ratio(away_l, t1), fuzz.token_sort_ratio(away_l, t2))
+        # exige que sejam times distintos; pontuação média
+        if t1 == t2:
+            continue
+        score = (s1 + s2) / 2.0
+        if score > best_score:
+            best_score = score
+            best = fx
+    if best and best_score >= 80:
+        return best
     return None
 
-def find_fixture(session, key, team_home_id, team_away_id, date_from, date_to):
-    """Tenta achar fixture pelo par de IDs dentro da janela."""
-    params = {
-        "from": date_from,
-        "to": date_to,
-        "team": team_home_id,
-    }
-    try:
-        data = req(session, "/fixtures", params, key)
-        candidates = []
-        for fx in data.get("response", []):
-            th = fx.get("teams", {}).get("home", {}).get("id")
-            ta = fx.get("teams", {}).get("away", {}).get("id")
-            if {th, ta} == {team_home_id, team_away_id}:
-                candidates.append(fx)
-        if candidates:
-            # preferência para o que tem status "NS" (not started) e está mais próximo
-            candidates.sort(key=lambda x: x.get("fixture", {}).get("date", ""))
-            return candidates[0]
-    except Exception as e:
-        log(f"Falha find_fixture(team window): {e}", "WARN")
+def search_fixtures(home: str, away: str, date_from: str, date_to: str) -> List[dict]:
+    # Estratégia 1: search={home}
+    out = []
+    for q in [home, away, f"{home} {away}"]:
+        js = http_get(f"{BASE}/fixtures", {"search": q, "from": date_from, "to": date_to})
+        out.extend(js.get("response", []))
+    # remove duplicados
+    seen = set()
+    uniq = []
+    for fx in out:
+        fid = fx.get("fixture", {}).get("id")
+        if fid and fid not in seen:
+            seen.add(fid)
+            uniq.append(fx)
+    return uniq
 
-    # fallback: h2h
-    try:
-        h2h = f"{team_home_id}-{team_away_id}"
-        data = req(session, "/fixtures/headtohead", {"h2h": h2h}, key)
-        # filtra por janela
-        for fx in data.get("response", []):
-            dt = fx.get("fixture", {}).get("date")
-            if dt:
-                dt_utc = datetime.fromisoformat(dt.replace("Z", "+00:00"))
-                if date_from <= dt_utc.strftime("%Y-%m-%d") <= date_to:
-                    return fx
-    except Exception as e:
-        log(f"Falha find_fixture(h2h): {e}", "WARN")
+def get_odds_for_fixture(fixture_id: int) -> Optional[Tuple[float, float, float]]:
+    js = http_get(f"{BASE}/odds", {"fixture": fixture_id})
+    res = js.get("response", [])
+    # retorna primeira casa de apostas com 1X2
+    for item in res:
+        for bk in item.get("bookmakers", []):
+            for mk in bk.get("bets", []):
+                if mk.get("name", "").lower() in ["match winner", "1x2", "winner"]:
+                    vals = {o.get("value", "").upper(): float(o.get("odd", "nan")) for o in mk.get("values", [])}
+                    # algumas APIs usam "Home/Draw/Away" ou "1/X/2"
+                    h = vals.get("HOME") or vals.get("1")
+                    d = vals.get("DRAW") or vals.get("X")
+                    a = vals.get("AWAY") or vals.get("2")
+                    if all(x is not None for x in [h, d, a]):
+                        return float(h), float(d), float(a)
     return None
-
-def fetch_odds_for_fixture(session, key, fixture_id):
-    """Busca odds para um fixture."""
-    # endpoint de odds:
-    # https://api-football-v1.p.rapidapi.com/v3/odds?fixture=XXXX
-    try:
-        data = req(session, "/odds", {"fixture": fixture_id}, key)
-        # estrutura: response -> [ { bookmakers: [ { bets: [ { name: "Match Winner", values: [...] } ] } ] } ]
-        for item in data.get("response", []):
-            for bk in item.get("bookmakers", []):
-                for bet in bk.get("bets", []):
-                    if bet.get("name", "").lower() in ["match winner", "1x2", "winner"]:
-                        # procurar 1 (home), X (draw), 2 (away)
-                        oh = od = oa = None
-                        for v in bet.get("values", []):
-                            valname = v.get("value", "").strip().upper()
-                            odd = v.get("odd")
-                            if valname in ["HOME", "1", "1 (HOME)"]:
-                                oh = odd
-                            elif valname in ["DRAW", "X"]:
-                                od = odd
-                            elif valname in ["AWAY", "2", "2 (AWAY)"]:
-                                oa = odd
-                        if oh and od and oa:
-                            return float(oh), float(od), float(oa)
-        return None
-    except Exception as e:
-        log(f"Falha fetch_odds_for_fixture: {e}", "WARN")
-        return None
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--rodada", required=True, help="Diretório de saída desta rodada")
-    parser.add_argument("--season", required=True, help="Temporada (ex.: 2025)")
-    parser.add_argument("--aliases", required=False, default="", help="Caminho para data/aliases.json")
-    parser.add_argument("--debug", dest="debug", action="store_true")
-    args = parser.parse_args()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--season", required=False, default=os.getenv("SEASON", "2025"))
+    ap.add_argument("--aliases", required=False, default=ALIASES_PATH)
+    ap.add_argument("--debug", action="store_true", default=(os.getenv("DEBUG", "false").lower() in ["1","true","yes"]))
+    args = ap.parse_args()
+    if args.debug:
+        LOG.setLevel(logging.DEBUG)
 
-    out_dir = args.rodada
-    os.makedirs(out_dir, exist_ok=True)
-
-    key = os.environ.get("X_RAPIDAPI_KEY", "")
-    if not key:
-        log("X_RAPIDAPI_KEY não definido", "ERROR")
-        sys.exit(5)
-
-    whitelist_path = os.path.join(out_dir, "matches_whitelist.csv")
-    if not os.path.isfile(whitelist_path):
-        log(f"Whitelist não encontrada: {whitelist_path}", "ERROR")
+    rodada_dir = args.rodada
+    wl_path = os.path.join(rodada_dir, "matches_whitelist.csv")
+    if not os.path.isfile(wl_path):
+        LOG.error("Whitelist não encontrada em %s", wl_path)
         sys.exit(5)
 
     aliases = load_aliases(args.aliases)
-    # janela de datas (LOOKAHEAD_DAYS)
-    lookahead = int(os.environ.get("LOOKAHEAD_DAYS", "3"))
-    today = datetime.now(timezone.utc).date()
-    date_from = today.strftime("%Y-%m-%d")
-    date_to = (today + timedelta(days=lookahead)).strftime("%Y-%m-%d")
 
-    # Lê whitelist
-    rows = []
-    with open(whitelist_path, "r", encoding="utf-8") as f:
-        rdr = csv.DictReader(f)
-        for r in rdr:
-            rows.append({
-                "match_id": str(r["match_id"]).strip(),
-                "home": str(r["home"]).strip(),
-                "away": str(r["away"]).strip(),
-            })
+    # janela de datas (hoje .. hoje + LOOKAHEAD  |  fallback +7)
+    today = dt.date.today()
+    date_to = today + dt.timedelta(days=LOOKAHEAD_DAYS)
+    date_from = today - dt.timedelta(days=1)  # permite jogos “hoje” que já tenham fixture criado
+    f_date_from = date_from.isoformat()
+    f_date_to = date_to.isoformat()
 
-    log(f"whitelist: {whitelist_path}  linhas={len(rows)}  mapeamento={{'match_id': 'match_id', 'home': 'home', 'away': 'away'}}")
-
-    # Resolve odds
     out_rows = []
     missing = []
-    with requests.Session() as session:
+
+    with open(wl_path, "r", encoding="utf-8") as f:
+        rd = csv.DictReader(f)
+        rows = list(rd)
+
+    LOG.info("whitelist: %s  linhas=%d  mapeamento=%s", wl_path, len(rows), rd.fieldnames)
+    idx = 0
+    for r in rows:
+        idx += 1
+        mid = str(r["match_id"]).strip()
+        home = r["home"].strip()
+        away = r["away"].strip()
+
+        LOG.info("%d: %s x %s", idx, home, away)
+
+        # nomes alternativos
+        home_alts = alt_names(home, aliases)
+        away_alts = alt_names(away, aliases)
+
+        # busca fixtures
+        candidates = []
+        for h in home_alts[:3]:  # limita para não explodir chamadas
+            for a in away_alts[:3]:
+                cand = search_fixtures(h, a, f_date_from, f_date_to)
+                candidates.extend(cand)
+                time.sleep(0.2)
+
+        if not candidates:
+            LOG.warning("Fixture não localizado para %s x %s", home, away)
+            missing.append(mid)
+            continue
+
+        chosen = pick_fixture_by_names(candidates, home, away)
+        if not chosen:
+            LOG.warning("Fixture não casado por fuzzy: %s x %s", home, away)
+            missing.append(mid)
+            continue
+
+        fixture_id = chosen["fixture"]["id"]
+        odds = get_odds_for_fixture(fixture_id)
+        if not odds:
+            LOG.warning("Odds não encontradas para fixture %s (%s x %s)", fixture_id, home, away)
+            missing.append(mid)
+            continue
+
+        oH, oD, oA = odds
+        out_rows.append({
+            "match_id": mid,
+            "home": home,
+            "away": away,
+            "odds_home": oH,
+            "odds_draw": oD,
+            "odds_away": oA
+        })
+
+    # saída
+    out_csv = os.path.join(rodada_dir, "odds_apifootball.csv")
+    if not out_rows:
+        LOG.error("Alguns jogos da whitelist ficaram sem odds da API-Football (APIs obrigatórias).")
         for r in rows:
-            mid = r["match_id"]
-            raw_home, raw_away = r["home"], r["away"]
+            LOG.info("%s: %s x %s", r["match_id"], r["home"], r["away"])
+        LOG.debug("[DEBUG] coletadas: 0  faltantes: %d -> %s", len(rows), [r["match_id"] for r in rows])
+        sys.exit(5)
 
-            # aplica aliases + normalização
-            home = apply_alias(raw_home, aliases)
-            away = apply_alias(raw_away, aliases)
-
-            # log do par que estamos tentando
-            log(f"{mid}: {home} x {away}")
-
-            # pega team ids
-            th_id = search_team_id(session, key, home)
-            ta_id = search_team_id(session, key, away)
-
-            if not th_id or not ta_id:
-                if not th_id:
-                    log(f"Mandante não encontrado: {home}", "WARN")
-                if not ta_id:
-                    log(f"Visitante não encontrado: {away}", "WARN")
-                missing.append(mid)
-                continue
-
-            fx = find_fixture(session, key, th_id, ta_id, date_from, date_to)
-            if not fx:
-                log(f"Fixture não localizado para {home} x {away}", "WARN")
-                missing.append(mid)
-                continue
-
-            fixture_id = fx.get("fixture", {}).get("id")
-            odds = fetch_odds_for_fixture(session, key, fixture_id)
-            if not odds:
-                log(f"Odds não encontradas para fixture {fixture_id} ({home} x {away})", "WARN")
-                missing.append(mid)
-                continue
-
-            oh, od, oa = odds
-            out_rows.append({
-                "match_id": mid,
-                "home": home,
-                "away": away,
-                "odds_home": oh,
-                "odds_draw": od,
-                "odds_away": oa,
-            })
-
-    # escreve saída
-    out_csv = os.path.join(out_dir, "odds_apifootball.csv")
-    if out_rows:
-        with open(out_csv, "w", newline="", encoding="utf-8") as f:
-            wr = csv.DictWriter(f, fieldnames=["match_id", "home", "away", "odds_home", "odds_draw", "odds_away"])
-            wr.writeheader()
-            wr.writerows(out_rows)
-    else:
-        # nada coletado
-        pass
+    with open(out_csv, "w", encoding="utf-8", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=["match_id","home","away","odds_home","odds_draw","odds_away"])
+        wr.writeheader()
+        for row in out_rows:
+            wr.writerow(row)
 
     if missing:
-        log("Alguns jogos da whitelist ficaram sem odds da API-Football (APIs obrigatórias).", "ERROR")
-        for r in rows:
-            mid = r["match_id"]
-            if mid in missing:
-                log(f"{mid}: {apply_alias(r['home'], aliases)} x {apply_alias(r['away'], aliases)}")
-        log(f"[DEBUG] coletadas: {len(out_rows)}  faltantes: {len(missing)} -> {missing}", "DEBUG")
-        # força falha para o modo estrito parar o pipeline
+        LOG.error("Alguns jogos da whitelist ficaram sem odds da API-Football (APIs obrigatórias).")
+        for m in missing:
+            rr = next(x for x in rows if x["match_id"] == m)
+            LOG.info("%s: %s x %s", rr["match_id"], rr["home"], rr["away"])
+        LOG.debug("[DEBUG] coletadas: %d  faltantes: %d -> %s", len(out_rows), len(missing), missing)
         sys.exit(5)
 
-    if not os.path.isfile(out_csv) or os.path.getsize(out_csv) == 0:
-        log("odds_apifootball.csv não gerado", "ERROR")
-        sys.exit(5)
-
-    log(f"Gerado: {out_csv}")
+    LOG.info("Coletadas %d linhas em %s", len(out_rows), out_csv)
 
 if __name__ == "__main__":
     main()
