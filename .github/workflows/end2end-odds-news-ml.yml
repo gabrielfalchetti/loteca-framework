@@ -208,15 +208,14 @@ jobs:
       # --------- Validação de nomes ----------
       - name: Validate team names before ingest
         shell: bash
-        env:
-          WL: "${{ env.OUT_DIR }}/matches_whitelist.csv"
         run: |
           set -euo pipefail
+          WL="${OUT_DIR}/matches_whitelist.csv"
           test -s "$WL" || { echo "::error::whitelist not found"; exit 3; }
           python - <<'PY'
 import csv, sys, re, os
 from unidecode import unidecode
-wl = os.environ["WL"]
+wl = os.getenv("OUT_DIR", "") + "/matches_whitelist.csv"
 bad = []
 with open(wl, newline='', encoding='utf-8') as f:
     rd = csv.DictReader(f)
@@ -332,7 +331,7 @@ PY
           head -n 20 "$OUT_FILE" || true
 
       # --------- XG (uni & bi) ----------
-      - name: XG features (uni & bi)
+      - name: "XG features (uni & bi)"
         shell: bash
         run: |
           set -euo pipefail
