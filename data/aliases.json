@@ -72,3 +72,41 @@
     ["\\)", ""]
   ]
 }
+{
+  "teams": {
+    "ponte preta": ["Ponte Preta", "AA Ponte Preta"],
+    "guarani": ["Guarani", "Guarani Campinas"],
+    "palmeiras": ["Palmeiras", "SE Palmeiras"],
+    "juventude": ["Juventude", "EC Juventude"],
+    "criciuma": ["Criciuma", "Criciúma"],
+    "america mineiro": ["America Mineiro", "América Mineiro", "America/MG", "America MG", "America-MG", "América/MG", "América-MG", "America (MG)"],
+    "cuiaba": ["Cuiaba", "Cuiabá"],
+    "coritiba": ["Coritiba", "Coritiba PR"],
+    "gremio novorizontino": ["Gremio Novorizontino", "Grêmio Novorizontino", "Novorizontino", "Grêmio N.", "GE Novorizontino"],
+    "operario pr": ["Operario PR", "Operário PR", "Operário/PR", "Operario/PR", "Operario Ferroviario", "Operário Ferroviário"],
+    "estonia": ["Estonia", "Estónia"],
+    "italy": ["Italy", "Italia", "Itália"],
+    "bulgaria": ["Bulgaria", "Bulgária"],
+    "turkey": ["Turkey", "Turquia"],
+    "spain": ["Spain", "Espanha"],
+    "georgia": ["Georgia", "Geórgia"],
+    "serbia": ["Serbia", "Servia", "Sérvia", "Serbia/Ser"],
+    "albania": ["Albania", "Albânia"],
+    "portugal": ["Portugal"],
+    "ireland": ["Ireland", "Republic of Ireland", "Irlanda"],
+    "netherlands": ["Netherlands", "Holanda", "Países Baixos"],
+    "finland": ["Finland", "Finlândia"],
+    "romania": ["Romania", "Romênia", "Romenia"],
+    "austria": ["Austria", "Áustria"],
+    "denmark": ["Denmark", "Dinamarca"],
+    "greece": ["Greece", "Grécia"],
+    "lithuania": ["Lithuania", "Lituânia", "Lituania"],
+    "poland": ["Poland", "Polónia", "Polonia"]
+  },
+  "normalize": {
+    "remove_suffixes": ["/BR", "/PR", "/SP", "/RS", "/SC", "/MG"],
+    "ascii_fold": true,
+    "squash_spaces": true,
+    "lower": true
+  }
+}
