@@ -17,7 +17,6 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_WARN_SCRIPT_LOCATION: 1
 
-  # Parâmetros da rodada / staking
   SEASON: "2025"
   REGIONS: "uk,eu,us,au"
   LOOKAHEAD_DAYS: "3"
@@ -27,7 +26,6 @@ env:
   KELLY_TOP_N: "14"
   ROUND_TO: "1"
 
-  # Caminho padrão do aliases (já combinamos colocar aqui)
   ALIASES_JSON: "data/aliases.json"
 
 jobs:
@@ -38,6 +36,11 @@ jobs:
         shell: bash
 
     steps:
+      # 1) Primeiro: checkout para não apagar pastas criadas depois
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2) Agora sim: preparar variáveis e diretórios
       - name: Preparar variáveis e diretórios
         run: |
           set -euo pipefail
@@ -57,9 +60,6 @@ jobs:
           mkdir -p "data/in" "${OUT_DIR}"
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
-
-      - name: Checkout
-        uses: actions/checkout@v4
 
       - name: Verificar segredos necessários (APIs obrigatórias)
         run: |
@@ -100,6 +100,9 @@ jobs:
             echo "::error::Arquivo $SRC não encontrado."
             exit 3
           fi
+
+          # Garante que a pasta do arquivo de saída exista (cinto e suspensório)
+          mkdir -p "$(dirname "$DST_RAW")"
 
           tr -d '\r' < "$SRC" | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$DST_RAW"
 
@@ -180,11 +183,6 @@ jobs:
           LINES=$(wc -l < "$DST_NORM" | tr -d " ")
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
-          # Copia apenas se destino for diferente (evita erro de "same file")
-          if [ "${DST_NORM}" != "${OUT_DIR}/matches_whitelist.csv" ]; then
-            cp "$DST_NORM" "${OUT_DIR}/matches_whitelist.csv"
-          fi
-
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_NORM" || true
 
@@ -249,7 +247,7 @@ jobs:
           done
           head -n 20 "$OUT_FILE" || true
 
-      # ===================== ETAPAS DE MODELAGEM (opc. por ENABLE_ML) =====================
+      # ===================== ETAPAS DE MODELAGEM (opcionais via ENABLE_ML) =====================
 
       - name: xG Univariado (opcional)
         if: ${{ inputs.ENABLE_ML == 'true' }}
