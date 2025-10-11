@@ -1,22 +1,13 @@
-name: loteca_super_end2end
+name: Loteca Super End2End (FULL MODE)
 
 on:
   workflow_dispatch:
-    inputs:
-      DEBUG:
-        description: "Ativar modo debug (true/false)"
-        required: false
-        default: "false"
-      ENABLE_ML:
-        description: "Rodar xG/calibração/kelly/ticket (true/false)"
-        required: false
-        default: "false"
 
 env:
-  PYTHONUTF8: 1
-  PIP_DISABLE_PIP_VERSION_CHECK: 1
-  PIP_NO_WARN_SCRIPT_LOCATION: 1
-
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_WARN_SCRIPT_LOCATION: "1"
+  # ===== Parâmetros de temporada e risco =====
   SEASON: "2025"
   REGIONS: "uk,eu,us,au"
   LOOKAHEAD_DAYS: "3"
@@ -25,62 +16,56 @@ env:
   KELLY_CAP: "0.1"
   KELLY_TOP_N: "14"
   ROUND_TO: "1"
-
-  # Onde você disse que está o arquivo
   ALIASES_JSON: "data/aliases.json"
 
 jobs:
-  super-e2e:
+  super_end2end_full:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 90
 
     steps:
-      # 1) Checkout primeiro
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Preparar variáveis e diretórios
-      - name: Preparar variáveis e diretórios
-        run: |
-          set -euo pipefail
-          RUN_ID="$(date +%s)"
-          OUT_DIR="data/out/${RUN_ID}"
-          echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
-          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
-          if [ "${{ inputs.DEBUG }}" = "true" ] || [ "${{ inputs.DEBUG }}" = "1" ]; then
-            echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
-          else
-            echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
-          fi
-          mkdir -p "data/in" "${OUT_DIR}"
-          echo "RUN_ID=${RUN_ID}"
-          echo "OUT_DIR=${OUT_DIR}"
-
-      # 3) Checar segredos
-      - name: Verificar segredos necessários (APIs)
-        run: |
-          set -euo pipefail
-          miss=0
-          [ -n "${{ secrets.THEODDS_API_KEY }}" ] || { echo "::error::Secret THEODDS_API_KEY ausente"; miss=1; }
-          [ -n "${{ secrets.X_RAPIDAPI_KEY }}" ] || { echo "::error::Secret X_RAPIDAPI_KEY ausente (RapidAPI / API-Football)"; miss=1; }
-          [ "$miss" -eq 0 ] || exit 2
-
-      # 4) Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Instalar dependências Python
+      - name: Install Python deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install pandas numpy python-dateutil pytz requests rapidfuzz unidecode beautifulsoup4 lxml
+          pip install \
+            pandas numpy scipy scikit-learn statsmodels \
+            rapidfuzz python-dateutil pytz
+          # Se o projeto tiver requirements.txt, instale também (não falha se não existir)
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # 5) Normalizar whitelist
-      - name: Normalizar whitelist (matches_source.csv -> matches_whitelist.csv)
+      - name: Init run context (RUN_ID / OUT_DIR / DEBUG_FLAG)
+        id: init
+        run: |
+          set -euo pipefail
+          RUN_ID="$(date +%s)"
+          echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
+          # DEBUG sempre desativado no FULL MODE (pode ajustar se quiser)
+          echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
+          mkdir -p "data/in" "data/out/${RUN_ID}"
+          echo "RUN_ID=${RUN_ID}"
+          echo "OUT_DIR=${OUT_DIR}"
+
+      - name: Ensure aliases.json exists (warn if missing)
+        run: |
+          set -euo pipefail
+          if [ ! -f "${ALIASES_JSON}" ]; then
+            echo "::warning file=${ALIASES_JSON}::aliases.json não encontrado; prossigo sem aliases."
+          fi
+
+      # =========================
+      # 1) NORMALIZAR WHITELIST
+      # =========================
+      - name: Normalize matches whitelist
         run: |
           set -euo pipefail
 
@@ -92,8 +77,6 @@ jobs:
             echo "::error::Arquivo $SRC não encontrado."
             exit 3
           fi
-
-          mkdir -p "$(dirname "$DST_RAW")"
 
           tr -d '\r' < "$SRC" | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$DST_RAW"
 
@@ -177,13 +160,46 @@ jobs:
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_NORM" || true
 
-      # 6) Ingest TheOddsAPI
-      - name: Ingest TheOddsAPI (obrigatório)
+      # =========================
+      # 2) INGEST ODDS - APIFOOTBALL (RapidAPI)
+      # =========================
+      - name: Ingest odds - APIFootball (RapidAPI)
+        env:
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+        run: |
+          set -euo pipefail
+          [ -f scripts/ingest_odds_apifootball_rapidapi.py ] \
+            || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
+
+          a=0
+          until [ $a -ge 3 ]; do
+            python -m scripts.ingest_odds_apifootball_rapidapi \
+              --rodada "${OUT_DIR}" \
+              --season "${SEASON}" \
+              ${DEBUG_FLAG} && break
+            a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
+          done
+
+          OUT="${OUT_DIR}/odds_apifootball.csv"
+          test -s "$OUT" || { echo "::error::odds_apifootball.csv not generated"; exit 5; }
+
+          header="$(head -n1 "$OUT" | tr -d '\r')"
+          for c in match_id home away odds_home odds_draw odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
+          done
+
+      # =========================
+      # 3) INGEST ODDS - TheOddsAPI
+      # =========================
+      - name: Ingest odds - TheOddsAPI
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -euo pipefail
-          [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
+          [ -f scripts/ingest_odds_theoddsapi.py ] \
+            || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
+
           a=0
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
@@ -193,50 +209,20 @@ jobs:
               ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
           done
+
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
           test -s "$OUT" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
-          echo "===== theodds head ====="
-          head -n 20 "$OUT" || true
-          echo "theodds rows: $(($(wc -l < "$OUT")-1))"
 
-      # 7) Ingest API-Football (RapidAPI)
-      - name: Ingest API-Football (RapidAPI) — obrigatório
-        env:
-          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
-        run: |
-          set -euo pipefail
-          [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
-          a=0
-          until [ $a -ge 3 ]; do
-            python -m scripts.ingest_odds_apifootball_rapidapi \
-              --rodada "${OUT_DIR}" \
-              --season "${SEASON}" \
-              --aliases "${ALIASES_JSON}" \
-              ${DEBUG_FLAG} && break
-            a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
+          header="$(head -n1 "$OUT" | tr -d '\r')"
+          for c in match_id home away odds_home odds_draw odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
           done
-          OUT="${OUT_DIR}/odds_apifootball.csv"
-          test -s "$OUT" || { echo "::error::odds_apifootball.csv not generated"; exit 5; }
-          echo "===== apifootball head ====="
-          head -n 20 "$OUT" || true
-          echo "apifootball rows: $(($(wc -l < "$OUT")-1))"
 
-      # 8) Sanidade antes do consenso (evita 0/0 silencioso)
-      - name: Validar coletores produziram linhas
-        run: |
-          set -euo pipefail
-          T_FILE="${OUT_DIR}/odds_theoddsapi.csv"
-          A_FILE="${OUT_DIR}/odds_apifootball.csv"
-          T_ROWS=$(( $(wc -l < "$T_FILE") - 1 ))
-          A_ROWS=$(( $(wc -l < "$A_FILE") - 1 ))
-          echo "theodds rows=${T_ROWS} | apifoot rows=${A_ROWS}"
-          if [ "$T_ROWS" -le 0 ] && [ "$A_ROWS" -le 0 ]; then
-            echo "::error::Ambas fontes retornaram 0 linhas. Verifique aliases, times na whitelist e limites de API."
-            exit 5
-          fi
-
-      # 9) Consenso estrito
-      - name: Consenso de odds — modo estrito (obrigatório)
+      # =========================
+      # 4) CONSENSO DE ODDS (STRICT)
+      # =========================
+      - name: Odds consensus (STRICT)
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -247,53 +233,100 @@ jobs:
           for c in team_home team_away odds_home odds_draw odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
-          echo "===== consensus head ====="
           head -n 20 "$OUT_FILE" || true
 
-      # 10+) Etapas de modelagem (opcionais)
-      - name: xG Univariado (opcional)
-        if: ${{ inputs.ENABLE_ML == 'true' }}
+      # =========================
+      # 5) xG UNIVARIADO (OBRIGATÓRIO)
+      # =========================
+      - name: xG Univariado
         run: |
           set -euo pipefail
           [ -f scripts/xg_univariate.py ] || { echo "::error::scripts/xg_univariate.py not found"; exit 7; }
-          python -m scripts.xg_univariate --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
+          python -m scripts.xg_univariate --rodada "${OUT_DIR}"
+          OUT_FILE="${OUT_DIR}/xg_univariate.csv"
+          test -s "$OUT_FILE" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
+          header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
+          for c in match_id team_home team_away xg_home xg_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in xg_univariate.csv"; exit 7; }
+          done
 
-      - name: xG Bivariado (opcional)
-        if: ${{ inputs.ENABLE_ML == 'true' }}
+      # =========================
+      # 6) xG BIVARIADO (OBRIGATÓRIO)
+      # =========================
+      - name: xG Bivariado
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
-          python -m scripts.xg_bivariate --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
+          python -m scripts.xg_bivariate --rodada "${OUT_DIR}"
+          OUT_FILE="${OUT_DIR}/xg_bivariate.csv"
+          test -s "$OUT_FILE" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
+          header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
+          for c in match_id p_home p_draw p_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in xg_bivariate.csv"; exit 8; }
+          done
 
-      - name: Calibração de probabilidades (opcional)
-        if: ${{ inputs.ENABLE_ML == 'true' }}
+      # =========================
+      # 7) CALIBRAÇÃO DE PROBABILIDADES (OBRIGATÓRIO)
+      # =========================
+      - name: Calibração de probabilidades
         run: |
           set -euo pipefail
           [ -f scripts/prob_calibration.py ] || { echo "::error::scripts/prob_calibration.py not found"; exit 9; }
-          python -m scripts.prob_calibration --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/probs_calibrated.csv" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
+          python -m scripts.prob_calibration --rodada "${OUT_DIR}"
+          OUT_FILE="${OUT_DIR}/probs_calibrated.csv"
+          test -s "$OUT_FILE" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
+          header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
+          for c in match_id p_home p_draw p_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in probs_calibrated.csv"; exit 9; }
+          done
 
-      - name: Kelly stake sizing (opcional)
-        if: ${{ inputs.ENABLE_ML == 'true' }}
+      # =========================
+      # 8) KELLY SIZING (OBRIGATÓRIO)
+      # =========================
+      - name: Kelly sizing
         run: |
           set -euo pipefail
           [ -f scripts/kelly_sizing.py ] || { echo "::error::scripts/kelly_sizing.py not found"; exit 10; }
           python -m scripts.kelly_sizing \
             --rodada "${OUT_DIR}" \
             --bankroll "${BANKROLL}" \
-            --fraction "${KELLY_FRACTION}" \
-            --cap "${KELLY_CAP}" \
-            --top_n "${KELLY_TOP_N}" \
-            --round_to "${ROUND_TO}" \
-            ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
+            --kelly_fraction "${KELLY_FRACTION}" \
+            --kelly_cap "${KELLY_CAP}" \
+            --kelly_top_n "${KELLY_TOP_N}" \
+            --round_to "${ROUND_TO}"
+          OUT_FILE="${OUT_DIR}/kelly_stakes.csv"
+          test -s "$OUT_FILE" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
+          header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
+          for c in match_id pick prob_fair odd_consensus stake suggested_result; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in kelly_stakes.csv"; exit 10; }
+          done
 
-      - name: Montar cartão da Loteca (opcional)
-        if: ${{ inputs.ENABLE_ML == 'true' }}
+      # =========================
+      # 9) MONTAR CARTÃO LOTECA (OBRIGATÓRIO)
+      # =========================
+      - name: Montar cartão Loteca
         run: |
           set -euo pipefail
           [ -f scripts/build_loteca_ticket.py ] || { echo "::error::scripts/build_loteca_ticket.py not found"; exit 11; }
-          python -m scripts.build_loteca_ticket --rodada "${OUT_DIR}" ${DEBUG_FLAG}
-          test -s "${OUT_DIR}/loteca_ticket.csv" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
+          python -m scripts.build_loteca_ticket --rodada "${OUT_DIR}"
+          OUT_FILE="${OUT_DIR}/loteca_ticket.csv"
+          test -s "$OUT_FILE" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
+          header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
+          for c in jogo match_id team_home team_away pick; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in loteca_ticket.csv"; exit 11; }
+          done
+          echo "===== Prévia do Cartão Loteca ====="
+          column -s, -t "$OUT_FILE" | head -n 30 || true
+
+      # =========================
+      # 10) ARTEFATOS
+      # =========================
+      - name: Upload artifacts (rodada completa)
+        uses: actions/upload-artifact@v4
+        with:
+          name: loteca_rodada_${{ steps.init.outputs.RUN_ID }}
+          path: |
+            ${{ env.OUT_DIR }}/*.csv
+            ${{ env.OUT_DIR }}/*.json
+            ${{ env.OUT_DIR }}/*.png
+          if-no-files-found: warn
