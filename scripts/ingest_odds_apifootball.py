@@ -3,8 +3,6 @@
 
 """
 Ingestor de odds da API-FOOTBALL (modo direto ou RapidAPI).
-Versão unificada para o framework Loteca v4.3.RC1+.
-
 Saída: <rodada>/odds_apifootball.csv
 Colunas: match_id,home,away,odds_home,odds_draw,odds_away
 """
@@ -18,10 +16,9 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import requests
-from unidecode import unidecode
+from unicodedata import normalize as _ucnorm  # <<< remove dependência externa
 
 
-# ------------------------- CLI -------------------------
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
@@ -35,7 +32,6 @@ def log(level, msg):
     print(f"[apifootball][{level}] {msg}", flush=True)
 
 
-# ------------------------- HTTP Session -------------------------
 def build_session():
     api_key = (os.getenv("API_FOOTBALL_KEY") or "").strip()
     rapid_key = (os.getenv("RAPIDAPI_KEY") or os.getenv("X_RAPIDAPI_KEY") or "").strip()
@@ -53,7 +49,7 @@ def build_session():
         sess.headers["X-RapidAPI-Host"] = "api-football-v1.p.rapidapi.com"
         mode = "rapidapi"
     else:
-        log("ERROR", "Nenhuma chave encontrada (API_FOOTBALL_KEY ou RAPIDAPI_KEY).")
+        log("ERROR", "Nenhuma chave encontrada (API_FOOTBALL_KEY ou RAPIDAPI_KEY/X_RAPIDAPI_KEY).")
         sys.exit(5)
 
     log("INFO", f"Usando modo {mode.upper()} com base {base}")
@@ -76,8 +72,13 @@ def api_get(sess, base, path, params=None, retries=3, delay=3):
     return None
 
 
-# ------------------------- Utils -------------------------
-def normalize(s): return unidecode(str(s or "")).strip().lower()
+def _deaccent(s: str) -> str:
+    # converte para ASCII removendo acentos (equivalente ao unidecode para nosso uso)
+    return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
+
+
+def normalize(s):
+    return _deaccent(s).strip().lower()
 
 
 def load_aliases(path):
@@ -89,7 +90,8 @@ def load_aliases(path):
             data = json.load(f)
         norm = {}
         for k, vals in data.items():
-            norm[normalize(k)] = {normalize(v) for v in ([k] + (vals if isinstance(vals, list) else []))}
+            vals = vals if isinstance(vals, list) else []
+            norm[normalize(k)] = {normalize(v) for v in ([k] + vals)}
         log("INFO", f"{len(norm)} aliases carregados.")
         return norm
     except Exception as e:
@@ -107,7 +109,6 @@ def alias_variants(name, aliases):
     return [name]
 
 
-# ------------------------- API helpers -------------------------
 def find_team(sess, base, name, aliases):
     for alt in alias_variants(name, aliases):
         try:
@@ -125,7 +126,11 @@ def find_fixture(sess, base, home_id, away_id, days_ahead=3):
     today = datetime.now(timezone.utc).date()
     to_date = today + timedelta(days=days_ahead)
     try:
-        data = api_get(sess, base, "/fixtures", {"h2h": f"{home_id}-{away_id}", "from": today.isoformat(), "to": to_date.isoformat()})
+        data = api_get(sess, base, "/fixtures", {
+            "h2h": f"{home_id}-{away_id}",
+            "from": today.isoformat(),
+            "to": to_date.isoformat()
+        })
         resp = (data or {}).get("response") or []
         if resp:
             return resp[0]["fixture"]["id"]
@@ -159,7 +164,6 @@ def get_odds(sess, base, fixture_id):
     return None
 
 
-# ------------------------- MAIN -------------------------
 def main():
     args = parse_args()
     rodada, season, aliases_path, debug = args.rodada, args.season, args.aliases, args.debug
@@ -199,8 +203,10 @@ def main():
             continue
 
         oh, od, oa = odds
-        results.append({"match_id": mid, "home": home, "away": away,
-                        "odds_home": oh, "odds_draw": od, "odds_away": oa})
+        results.append({
+            "match_id": mid, "home": home, "away": away,
+            "odds_home": oh, "odds_draw": od, "odds_away": oa
+        })
 
     out_path = os.path.join(rodada, "odds_apifootball.csv")
     pd.DataFrame(results).to_csv(out_path, index=False)
