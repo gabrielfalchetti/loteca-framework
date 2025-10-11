@@ -47,11 +47,9 @@ jobs:
           RUN_ID="$(date +%s)"
           OUT_DIR="data/out/${RUN_ID}"
           export RUN_ID OUT_DIR
-
           echo "RUN_ID=${RUN_ID}"   >> "$GITHUB_OUTPUT"
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
           echo "DEBUG_FLAG="        >> "$GITHUB_ENV"   # FULL mode: sem debug
-
           mkdir -p "data/in" "${OUT_DIR}"
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
@@ -121,7 +119,7 @@ jobs:
               if(l=="palmeiras") return "Palmeiras"
               if(l=="juventude") return "Juventude"
               if(l=="criciuma") return "Criciuma"
-              if(l=="america/mg" || l=="america mg" || l=="america-mg" || l=="america mineiro") return "America Mineiro"
+              if(l=="america/mg" || l=="america mg" || l=="america-mg" || l=="america mineiro" || l=="america") return "America Mineiro"
               if(l=="cuiaba") return "Cuiaba"
               if(l=="coritiba") return "Coritiba"
               if(l=="novorizontino" || l=="gremio novorizontino" || l=="grêmio novorizontino") return "Gremio Novorizontino"
@@ -151,7 +149,7 @@ jobs:
             }
           ' "$DST_RAW" > "$DST_NORM"
 
-          LINES=$(wc -l < "$DST_NORM" | tr -d " ")
+          LINES=$(wc -l | tr -d " " < "$DST_NORM")
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
           echo "===== Preview normalized whitelist ====="
@@ -170,6 +168,7 @@ jobs:
             python -m scripts.ingest_odds_apifootball_rapidapi \
               --rodada "${OUT_DIR}" \
               --season "${SEASON}" \
+              --aliases "${ALIASES_JSON}" \
               ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
           done
