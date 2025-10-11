@@ -7,7 +7,6 @@ env:
   PYTHONUTF8: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_WARN_SCRIPT_LOCATION: "1"
-  # ===== Parâmetros de temporada e risco =====
   SEASON: "2025"
   REGIONS: "uk,eu,us,au"
   LOOKAHEAD_DAYS: "3"
@@ -39,7 +38,6 @@ jobs:
           pip install \
             pandas numpy scipy scikit-learn statsmodels \
             rapidfuzz python-dateutil pytz
-          # Se o projeto tiver requirements.txt, instale também (não falha se não existir)
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Init run context (RUN_ID / OUT_DIR / DEBUG_FLAG)
@@ -47,11 +45,19 @@ jobs:
         run: |
           set -euo pipefail
           RUN_ID="$(date +%s)"
+          # Definir e exportar localmente para uso neste step
+          OUT_DIR="data/out/${RUN_ID}"
+          export RUN_ID OUT_DIR
+
+          # Disponibilizar para os PRÓXIMOS steps
           echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
-          echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
-          # DEBUG sempre desativado no FULL MODE (pode ajustar se quiser)
-          echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
-          mkdir -p "data/in" "data/out/${RUN_ID}"
+          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
+          echo "DEBUG_FLAG=" >> "$GITHUB_ENV"   # FULL mode: sem debug
+
+          # Criar diretórios já usando a variável local
+          mkdir -p "data/in" "${OUT_DIR}"
+
+          # Logs
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
@@ -62,9 +68,6 @@ jobs:
             echo "::warning file=${ALIASES_JSON}::aliases.json não encontrado; prossigo sem aliases."
           fi
 
-      # =========================
-      # 1) NORMALIZAR WHITELIST
-      # =========================
       - name: Normalize matches whitelist
         run: |
           set -euo pipefail
@@ -160,9 +163,6 @@ jobs:
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_NORM" || true
 
-      # =========================
-      # 2) INGEST ODDS - APIFOOTBALL (RapidAPI)
-      # =========================
       - name: Ingest odds - APIFootball (RapidAPI)
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
@@ -189,9 +189,6 @@ jobs:
               || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
           done
 
-      # =========================
-      # 3) INGEST ODDS - TheOddsAPI
-      # =========================
       - name: Ingest odds - TheOddsAPI
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
@@ -219,9 +216,6 @@ jobs:
               || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
           done
 
-      # =========================
-      # 4) CONSENSO DE ODDS (STRICT)
-      # =========================
       - name: Odds consensus (STRICT)
         run: |
           set -euo pipefail
@@ -235,9 +229,6 @@ jobs:
           done
           head -n 20 "$OUT_FILE" || true
 
-      # =========================
-      # 5) xG UNIVARIADO (OBRIGATÓRIO)
-      # =========================
       - name: xG Univariado
         run: |
           set -euo pipefail
@@ -250,9 +241,6 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in xg_univariate.csv"; exit 7; }
           done
 
-      # =========================
-      # 6) xG BIVARIADO (OBRIGATÓRIO)
-      # =========================
       - name: xG Bivariado
         run: |
           set -euo pipefail
@@ -265,9 +253,6 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in xg_bivariate.csv"; exit 8; }
           done
 
-      # =========================
-      # 7) CALIBRAÇÃO DE PROBABILIDADES (OBRIGATÓRIO)
-      # =========================
       - name: Calibração de probabilidades
         run: |
           set -euo pipefail
@@ -280,9 +265,6 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in probs_calibrated.csv"; exit 9; }
           done
 
-      # =========================
-      # 8) KELLY SIZING (OBRIGATÓRIO)
-      # =========================
       - name: Kelly sizing
         run: |
           set -euo pipefail
@@ -301,9 +283,6 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in kelly_stakes.csv"; exit 10; }
           done
 
-      # =========================
-      # 9) MONTAR CARTÃO LOTECA (OBRIGATÓRIO)
-      # =========================
       - name: Montar cartão Loteca
         run: |
           set -euo pipefail
@@ -318,9 +297,6 @@ jobs:
           echo "===== Prévia do Cartão Loteca ====="
           column -s, -t "$OUT_FILE" | head -n 30 || true
 
-      # =========================
-      # 10) ARTEFATOS
-      # =========================
       - name: Upload artifacts (rodada completa)
         uses: actions/upload-artifact@v4
         with:
