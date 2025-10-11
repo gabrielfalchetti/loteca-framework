@@ -149,7 +149,8 @@ jobs:
             }
           ' "$DST_RAW" > "$DST_NORM"
 
-          LINES=$(wc -l | tr -d " " < "$DST_NORM")
+          # <<< CORREÇÃO AQUI >>>
+          LINES=$(wc -l < "$DST_NORM" | tr -d " ")
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
           echo "===== Preview normalized whitelist ====="
