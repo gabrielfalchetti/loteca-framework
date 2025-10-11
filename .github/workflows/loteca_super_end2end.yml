@@ -37,7 +37,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install \
             pandas numpy scipy scikit-learn statsmodels \
-            rapidfuzz python-dateutil pytz
+            rapidfuzz Unidecode python-dateutil pytz requests
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Init run context (RUN_ID / OUT_DIR / DEBUG_FLAG)
@@ -45,19 +45,14 @@ jobs:
         run: |
           set -euo pipefail
           RUN_ID="$(date +%s)"
-          # Definir e exportar localmente para uso neste step
           OUT_DIR="data/out/${RUN_ID}"
           export RUN_ID OUT_DIR
 
-          # Disponibilizar para os PRÓXIMOS steps
-          echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "RUN_ID=${RUN_ID}"   >> "$GITHUB_OUTPUT"
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
-          echo "DEBUG_FLAG=" >> "$GITHUB_ENV"   # FULL mode: sem debug
+          echo "DEBUG_FLAG="        >> "$GITHUB_ENV"   # FULL mode: sem debug
 
-          # Criar diretórios já usando a variável local
           mkdir -p "data/in" "${OUT_DIR}"
-
-          # Logs
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
@@ -71,7 +66,6 @@ jobs:
       - name: Normalize matches whitelist
         run: |
           set -euo pipefail
-
           SRC="data/in/matches_source.csv"
           DST_RAW="${OUT_DIR}/matches_whitelist_raw.csv"
           DST_NORM="${OUT_DIR}/matches_whitelist.csv"
@@ -110,7 +104,7 @@ jobs:
               if(l=="turquia") return "Turkey"
               if(l=="espanha") return "Spain"
               if(l=="georgia") return "Georgia"
-              if(l=="servia" || l=="serbia/ser" || l=="serbia") return "Serbia"
+              if(l=="servia" || l=="serbia/ser" || l=="servia/ser" || l=="serbia") return "Serbia"
               if(l=="albania") return "Albania"
               if(l=="portugal") return "Portugal"
               if(l=="irlanda") return "Ireland"
