@@ -35,7 +35,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- Lint do YAML do próprio workflow ----------
+      # ---------- Lint do YAML ----------
       - name: Lint this workflow file
         shell: bash
         run: |
@@ -45,7 +45,7 @@ jobs:
           echo "Validating YAML..."
           yamllint .github/workflows/end2end-odds-news-ml.yml
 
-      # ---------- Setup Python ----------
+      # ---------- Python ----------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -64,11 +64,16 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # garante libs usadas nos scripts de ingest/normalização
-          pip install unidecode pandas numpy scipy scikit-learn \
-            requests pytz
+          pip install \
+            unidecode \
+            pandas \
+            numpy \
+            scipy \
+            scikit-learn \
+            requests \
+            pytz
 
-      # ---------- Prepara OUT_DIR (fix do unbound variable) ----------
+      # ---------- OUT_DIR (fix unbound) ----------
       - name: Compute run id and OUT_DIR
         id: prep
         shell: bash
@@ -82,23 +87,22 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      # ---------- Prepara estrutura de pastas/insumos ----------
-      - name: Prepare folders and base inputs
+      # ---------- Pastas / insumos ----------
+      - name: Prepare folders and inputs
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "data/in" "${OUT_DIR}"
-          # aliases.json sempre existe
           if [ ! -s "data/in/aliases.json" ]; then
             echo '{"teams": {}}' > data/in/aliases.json
           fi
-          # matches_source.csv é obrigatório
           if [ ! -s "data/in/matches_source.csv" ]; then
-            echo "::error::Arquivo obrigatório ausente: data/in/matches_source.csv"
+            echo "::error::Arquivo obrigatório ausente: \
+data/in/matches_source.csv"
             exit 2
           fi
 
-      # ---------- Normaliza matches_source -> matches_whitelist ----------
+      # ---------- Normalização whitelist ----------
       - name: Normalize whitelist from source
         shell: bash
         run: |
@@ -107,7 +111,6 @@ jobs:
           DST_RAW="${OUT_DIR}/matches_whitelist_raw.csv"
           DST_NORM="${OUT_DIR}/matches_whitelist.csv"
 
-          # normalização leve de espaçamentos/CRLF
           tr -d '\r' < "$SRC" \
             | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' \
             > "$DST_RAW"
@@ -116,11 +119,13 @@ jobs:
           h_low="$(echo "$header" | tr '[:upper:]' '[:lower:]')"
           for need in match_id home away; do
             echo "$h_low" | grep -qiE "(^|,)$need(,|$)" \
-              || { echo "::error::missing column '$need' in matches_source.csv"; exit 2; }
+              || { echo "::error::missing column '$need' in \
+matches_source.csv"; exit 2; }
           done
 
           awk -F',' -v OFS=',' '
-            function rmuf(s){ gsub(/\/[A-Za-z]{2}($|[^A-Za-z])/, "", s); return s }
+            function rmuf(s){ gsub(/\/[A-Za-z]{2}($|[^A-Za-z])/, "", s);
+              return s }
             function deacc(s){
               gsub(/á|à|ã|â|ä/,"a",s); gsub(/Á|À|Ã|Â|Ä/,"A",s);
               gsub(/é|ê|è|ë/,"e",s);  gsub(/É|Ê|È|Ë/,"E",s);
@@ -140,11 +145,11 @@ jobs:
               if(l=="turquia") return "Turkey"
               if(l=="espanha") return "Spain"
               if(l=="georgia") return "Georgia"
-              if(l=="servia" || l=="serbia/ser" || l=="serbia") return "Serbia"
+              if(l=="servia"||l=="serbia/ser"||l=="serbia") return "Serbia"
               if(l=="albania") return "Albania"
               if(l=="portugal") return "Portugal"
               if(l=="irlanda") return "Ireland"
-              if(l=="holanda" || l=="paises baixos") return "Netherlands"
+              if(l=="holanda"||l=="paises baixos") return "Netherlands"
               if(l=="finlandia") return "Finland"
               if(l=="romenia") return "Romania"
               if(l=="austria") return "Austria"
@@ -157,11 +162,14 @@ jobs:
               if(l=="palmeiras") return "Palmeiras"
               if(l=="juventude") return "Juventude"
               if(l=="criciuma") return "Criciuma"
-              if(l=="america/mg" || l=="america mg" || l=="america-mg" || l=="america mineiro") return "America Mineiro"
+              if(l=="america/mg"||l=="america mg"||l=="america-mg"\
+||l=="america mineiro") return "America Mineiro"
               if(l=="cuiaba") return "Cuiaba"
               if(l=="coritiba") return "Coritiba"
-              if(l=="novorizontino" || l=="gremio novorizontino" || l=="grêmio novorizontino") return "Gremio Novorizontino"
-              if(l=="operario" || l=="operario pr" || l=="operario/pr" || l=="operário/pr") return "Operario PR"
+              if(l=="novorizontino"||l=="gremio novorizontino"\
+||l=="grêmio novorizontino") return "Gremio Novorizontino"
+              if(l=="operario"||l=="operario pr"||l=="operario/pr"\
+||l=="operário/pr") return "Operario PR"
               return s
             }
             NR==1{
@@ -171,9 +179,10 @@ jobs:
                 if(k=="home") hi=i;
                 if(k=="away") ai=i;
               }
-              if(!(mi&&hi&&ai)){ print "::error::header mapping failed"; exit 2 }
-              print "match_id","home","away";
-              next
+              if(!(mi&&hi&&ai)){
+                print "::error::header mapping failed"; exit 2
+              }
+              print "match_id","home","away"; next
             }
             {
               mid=$mi; home=$hi; away=$ai;
@@ -184,55 +193,60 @@ jobs:
               if(mid=="" || home=="" || away==""){
                 print "::error::empty field on line " NR; exit 2
               }
-              if(seen[mid]++){ print "::error::duplicate match_id: " mid; exit 2 }
+              if(seen[mid]++){
+                print "::error::duplicate match_id: " mid; exit 2
+              }
               print mid,home,away
             }
           ' "$DST_RAW" > "$DST_NORM"
 
           LINES=$(wc -l < "$DST_NORM" | tr -d " ")
           [ "$LINES" -ge 2 ] \
-            || { echo "::error::whitelist empty after normalization"; exit 3; }
+            || { echo "::error::whitelist empty after normalization"; \
+exit 3; }
 
-          # evita o erro de cp "same file" e garante preview
           if [ ! -e "${OUT_DIR}/matches_whitelist.csv" ] \
-             || ! cmp -s "$DST_NORM" "${OUT_DIR}/matches_whitelist.csv"; then
+             || ! cmp -s "$DST_NORM" "${OUT_DIR}/matches_whitelist.csv"
+          then
             cp "$DST_NORM" "${OUT_DIR}/matches_whitelist.csv"
           fi
 
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_NORM" || true
 
-      # ---------- Validação de nomes (pré-ingest) ----------
+      # ---------- Validação de nomes ----------
       - name: Validate team names before ingest
         shell: bash
+        env:
+          WL: ${{ env.OUT_DIR }}/matches_whitelist.csv
         run: |
           set -euo pipefail
-          WL="${OUT_DIR}/matches_whitelist.csv"
-          test -s "$WL" || { echo "::error::whitelist not found"; exit 3; }
-          python - << 'PY'
-import csv, sys, json, re
+          test -s "$WL" \
+            || { echo "::error::whitelist not found"; exit 3; }
+          python - <<'PY'
+import csv, sys, re, os
 from unidecode import unidecode
-wl = sys.argv[1]
+wl = os.environ["WL"]
 bad = []
 with open(wl, newline='', encoding='utf-8') as f:
     rd = csv.DictReader(f)
-    for i,row in enumerate(rd, start=2):
-        for k in ("match_id","home","away"):
+    for i, row in enumerate(rd, start=2):
+        for k in ("match_id", "home", "away"):
             if not row.get(k, "").strip():
                 bad.append(f"line {i}: empty {k}")
-        for side in ("home","away"):
+        for side in ("home", "away"):
             v = row[side]
             if len(v) < 2 or re.search(r"[^A-Za-z0-9 .'-]", v):
                 bad.append(f"line {i}: suspicious name '{v}'")
 if bad:
     print("::error::Invalid names in whitelist:")
-    for b in bad: print(b)
+    for b in bad:
+        print(b)
     sys.exit(4)
 print("[validate] names ok")
 PY
-          "$WL"
 
-      # ---------- Ingest obrigatória: API-FOOTBALL ----------
+      # ---------- API-Football (obrigatória) ----------
       - name: Ingest odds - API-Football (mandatory)
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
@@ -240,25 +254,30 @@ PY
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball_rapidapi.py ] \
-            || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
+            || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py \
+not found"; exit 5; }
           a=0
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_apifootball_rapidapi \
               --rodada "${OUT_DIR}" \
               --season "${SEASON}" \
               --debug && break
-            a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
+            a=$((a+1))
+            echo "retry apifootball: $a/3"
+            sleep $((5*a))
           done
           OUT="${OUT_DIR}/odds_apifootball.csv"
           test -s "$OUT" \
-            || { echo "::error::odds_apifootball.csv not generated"; exit 5; }
+            || { echo "::error::odds_apifootball.csv not generated"; \
+exit 5; }
           header="$(head -n1 "$OUT" | tr -d '\r')"
           for c in match_id home away odds_home odds_draw odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" \
-              || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
+              || { echo "::error::missing column '$c' in \
+odds_apifootball.csv"; exit 5; }
           done
 
-      # ---------- Ingest obrigatória: TheOddsAPI ----------
+      # ---------- TheOddsAPI (obrigatória) ----------
       - name: Ingest odds - TheOddsAPI (mandatory)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
@@ -266,7 +285,8 @@ PY
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] \
-            || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
+            || { echo "::error::scripts/ingest_odds_theoddsapi.py \
+not found"; exit 5; }
           a=0
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
@@ -274,38 +294,45 @@ PY
               --regions "${REGIONS}" \
               --aliases "data/in/aliases.json" \
               --debug && break
-            a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
+            a=$((a+1))
+            echo "retry theodds: $a/3"
+            sleep $((5*a))
           done
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
           test -s "$OUT" \
-            || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
+            || { echo "::error::odds_theoddsapi.csv not generated"; \
+exit 5; }
           header="$(head -n1 "$OUT" | tr -d '\r')"
           for c in match_id home away odds_home odds_draw odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" \
-              || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
+              || { echo "::error::missing column '$c' in \
+odds_theoddsapi.csv"; exit 5; }
           done
 
-      # ---------- Consenso de odds (strict) ----------
+      # ---------- Consenso (strict) ----------
       - name: Build consensus odds (strict)
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] \
-            || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
+            || { echo "::error::scripts/consensus_odds_safe.py not found"; \
+exit 6; }
           python -m scripts.consensus_odds_safe \
             --rodada "${OUT_DIR}" \
             --strict
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
           test -s "$OUT_FILE" \
-            || { echo "::error::odds_consensus.csv not generated"; exit 6; }
+            || { echo "::error::odds_consensus.csv not generated"; \
+exit 6; }
           header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
           for c in team_home team_away odds_home odds_draw odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" \
-              || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
+              || { echo "::error::missing column '$c' in \
+odds_consensus.csv"; exit 6; }
           done
           head -n 20 "$OUT_FILE" || true
 
-      # ---------- Features XG univariadas/bivariadas ----------
+      # ---------- XG (uni & bi) ----------
       - name: XG features (uni & bi)
         shell: bash
         run: |
@@ -337,13 +364,14 @@ PY
           test -s "${OUT_DIR}/kelly_bets.csv" \
             || { echo "::error::kelly_bets.csv not generated"; exit 8; }
 
-      # ---------- Monta cartão da loteca ----------
+      # ---------- Cartão da Loteca ----------
       - name: Build Loteca card
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/build_loteca_card.py ] \
-            || { echo "::error::scripts/build_loteca_card.py not found"; exit 9; }
+            || { echo "::error::scripts/build_loteca_card.py not found"; \
+exit 9; }
           python -m scripts.build_loteca_card \
             --rodada "${OUT_DIR}" \
             --whitelist "${OUT_DIR}/matches_whitelist.csv" \
