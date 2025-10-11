@@ -122,7 +122,7 @@ jobs:
               if(l=="turquia") return "Turkey"
               if(l=="espanha") return "Spain"
               if(l=="georgia") return "Georgia"
-              if(l=="servia" || l=="serbia/ser" || l=="serbia") return "Serbia"
+              if(l=="servia" || l=="servia/ser" || l=="serbia/ser" || l=="serbia") return "Serbia"  # FIX: servia/ser
               if(l=="albania") return "Albania"
               if(l=="portugal") return "Portugal"
               if(l=="irlanda") return "Ireland"
