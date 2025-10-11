@@ -1,10 +1,9 @@
-# .github/workflows/loteca.yml
-name: loteca-pipeline
+name: loteca-super-end2end
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * 4"   # quinta 12:00 UTC (ajuste como quiser)
+    - cron: "0 12 * * 4"  # quinta 12:00 UTC
 
 permissions:
   contents: read
@@ -14,7 +13,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # ======= PARÂMETROS DE RODADA =======
       SEASON: "2025"
       LOOKAHEAD_DAYS: "3"
       REGIONS: "uk,eu,us,au"
@@ -25,12 +23,10 @@ jobs:
       ROUND_TO: "1"
       ALIASES_JSON: "data/aliases.json"
 
-      # ======= KEYS (vindas de Secrets) =======
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       THEODDS_API_KEY:  ${{ secrets.THEODDS_API_KEY }}
       X_RAPIDAPI_KEY:   ${{ secrets.X_RAPIDAPI_KEY }}
 
-      # Força UTF-8 e reduz ruído do pip
       PYTHONUTF8: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_WARN_SCRIPT_LOCATION: "1"
@@ -44,14 +40,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Instalar dependências
+      - name: Instalar dependencias
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Garantias mínimas
           pip install pandas requests python-dateutil unidecode
 
       - name: Inicializar RUN_ID e OUT_DIR
@@ -59,32 +54,24 @@ jobs:
         run: |
           set -euo pipefail
           RUN_ID="$(date +%s)"
-          echo "RUN_ID=${RUN_ID}"           | tee -a "$GITHUB_OUTPUT"
-          echo "OUT_DIR=data/out/${RUN_ID}" | tee -a "$GITHUB_ENV"
-          echo "DEBUG_FLAG="                | tee -a "$GITHUB_ENV"   # deixe vazio p/ desligar debug
+          echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
+          echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           mkdir -p "data/in" "data/out/${RUN_ID}"
           echo "RUN_ID=${RUN_ID}"
-          echo "Diretório de saída: data/out/${RUN_ID}"
+          echo "OUT_DIR=data/out/${RUN_ID}"
 
       - name: Validar aliases.json (se existir)
         run: |
           set -euo pipefail
           if [ -f "${ALIASES_JSON}" ]; then
-            python - << 'PY'
-import json,sys,os
-p=os.environ["ALIASES_JSON"]
-try:
-  with open(p,'r',encoding='utf-8') as f: json.load(f)
-  print(f"[ok] aliases.json válido: {p}")
-except Exception as e:
-  print(f"::warning::aliases.json inválido ({e}) — scripts tentarão normalizar nomes via API.")
-PY
+            python -c "import json,sys; json.load(open('${ALIASES_JSON}','r',encoding='utf-8')); print('[ok] aliases.json valido')"
           else
-            echo "::notice::Sem aliases.json — normalização 100% automática."
+            echo "::notice::Sem aliases.json — normalizacao automatica sera usada."
           fi
 
-      # ===================== INGESTÕES =====================
-      - name: Ingestão — API-Football (direto)
+      # ===================== INGESTOES =====================
+      - name: Ingestao — API-Football (direto)
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
@@ -100,17 +87,16 @@ PY
           done
 
           OUT="${OUT_DIR}/odds_apifootball.csv"
-          test -s "$OUT" || { echo "::warning::odds_apifootball.csv não gerado — seguirá sem esta fonte."; }
-
           if [ -s "$OUT" ]; then
             header="$(head -n1 "$OUT" | tr -d '\r')"
             for c in match_id home away odds_home odds_draw odds_away; do
-              echo "$header" | grep -qiE "(^|,)$c(,|$)" \
-                || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
+              echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
             done
+          else
+            echo "::warning::odds_apifootball.csv não gerado — seguira sem esta fonte."
           fi
 
-      - name: Ingestão — TheOddsAPI
+      - name: Ingestao — TheOddsAPI
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
@@ -126,18 +112,17 @@ PY
           done
 
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
-          test -s "$OUT" || { echo "::warning::odds_theoddsapi.csv não gerado — seguirá sem esta fonte."; }
-
           if [ -s "$OUT" ]; then
             header="$(head -n1 "$OUT" | tr -d '\r')"
             for c in match_id home away odds_home odds_draw odds_away; do
-              echo "$header" | grep -qiE "(^|,)$c(,|$)" \
-                || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
+              echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
             done
+          else
+            echo "::warning::odds_theoddsapi.csv não gerado — seguira sem esta fonte."
           fi
 
       # ===================== CONSENSO =====================
-      - name: Consenso de odds (modo não-estrito)
+      - name: Consenso de odds (nao-estrito)
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -151,11 +136,8 @@ PY
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
-          echo "[consensus] preview:"
-          head -n 20 "$OUT_FILE" || true
-
-      # ===================== xG (AGORA OBRIGATÓRIOS) =====================
-      - name: xG Univariate (obrigatório)
+      # ===================== xG OBRIGATORIOS =====================
+      - name: xG Univariate (obrigatorio)
         run: |
           set -euo pipefail
           [ -f scripts/xg_univariate.py ] || { echo "::error::scripts/xg_univariate.py not found"; exit 7; }
@@ -163,7 +145,7 @@ PY
           OUT="${OUT_DIR}/xg_univariate.csv"
           test -s "$OUT" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
 
-      - name: xG Bivariate (obrigatório)
+      - name: xG Bivariate (obrigatorio)
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
@@ -171,7 +153,7 @@ PY
           OUT="${OUT_DIR}/xg_bivariate.csv"
           test -s "$OUT" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
-      # ===================== CALIBRAÇÃO & KELLY =====================
+      # ===================== CALIBRACAO & KELLY =====================
       - name: Calibrar probabilidades
         run: |
           set -euo pipefail
@@ -194,7 +176,7 @@ PY
           OUT="${OUT_DIR}/kelly_stakes.csv"
           test -s "$OUT" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
 
-      # ===================== TICKET (3 triplos e 5 duplos) =====================
+      # ===================== TICKET =====================
       - name: Gerar ticket Loteca (3 triplos, 5 duplos)
         run: |
           set -euo pipefail
