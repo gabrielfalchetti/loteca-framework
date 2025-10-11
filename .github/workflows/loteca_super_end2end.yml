@@ -1,123 +1,87 @@
-name: Loteca - Super End2End (Full Strict)
+name: loteca_super_end2end
 
 on:
   workflow_dispatch:
-    inputs:
-      season:
-        description: "Temporada (ex.: 2025)"
-        required: true
-        default: "2025"
-      lookahead_days:
-        description: "Dias à frente para buscar jogos (TheOdds)"
-        required: true
-        default: "3"
-      regions:
-        description: "Regiões da TheOddsAPI (ex.: uk,eu,us,au)"
-        required: true
-        default: "uk,eu,us,au"
-      bankroll:
-        description: "Bankroll em unidades"
-        required: true
-        default: "1000"
-      kelly_fraction:
-        description: "Fração de Kelly"
-        required: true
-        default: "0.5"
-      kelly_cap:
-        description: "Cap de Kelly por aposta (0-1)"
-        required: true
-        default: "0.1"
-      kelly_top_n:
-        description: "Quantidade máxima de jogos selecionados"
-        required: true
-        default: "14"
-      round_to:
-        description: "Arredondamento de unidades (ex.: 1)"
-        required: true
-        default: "1"
+
+env:
+  # ===== Parâmetros de negócio =====
+  SEASON: "2025"
+  LOOKAHEAD_DAYS: "3"        # janela para localizar fixtures (dias à frente)
+  REGIONS: "uk,eu,us,au"     # TheOddsAPI
+  BANKROLL: "1000"
+  KELLY_FRACTION: "0.5"
+  KELLY_CAP: "0.1"
+  KELLY_TOP_N: "14"
+  ROUND_TO: "1"
+  ALIASES_JSON: "data/aliases.json"
+
+  # ===== Chaves de API (TheOddsAPI e API-FOOTBALL direta) =====
+  # - Use API_FOOTBALL_KEY (API-SPORTS) como padrão atual
+  # - Se ainda usar RapidAPI, pode manter RAPIDAPI_KEY (opcional)
+  API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+  RAPIDAPI_KEY:     ${{ secrets.RAPIDAPI_KEY }}
+  X_RAPIDAPI_KEY:   ${{ secrets.X_RAPIDAPI_KEY }}  # retrocompatível, se existir
+  THEODDS_API_KEY:  ${{ secrets.THEODDS_API_KEY }}
 
 jobs:
-  super_end2end:
+  loteca:
     runs-on: ubuntu-latest
-
-    env:
-      # variáveis de negócio (podem ser sobrescritas via inputs)
-      SEASON: ${{ github.event.inputs.season || '2025' }}
-      LOOKAHEAD_DAYS: ${{ github.event.inputs.lookahead_days || '3' }}
-      REGIONS: ${{ github.event.inputs.regions || 'uk,eu,us,au' }}
-      BANKROLL: ${{ github.event.inputs.bankroll || '1000' }}
-      KELLY_FRACTION: ${{ github.event.inputs.kelly_fraction || '0.5' }}
-      KELLY_CAP: ${{ github.event.inputs.kelly_cap || '0.1' }}
-      KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n || '14' }}
-      ROUND_TO: ${{ github.event.inputs.round_to || '1' }}
-
-      # arquivos/caminhos
-      ALIASES_JSON: data/aliases.json
-
-      # Sempre em UTF-8 e pip silencioso
-      PYTHONUTF8: "1"
-      PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PIP_NO_WARN_SCRIPT_LOCATION: "1"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Python deps
+      - name: Instalar dependências
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          # deps gerais
-          pip install pandas numpy requests python-dateutil
-          # deps usados nos scripts
-          pip install unidecode rapidfuzz
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests pandas numpy unidecode python-dateutil
+          fi
 
-      # ==========================
-      # PREP: criar OUT_DIR corretamente (corrige "unbound variable")
-      # ==========================
-      - name: Prepare OUT_DIR and environment
-        id: prep
+      - name: Preflight – validar chaves de API
+        run: |
+          set -euo pipefail
+          missing=0
+
+          # API-Football: aceitar modo direto OU RapidAPI (retrocompatível)
+          if [ -z "${API_FOOTBALL_KEY:-}" ] && [ -z "${RAPIDAPI_KEY:-}" ] && [ -z "${X_RAPIDAPI_KEY:-}" ]; then
+            echo "::error::Falta API_FOOTBALL_KEY (API-FOOTBALL direta). Opcionalmente, pode usar RAPIDAPI_KEY/X_RAPIDAPI_KEY (modo antigo)."
+            missing=1
+          fi
+
+          # TheOddsAPI é opcional (mas melhora consenso)
+          if [ -z "${THEODDS_API_KEY:-}" ]; then
+            echo "::warning::THEODDS_API_KEY ausente. O consenso terá menos fontes."
+          fi
+
+          [ $missing -eq 0 ] || exit 1
+
+      - name: Definir OUT_DIR e DEBUG_FLAG
+        id: init
         shell: bash
         run: |
           set -euo pipefail
           RUN_ID="$(date +%s)"
-          OUT_DIR="data/out/${RUN_ID}"
-
-          echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
-          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
-          echo "DEBUG_FLAG="        >> "$GITHUB_ENV"
-
-          mkdir -p "data/in" "${OUT_DIR}"
-
+          echo "RUN_ID=${RUN_ID}" | tee -a "$GITHUB_OUTPUT"
+          echo "OUT_DIR=data/out/${RUN_ID}" | tee -a "$GITHUB_ENV"
+          echo "DEBUG_FLAG=" | tee -a "$GITHUB_ENV"   # debug desligado
+          mkdir -p "data/in" "data/out/${RUN_ID}"
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      # Garante que data/aliases.json exista (pode estar vazio, mas o arquivo precisa existir)
-      - name: Ensure aliases.json exists
+      # ========== Normalizar a whitelist ==========
+      - name: Normalizar whitelist (matches_source.csv -> matches_whitelist.csv)
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "${ALIASES_JSON}" ]; then
-            echo '[{"src":"servia/ser","dst":"Serbia"}]' > "${ALIASES_JSON}"
-            echo "Criado ${ALIASES_JSON} com conteúdo mínimo."
-          else
-            echo "Encontrado ${ALIASES_JSON}"
-          fi
-          # Mostra primeiro 50 linhas só para debug
-          nl -ba "${ALIASES_JSON}" | head -n 50 || true
 
-      # ==========================
-      # 1) Normalizar whitelist (matches_source.csv -> matches_whitelist.csv)
-      # ==========================
-      - name: Normalize whitelist (matches_source.csv -> matches_whitelist.csv)
-        shell: bash
-        run: |
-          set -euo pipefail
           SRC="data/in/matches_source.csv"
           DST_RAW="${OUT_DIR}/matches_whitelist_raw.csv"
           DST_NORM="${OUT_DIR}/matches_whitelist.csv"
@@ -127,12 +91,11 @@ jobs:
             exit 3
           fi
 
-          # normaliza espaços/virgulas CRLF
+          # normalização simples
           tr -d '\r' < "$SRC" | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$DST_RAW"
 
           header="$(head -n1 "$DST_RAW" || true)"
           h_low="$(echo "$header" | tr '[:upper:]' '[:lower:]')"
-
           for need in match_id home away; do
             echo "$h_low" | grep -qiE "(^|,)$need(,|$)" || { echo "::error::missing column '$need' in matches_source.csv"; exit 3; }
           done
@@ -186,8 +149,8 @@ jobs:
               for(i=1;i<=NF;i++){
                 k=tolower($i);
                 if(k=="match_id") mi=i;
-                if(k=="home")     hi=i;
-                if(k=="away")     ai=i;
+                if(k=="home") hi=i;
+                if(k=="away") ai=i;
               }
               if(!(mi&&hi&&ai)){ print "::error::header mapping failed"; exit 2 }
               print "match_id","home","away";
@@ -197,7 +160,7 @@ jobs:
               mid=$mi; home=$hi; away=$ai;
               home=rmuf(home); away=rmuf(away);
               home=deacc(home); away=deacc(away);
-              home=trim(home);  away=trim(away);
+              home=trim(home); away=trim(away);
               home=map_pt_en(home); away=map_pt_en(away);
               if(mid=="" || home=="" || away==""){ print "::error::empty field on line " NR; exit 2 }
               if(seen[mid]++){ print "::error::duplicate match_id: " mid; exit 2 }
@@ -211,12 +174,8 @@ jobs:
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_NORM" || true
 
-      # ==========================
-      # 2) Ingest - API-Football (RapidAPI)
-      # ==========================
-      - name: Ingest odds - API-Football (RapidAPI)
-        env:
-          X_RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      # ========== API-FOOTBALL (direto ou RapidAPI – bimodal) ==========
+      - name: Ingest – API-Football (bimodal)
         shell: bash
         run: |
           set -euo pipefail
@@ -242,17 +201,14 @@ jobs:
               || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
           done
 
-      # ==========================
-      # 3) Ingest - TheOddsAPI
-      # ==========================
-      - name: Ingest odds - TheOddsAPI
-        env:
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      # ========== TheOddsAPI (opcional, mas recomendável) ==========
+      - name: Ingest – TheOddsAPI (opcional)
+        if: env.THEODDS_API_KEY != ''
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] \
-            || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
+            || { echo "::warning::scripts/ingest_odds_theoddsapi.py not found — pulando fonte TheOddsAPI"; exit 0; }
 
           a=0
           until [ $a -ge 3 ]; do
@@ -273,10 +229,8 @@ jobs:
               || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
           done
 
-      # ==========================
-      # 4) Consenso (modo estrito)
-      # ==========================
-      - name: Odds consensus (STRICT)
+      # ========== Consenso de odds ==========
+      - name: Consenso – odds
         shell: bash
         run: |
           set -euo pipefail
@@ -290,10 +244,8 @@ jobs:
           done
           head -n 20 "$OUT_FILE" || true
 
-      # ==========================
-      # 5) xG Univariado (obrigatório)
-      # ==========================
-      - name: xG Univariate
+      # ========== xG UNIVARIADO ==========
+      - name: xG Univariado
         shell: bash
         run: |
           set -euo pipefail
@@ -301,62 +253,44 @@ jobs:
           python -m scripts.xg_univariate --rodada "${OUT_DIR}"
           test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
 
-      # ==========================
-      # 6) xG Bivariado (obrigatório)
-      # ==========================
-      - name: xG Bivariate
+      # ========== xG BIVARIADO ==========
+      - name: xG Bivariado
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
+          [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 7; }
           python -m scripts.xg_bivariate --rodada "${OUT_DIR}"
-          test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
+          test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 7; }
 
-      # ==========================
-      # 7) Calibração de probabilidades (obrigatório)
-      # ==========================
-      - name: Calibrate probabilities
+      # ========== Calibração ==========
+      - name: Calibração de probabilidades
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
+          [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 8; }
           python -m scripts.calibrate_probs --rodada "${OUT_DIR}"
-          test -s "${OUT_DIR}/probs_calibrated.csv" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
+          test -s "${OUT_DIR}/probs_calibrated.csv" || { echo "::error::probs_calibrated.csv not generated"; exit 8; }
 
-      # ==========================
-      # 8) Kelly stakes (obrigatório)
-      # ==========================
-      - name: Kelly stakes
+      # ========== Kelly ==========
+      - name: Kelly
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/kelly_stakes.py ] || { echo "::error::scripts/kelly_stakes.py not found"; exit 10; }
-          python -m scripts.kelly_stakes \
+          [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 9; }
+          python -m scripts.kelly_bets \
             --rodada "${OUT_DIR}" \
             --bankroll "${BANKROLL}" \
             --fraction "${KELLY_FRACTION}" \
             --cap "${KELLY_CAP}" \
-            --top_n "${KELLY_TOP_N}" \
-            --round_to "${ROUND_TO}"
-          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
+            --topn "${KELLY_TOP_N}" \
+            --round "${ROUND_TO}"
+          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 9; }
 
-      # ==========================
-      # 9) Montar Cartão da Loteca (obrigatório)
-      # ==========================
-      - name: Build Loteca Ticket
+      # ========== Montar cartão ==========
+      - name: Montar cartão da Loteca
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/build_loteca_ticket.py ] || { echo "::error::scripts/build_loteca_ticket.py not found"; exit 11; }
+          [ -f scripts/build_loteca_ticket.py ] || { echo "::error::scripts/build_loteca_ticket.py not found"; exit 10; }
           python -m scripts.build_loteca_ticket --rodada "${OUT_DIR}"
-          test -s "${OUT_DIR}/loteca_ticket.csv" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
-
-      # (Opcional) Publicar artefatos da rodada
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: loteca_${{ steps.prep.outputs.RUN_ID }}
-          path: |
-            ${{ env.OUT_DIR }}/*.csv
-            ${{ env.OUT_DIR }}/*.json
-          if-no-files-found: error
+          test -s "${OUT_DIR}/loteca_ticket.csv" || { echo "::error::loteca_ticket.csv not generated"; exit 10; }
