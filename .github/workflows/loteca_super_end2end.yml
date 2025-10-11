@@ -1,73 +1,69 @@
-name: Loteca Super End-to-End
+name: Loteca - Super End2End (Full Strict)
 
 on:
   workflow_dispatch:
     inputs:
       season:
         description: "Temporada (ex.: 2025)"
-        type: string
-        required: false
+        required: true
         default: "2025"
       lookahead_days:
-        description: "Janela de jogos futuros (dias)"
-        type: number
-        required: false
-        default: 3
+        description: "Dias à frente para buscar jogos (TheOdds)"
+        required: true
+        default: "3"
       regions:
-        description: "Regiões (TheOddsAPI) ex.: uk,eu,us,au"
-        type: string
-        required: false
+        description: "Regiões da TheOddsAPI (ex.: uk,eu,us,au)"
+        required: true
         default: "uk,eu,us,au"
       bankroll:
-        description: "Bankroll (para Kelly)"
-        type: number
-        required: false
-        default: 1000
+        description: "Bankroll em unidades"
+        required: true
+        default: "1000"
       kelly_fraction:
-        description: "Fração Kelly (0-1)"
-        type: number
-        required: false
-        default: 0.5
+        description: "Fração de Kelly"
+        required: true
+        default: "0.5"
       kelly_cap:
-        description: "Teto por aposta (0-1)"
-        type: number
-        required: false
-        default: 0.1
+        description: "Cap de Kelly por aposta (0-1)"
+        required: true
+        default: "0.1"
       kelly_top_n:
-        description: "Máx. picks (top N)"
-        type: number
-        required: false
-        default: 14
+        description: "Quantidade máxima de jogos selecionados"
+        required: true
+        default: "14"
       round_to:
-        description: "Arredondar stakes para (ex.: 1)"
-        type: number
-        required: false
-        default: 1
-
-env:
-  PYTHONUTF8: "1"
-  PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PIP_NO_WARN_SCRIPT_LOCATION: "1"
-  SEASON: ${{ inputs.season || '2025' }}
-  LOOKAHEAD_DAYS: ${{ inputs.lookahead_days || 3 }}
-  REGIONS: ${{ inputs.regions || 'uk,eu,us,au' }}
-  BANKROLL: ${{ inputs.bankroll || 1000 }}
-  KELLY_FRACTION: ${{ inputs.kelly_fraction || 0.5 }}
-  KELLY_CAP: ${{ inputs.kelly_cap || 0.1 }}
-  KELLY_TOP_N: ${{ inputs.kelly_top_n || 14 }}
-  ROUND_TO: ${{ inputs.round_to || 1 }}
-  ALIASES_JSON: data/aliases.json
+        description: "Arredondamento de unidades (ex.: 1)"
+        required: true
+        default: "1"
 
 jobs:
-  loteca-e2e:
+  super_end2end:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+
+    env:
+      # variáveis de negócio (podem ser sobrescritas via inputs)
+      SEASON: ${{ github.event.inputs.season || '2025' }}
+      LOOKAHEAD_DAYS: ${{ github.event.inputs.lookahead_days || '3' }}
+      REGIONS: ${{ github.event.inputs.regions || 'uk,eu,us,au' }}
+      BANKROLL: ${{ github.event.inputs.bankroll || '1000' }}
+      KELLY_FRACTION: ${{ github.event.inputs.kelly_fraction || '0.5' }}
+      KELLY_CAP: ${{ github.event.inputs.kelly_cap || '0.1' }}
+      KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n || '14' }}
+      ROUND_TO: ${{ github.event.inputs.round_to || '1' }}
+
+      # arquivos/caminhos
+      ALIASES_JSON: data/aliases.json
+
+      # Sempre em UTF-8 e pip silencioso
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_WARN_SCRIPT_LOCATION: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -76,36 +72,52 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install \
-            requests \
-            pandas \
-            numpy \
-            unidecode \
-            rapidfuzz \
-            scikit-learn
-          # se seus scripts usam mais libs, adicione aqui
+          # deps gerais
+          pip install pandas numpy requests python-dateutil
+          # deps usados nos scripts
+          pip install unidecode rapidfuzz
 
+      # ==========================
+      # PREP: criar OUT_DIR corretamente (corrige "unbound variable")
+      # ==========================
       - name: Prepare OUT_DIR and environment
         id: prep
         shell: bash
         run: |
           set -euo pipefail
           RUN_ID="$(date +%s)"
-          echo "RUN_ID=${RUN_ID}"           | tee -a "$GITHUB_OUTPUT"
-          echo "OUT_DIR=data/out/${RUN_ID}" | tee -a "$GITHUB_ENV"
-          # DEBUG sempre off neste workflow (você pode mudar)
-          echo "DEBUG_FLAG="               | tee -a "$GITHUB_ENV"
-          mkdir -p "data/in" "data/out/${RUN_ID}"
+          OUT_DIR="data/out/${RUN_ID}"
+
+          echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
+          echo "DEBUG_FLAG="        >> "$GITHUB_ENV"
+
+          mkdir -p "data/in" "${OUT_DIR}"
+
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Normalize whitelist (matches_source.csv -> matches_whitelist.csv)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # Garante que data/aliases.json exista (pode estar vazio, mas o arquivo precisa existir)
+      - name: Ensure aliases.json exists
         shell: bash
         run: |
           set -euo pipefail
+          if [ ! -f "${ALIASES_JSON}" ]; then
+            echo '[{"src":"servia/ser","dst":"Serbia"}]' > "${ALIASES_JSON}"
+            echo "Criado ${ALIASES_JSON} com conteúdo mínimo."
+          else
+            echo "Encontrado ${ALIASES_JSON}"
+          fi
+          # Mostra primeiro 50 linhas só para debug
+          nl -ba "${ALIASES_JSON}" | head -n 50 || true
 
+      # ==========================
+      # 1) Normalizar whitelist (matches_source.csv -> matches_whitelist.csv)
+      # ==========================
+      - name: Normalize whitelist (matches_source.csv -> matches_whitelist.csv)
+        shell: bash
+        run: |
+          set -euo pipefail
           SRC="data/in/matches_source.csv"
           DST_RAW="${OUT_DIR}/matches_whitelist_raw.csv"
           DST_NORM="${OUT_DIR}/matches_whitelist.csv"
@@ -115,16 +127,16 @@ jobs:
             exit 3
           fi
 
-          # Normalização básica
+          # normaliza espaços/virgulas CRLF
           tr -d '\r' < "$SRC" | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$DST_RAW"
 
           header="$(head -n1 "$DST_RAW" || true)"
           h_low="$(echo "$header" | tr '[:upper:]' '[:lower:]')"
+
           for need in match_id home away; do
             echo "$h_low" | grep -qiE "(^|,)$need(,|$)" || { echo "::error::missing column '$need' in matches_source.csv"; exit 3; }
           done
 
-          # Mapeia e aplica alguns aliases PT->EN de países e clubes BR mais comuns
           awk -F',' -v OFS=',' '
             function rmuf(s){ gsub(/\/[A-Za-z]{2}($|[^A-Za-z])/, "", s); return s }
             function deacc(s){
@@ -174,8 +186,8 @@ jobs:
               for(i=1;i<=NF;i++){
                 k=tolower($i);
                 if(k=="match_id") mi=i;
-                if(k=="home") hi=i;
-                if(k=="away") ai=i;
+                if(k=="home")     hi=i;
+                if(k=="away")     ai=i;
               }
               if(!(mi&&hi&&ai)){ print "::error::header mapping failed"; exit 2 }
               print "match_id","home","away";
@@ -185,7 +197,7 @@ jobs:
               mid=$mi; home=$hi; away=$ai;
               home=rmuf(home); away=rmuf(away);
               home=deacc(home); away=deacc(away);
-              home=trim(home); away=trim(away);
+              home=trim(home);  away=trim(away);
               home=map_pt_en(home); away=map_pt_en(away);
               if(mid=="" || home=="" || away==""){ print "::error::empty field on line " NR; exit 2 }
               if(seen[mid]++){ print "::error::duplicate match_id: " mid; exit 2 }
@@ -193,38 +205,23 @@ jobs:
             }
           ' "$DST_RAW" > "$DST_NORM"
 
-          LINES=$(wc -l < "$DST_NORM" | tr -d " ")
+          LINES="$(wc -l < "$DST_NORM" | tr -d " ")"
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
 
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_NORM" || true
 
-      - name: Build aliases automaticamente (APIs)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          ALIASES_JSON: ${{ env.ALIASES_JSON }}
-          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-          REGIONS: ${{ env.REGIONS }}
-          LOOKAHEAD_DAYS: ${{ env.LOOKAHEAD_DAYS }}
-        run: |
-          set -euo pipefail
-          [ -f scripts/auto_build_aliases.py ] || { echo "::error::scripts/auto_build_aliases.py not found"; exit 4; }
-          python -m scripts.auto_build_aliases --rodada "${OUT_DIR}" --aliases_out "${ALIASES_JSON}"
-          echo "===== Preview aliases.json ====="
-          head -n 80 "${ALIASES_JSON}" || true
-
+      # ==========================
+      # 2) Ingest - API-Football (RapidAPI)
+      # ==========================
       - name: Ingest odds - API-Football (RapidAPI)
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          SEASON: ${{ env.SEASON }}
-          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
-          ALIASES_JSON: ${{ env.ALIASES_JSON }}
-          DEBUG_FLAG: ${{ env.DEBUG_FLAG }}
+          X_RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
+          [ -f scripts/ingest_odds_apifootball_rapidapi.py ] \
+            || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
 
           a=0
           until [ $a -ge 3 ]; do
@@ -241,20 +238,21 @@ jobs:
 
           header="$(head -n1 "$OUT" | tr -d '\r')"
           for c in match_id home away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
           done
 
+      # ==========================
+      # 3) Ingest - TheOddsAPI
+      # ==========================
       - name: Ingest odds - TheOddsAPI
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          REGIONS: ${{ env.REGIONS }}
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-          ALIASES_JSON: ${{ env.ALIASES_JSON }}
-          DEBUG_FLAG: ${{ env.DEBUG_FLAG }}
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
+          [ -f scripts/ingest_odds_theoddsapi.py ] \
+            || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
 
           a=0
           until [ $a -ge 3 ]; do
@@ -271,13 +269,14 @@ jobs:
 
           header="$(head -n1 "$OUT" | tr -d '\r')"
           for c in match_id home away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
           done
 
-      - name: Consenso de odds (STRICT)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          DEBUG_FLAG: ${{ env.DEBUG_FLAG }}
+      # ==========================
+      # 4) Consenso (modo estrito)
+      # ==========================
+      - name: Odds consensus (STRICT)
         shell: bash
         run: |
           set -euo pipefail
@@ -289,100 +288,75 @@ jobs:
           for c in team_home team_away odds_home odds_draw odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
-          echo "===== Preview odds_consensus.csv ====="
           head -n 20 "$OUT_FILE" || true
 
-      - name: xG Univariado
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ==========================
+      # 5) xG Univariado (obrigatório)
+      # ==========================
+      - name: xG Univariate
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/xg_univariate.py ] || { echo "::error::scripts/xg_univariate.py not found"; exit 7; }
-          IN="${OUT_DIR}/odds_consensus.csv"
-          test -s "$IN" || { echo "::error::odds_consensus.csv vazio"; exit 7; }
           python -m scripts.xg_univariate --rodada "${OUT_DIR}"
-          OUT="${OUT_DIR}/xg_univariate.csv"
-          test -s "$OUT" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
-          echo "===== Preview xg_univariate.csv ====="
-          head -n 20 "$OUT" || true
+          test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
 
-      - name: xG Bivariado
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ==========================
+      # 6) xG Bivariado (obrigatório)
+      # ==========================
+      - name: xG Bivariate
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
-          IN="${OUT_DIR}/xg_univariate.csv"
-          test -s "$IN" || { echo "::error::xg_univariate.csv vazio"; exit 8; }
           python -m scripts.xg_bivariate --rodada "${OUT_DIR}"
-          OUT="${OUT_DIR}/xg_bivariate.csv"
-          test -s "$OUT" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
-          echo "===== Preview xg_bivariate.csv ====="
-          head -n 20 "$OUT" || true
+          test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
-      - name: Calibração de probabilidades
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ==========================
+      # 7) Calibração de probabilidades (obrigatório)
+      # ==========================
+      - name: Calibrate probabilities
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
-          IN="${OUT_DIR}/xg_bivariate.csv"
-          test -s "$IN" || { echo "::error::xg_bivariate.csv vazio"; exit 9; }
           python -m scripts.calibrate_probs --rodada "${OUT_DIR}"
-          OUT="${OUT_DIR}/probs_calibrated.csv"
-          test -s "$OUT" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
-          echo "===== Preview probs_calibrated.csv ====="
-          head -n 20 "$OUT" || true
+          test -s "${OUT_DIR}/probs_calibrated.csv" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
 
-      - name: Kelly (stake sizing)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          BANKROLL: ${{ env.BANKROLL }}
-          KELLY_FRACTION: ${{ env.KELLY_FRACTION }}
-          KELLY_CAP: ${{ env.KELLY_CAP }}
-          KELLY_TOP_N: ${{ env.KELLY_TOP_N }}
-          ROUND_TO: ${{ env.ROUND_TO }}
+      # ==========================
+      # 8) Kelly stakes (obrigatório)
+      # ==========================
+      - name: Kelly stakes
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/kelly_stakes.py ] || { echo "::error::scripts/kelly_stakes.py not found"; exit 10; }
-          IN="${OUT_DIR}/probs_calibrated.csv"
-          test -s "$IN" || { echo "::error::probs_calibrated.csv vazio"; exit 10; }
           python -m scripts.kelly_stakes \
             --rodada "${OUT_DIR}" \
             --bankroll "${BANKROLL}" \
             --fraction "${KELLY_FRACTION}" \
             --cap "${KELLY_CAP}" \
-            --topn "${KELLY_TOP_N}" \
+            --top_n "${KELLY_TOP_N}" \
             --round_to "${ROUND_TO}"
-          OUT="${OUT_DIR}/kelly_stakes.csv"
-          test -s "$OUT" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
-          echo "===== Preview kelly_stakes.csv ====="
-          head -n 20 "$OUT" || true
+          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
 
-      - name: Montar cartão da Loteca
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      # ==========================
+      # 9) Montar Cartão da Loteca (obrigatório)
+      # ==========================
+      - name: Build Loteca Ticket
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/build_loteca_ticket.py ] || { echo "::error::scripts/build_loteca_ticket.py not found"; exit 11; }
-          IN="${OUT_DIR}/kelly_stakes.csv"
-          test -s "$IN" || { echo "::error::kelly_stakes.csv vazio"; exit 11; }
           python -m scripts.build_loteca_ticket --rodada "${OUT_DIR}"
-          OUT="${OUT_DIR}/loteca_ticket.csv"
-          test -s "$OUT" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
-          echo "===== Preview loteca_ticket.csv ====="
-          head -n 50 "$OUT" || true
+          test -s "${OUT_DIR}/loteca_ticket.csv" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
 
+      # (Opcional) Publicar artefatos da rodada
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: loteca-out-${{ steps.prep.outputs.RUN_ID }}
+          name: loteca_${{ steps.prep.outputs.RUN_ID }}
           path: |
             ${{ env.OUT_DIR }}/*.csv
-            ${{ env.ALIASES_JSON }}
+            ${{ env.OUT_DIR }}/*.json
           if-no-files-found: error
