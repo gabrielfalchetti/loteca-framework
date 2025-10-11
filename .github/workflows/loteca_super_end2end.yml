@@ -8,7 +8,7 @@ on:
         required: false
         default: "false"
       ENABLE_ML:
-        description: "Rodar etapas de xG / calibração / kelly / ticket (true/false)"
+        description: "Rodar xG/calibração/kelly/ticket (true/false)"
         required: false
         default: "false"
 
@@ -26,6 +26,7 @@ env:
   KELLY_TOP_N: "14"
   ROUND_TO: "1"
 
+  # Onde você disse que está o arquivo
   ALIASES_JSON: "data/aliases.json"
 
 jobs:
@@ -36,45 +37,37 @@ jobs:
         shell: bash
 
     steps:
-      # 1) Primeiro: checkout para não apagar pastas criadas depois
+      # 1) Checkout primeiro
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Agora sim: preparar variáveis e diretórios
+      # 2) Preparar variáveis e diretórios
       - name: Preparar variáveis e diretórios
         run: |
           set -euo pipefail
           RUN_ID="$(date +%s)"
           OUT_DIR="data/out/${RUN_ID}"
-          export OUT_DIR
-
           echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
-
           if [ "${{ inputs.DEBUG }}" = "true" ] || [ "${{ inputs.DEBUG }}" = "1" ]; then
             echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
           else
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           fi
-
           mkdir -p "data/in" "${OUT_DIR}"
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Verificar segredos necessários (APIs obrigatórias)
+      # 3) Checar segredos
+      - name: Verificar segredos necessários (APIs)
         run: |
           set -euo pipefail
           miss=0
-          if [ -z "${{ secrets.THEODDS_API_KEY }}" ]; then
-            echo "::error::Secret THEODDS_API_KEY ausente"
-            miss=1
-          fi
-          if [ -z "${{ secrets.X_RAPIDAPI_KEY }}" ]; then
-            echo "::error::Secret X_RAPIDAPI_KEY ausente (RapidAPI / API-Football)"
-            miss=1
-          fi
+          [ -n "${{ secrets.THEODDS_API_KEY }}" ] || { echo "::error::Secret THEODDS_API_KEY ausente"; miss=1; }
+          [ -n "${{ secrets.X_RAPIDAPI_KEY }}" ] || { echo "::error::Secret X_RAPIDAPI_KEY ausente (RapidAPI / API-Football)"; miss=1; }
           [ "$miss" -eq 0 ] || exit 2
 
+      # 4) Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -84,10 +77,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install \
-            pandas numpy python-dateutil pytz requests \
-            rapidfuzz unidecode beautifulsoup4 lxml
+          pip install pandas numpy python-dateutil pytz requests rapidfuzz unidecode beautifulsoup4 lxml
 
+      # 5) Normalizar whitelist
       - name: Normalizar whitelist (matches_source.csv -> matches_whitelist.csv)
         run: |
           set -euo pipefail
@@ -101,7 +93,6 @@ jobs:
             exit 3
           fi
 
-          # Garante que a pasta do arquivo de saída exista (cinto e suspensório)
           mkdir -p "$(dirname "$DST_RAW")"
 
           tr -d '\r' < "$SRC" | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$DST_RAW"
@@ -186,13 +177,13 @@ jobs:
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_NORM" || true
 
+      # 6) Ingest TheOddsAPI
       - name: Ingest TheOddsAPI (obrigatório)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
-
           a=0
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
@@ -202,21 +193,19 @@ jobs:
               ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
           done
-
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
           test -s "$OUT" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
-          header="$(head -n1 "$OUT" | tr -d '\r')"
-          for c in match_id home away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
-          done
+          echo "===== theodds head ====="
+          head -n 20 "$OUT" || true
+          echo "theodds rows: $(($(wc -l < "$OUT")-1))"
 
+      # 7) Ingest API-Football (RapidAPI)
       - name: Ingest API-Football (RapidAPI) — obrigatório
         env:
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball_rapidapi.py ] || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
-
           a=0
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_apifootball_rapidapi \
@@ -226,14 +215,27 @@ jobs:
               ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
           done
-
           OUT="${OUT_DIR}/odds_apifootball.csv"
           test -s "$OUT" || { echo "::error::odds_apifootball.csv not generated"; exit 5; }
-          header="$(head -n1 "$OUT" | tr -d '\r')"
-          for c in match_id home away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
-          done
+          echo "===== apifootball head ====="
+          head -n 20 "$OUT" || true
+          echo "apifootball rows: $(($(wc -l < "$OUT")-1))"
 
+      # 8) Sanidade antes do consenso (evita 0/0 silencioso)
+      - name: Validar coletores produziram linhas
+        run: |
+          set -euo pipefail
+          T_FILE="${OUT_DIR}/odds_theoddsapi.csv"
+          A_FILE="${OUT_DIR}/odds_apifootball.csv"
+          T_ROWS=$(( $(wc -l < "$T_FILE") - 1 ))
+          A_ROWS=$(( $(wc -l < "$A_FILE") - 1 ))
+          echo "theodds rows=${T_ROWS} | apifoot rows=${A_ROWS}"
+          if [ "$T_ROWS" -le 0 ] && [ "$A_ROWS" -le 0 ]; then
+            echo "::error::Ambas fontes retornaram 0 linhas. Verifique aliases, times na whitelist e limites de API."
+            exit 5
+          fi
+
+      # 9) Consenso estrito
       - name: Consenso de odds — modo estrito (obrigatório)
         run: |
           set -euo pipefail
@@ -245,18 +247,15 @@ jobs:
           for c in team_home team_away odds_home odds_draw odds_away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
+          echo "===== consensus head ====="
           head -n 20 "$OUT_FILE" || true
 
-      # ===================== ETAPAS DE MODELAGEM (opcionais via ENABLE_ML) =====================
-
+      # 10+) Etapas de modelagem (opcionais)
       - name: xG Univariado (opcional)
         if: ${{ inputs.ENABLE_ML == 'true' }}
         run: |
           set -euo pipefail
-          if [ ! -f scripts/xg_univariate.py ]; then
-            echo "::error::scripts/xg_univariate.py not found"
-            exit 7
-          fi
+          [ -f scripts/xg_univariate.py ] || { echo "::error::scripts/xg_univariate.py not found"; exit 7; }
           python -m scripts.xg_univariate --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
 
@@ -264,10 +263,7 @@ jobs:
         if: ${{ inputs.ENABLE_ML == 'true' }}
         run: |
           set -euo pipefail
-          if [ ! -f scripts/xg_bivariate.py ]; then
-            echo "::error::scripts/xg_bivariate.py not found"
-            exit 8
-          fi
+          [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
           python -m scripts.xg_bivariate --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
@@ -275,10 +271,7 @@ jobs:
         if: ${{ inputs.ENABLE_ML == 'true' }}
         run: |
           set -euo pipefail
-          if [ ! -f scripts/prob_calibration.py ]; then
-            echo "::error::scripts/prob_calibration.py not found"
-            exit 9
-          fi
+          [ -f scripts/prob_calibration.py ] || { echo "::error::scripts/prob_calibration.py not found"; exit 9; }
           python -m scripts.prob_calibration --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/probs_calibrated.csv" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
 
@@ -286,10 +279,7 @@ jobs:
         if: ${{ inputs.ENABLE_ML == 'true' }}
         run: |
           set -euo pipefail
-          if [ ! -f scripts/kelly_sizing.py ]; then
-            echo "::error::scripts/kelly_sizing.py not found"
-            exit 10
-          fi
+          [ -f scripts/kelly_sizing.py ] || { echo "::error::scripts/kelly_sizing.py not found"; exit 10; }
           python -m scripts.kelly_sizing \
             --rodada "${OUT_DIR}" \
             --bankroll "${BANKROLL}" \
@@ -304,9 +294,6 @@ jobs:
         if: ${{ inputs.ENABLE_ML == 'true' }}
         run: |
           set -euo pipefail
-          if [ ! -f scripts/build_loteca_ticket.py ]; then
-            echo "::error::scripts/build_loteca_ticket.py not found"
-            exit 11
-          fi
+          [ -f scripts/build_loteca_ticket.py ] || { echo "::error::scripts/build_loteca_ticket.py not found"; exit 11; }
           python -m scripts.build_loteca_ticket --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/loteca_ticket.csv" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
