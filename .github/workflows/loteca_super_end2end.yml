@@ -61,36 +61,18 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=data/out/${RUN_ID}"
 
-      - name: Validar/Sanitizar aliases.json (tolerante)
+      - name: Validar aliases.json (tolerante, sem quebrar)
         run: |
           set -euo pipefail
           if [ -f "${ALIASES_JSON}" ]; then
-            python - <<'PY'
-import json, os, re, sys
-p = os.environ.get("ALIASES_JSON")
-raw = open(p, 'r', encoding='utf-8').read()
-# remove BOM
-raw = raw.lstrip('\ufeff')
-# remove /* ... */ comments
-raw = re.sub(r'/\*.*?\*/', '', raw, flags=re.S)
-# strip // comments (keep content before //)
-raw = '\n'.join([line.split('//',1)[0] for line in raw.splitlines()])
-# remove trailing commas before ] or }
-raw = re.sub(r',(\s*[}\]])', r'\1', raw)
-try:
-    data = json.loads(raw)
-except Exception as e:
-    print(f"::warning::aliases.json inválido ({e}); desabilitando aliases nesta run.")
-    # limpar var de ambiente para próximos passos
-    with open(os.environ["GITHUB_ENV"], "a") as f:
-        f.write("ALIASES_JSON=\n")
-    sys.exit(0)
-# regravar já saneado
-open(p, 'w', encoding='utf-8').write(json.dumps(data, ensure_ascii=False, indent=2))
-print("[ok] aliases.json validado/sanitizado")
-PY
+            if python -c "import json,sys; json.load(open('${ALIASES_JSON}','r',encoding='utf-8'))" 2>/dev/null; then
+              echo "[ok] aliases.json válido"
+            else
+              echo "::warning::aliases.json inválido — desabilitando nesta run."
+              echo "ALIASES_JSON=" >> "$GITHUB_ENV"
+            fi
           else
-            echo "::notice::Sem aliases.json — normalizacao automatica sera usada."
+            echo "::notice::Sem aliases.json — normalização automática será usada."
           fi
 
       # ===================== INGESTOES =====================
@@ -121,7 +103,7 @@ PY
               echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
             done
           else
-            echo "::warning::odds_apifootball.csv não gerado — seguira sem esta fonte."
+            echo "::warning::odds_apifootball.csv não gerado — seguirá sem esta fonte."
           fi
 
       - name: Ingestao — TheOddsAPI
@@ -151,11 +133,11 @@ PY
               echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
             done
           else
-            echo "::warning::odds_theoddsapi.csv não gerado — seguira sem esta fonte."
+            echo "::warning::odds_theoddsapi.csv não gerado — seguirá sem esta fonte."
           fi
 
       # ===================== CONSENSO =====================
-      - name: Consenso de odds (nao-estrito)
+      - name: Consenso de odds (não-estrito)
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -170,7 +152,7 @@ PY
           done
 
       # ===================== xG OBRIGATORIOS =====================
-      - name: xG Univariate (obrigatorio)
+      - name: xG Univariate (obrigatório)
         run: |
           set -euo pipefail
           [ -f scripts/xg_univariate.py ] || { echo "::error::scripts/xg_univariate.py not found"; exit 7; }
@@ -178,7 +160,7 @@ PY
           OUT="${OUT_DIR}/xg_univariate.csv"
           test -s "$OUT" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
 
-      - name: xG Bivariate (obrigatorio)
+      - name: xG Bivariate (obrigatório)
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
