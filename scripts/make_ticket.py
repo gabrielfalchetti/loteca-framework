@@ -1,94 +1,47 @@
-from __future__ import annotations
-import argparse
-import numpy as np
+# scripts/make_ticket.py
+import argparse, os, sys
 import pandas as pd
-from pathlib import Path
-
-def entropy(p: np.ndarray) -> float:
-    p = p / p.sum()
-    return float(-(p * np.log(p)).sum())
-
-def load_probs(base: Path):
-    tries = [
-        ("joined_pregame.csv",       ["p_home_final","p_draw_final","p_away_final"]),
-        ("joined_stacked_bivar.csv", ["p_home_final","p_draw_final","p_away_final"]),
-        ("joined_stacked.csv",       ["p_home_final","p_draw_final","p_away_final"]),
-        ("joined.csv",               ["p_home","p_draw","p_away"]),
-    ]
-    for fn, cols in tries:
-        p = base / fn
-        if p.exists() and p.stat().st_size > 0:
-            df = pd.read_csv(p).rename(columns=str.lower)
-            have = [c for c in cols if c in df.columns]
-            if len(have) == 3:
-                return df.copy(), have, fn
-    raise RuntimeError("Nenhum arquivo de probabilidades encontrado.")
+import numpy as np
 
 def main():
-    ap = argparse.ArgumentParser(description="Gera cartão Loteca a partir de probabilidades")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    ap.add_argument("--max-duplos", type=int, default=4)
-    ap.add_argument("--max-triplos", type=int, default=2)
+    ap.add_argument("--top-n", type=int, default=14)
+    ap.add_argument("--debug", dest="debug", action="store_true")
     args = ap.parse_args()
 
-    base = Path(f"data/out/{args.rodada}")
-    base.mkdir(parents=True, exist_ok=True)
+    out_dir = args.rodada
+    probs_file = os.path.join(out_dir, "probs_calibrated.csv")
+    cons_file  = os.path.join(out_dir, "odds_consensus.csv")
 
-    df, cols, used = load_probs(base)
+    if not os.path.exists(probs_file):
+        sys.exit("probs_calibrated.csv not found")
+    if not os.path.exists(cons_file):
+        sys.exit("odds_consensus.csv not found")
 
-    P = df[cols].to_numpy(float)
-    P = np.clip(P, 1e-12, 1.0)
-    P = P / P.sum(axis=1, keepdims=True)
+    p = pd.read_csv(probs_file)
+    c = pd.read_csv(cons_file)
 
-    matches = pd.read_csv(base/"matches.csv").rename(columns=str.lower)
-    if {"home","away"}.issubset(df.columns):
-        M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left", suffixes=("","_m"))
-        M["home"] = M["home"].fillna(M["home_m"])
-        M["away"] = M["away"].fillna(M["away_m"])
-    else:
-        M = df.merge(matches[["match_id","home","away"]], on="match_id", how="left")
+    df = p.merge(c[["team_home","team_away"]], on=["team_home","team_away"], how="inner")
 
-    # escolhe triplos de maior entropia, depois duplos
-    ent = np.array([entropy(P[i]) for i in range(P.shape[0])])
-    order = np.argsort(ent)[::-1]
+    # Escolhe o resultado mais provável por jogo
+    choices = []
+    for _, r in df.iterrows():
+        probs = {"1": r["p_home"], "X": r["p_draw"], "2": r["p_away"]}
+        pick  = max(probs, key=probs.get)
+        conf  = probs[pick]
+        choices.append({"team_home": r["team_home"], "team_away": r["team_away"], "pick": pick, "confidence": conf})
 
-    picks = [{int(np.argmax(P[i]))} for i in range(P.shape[0])]
-    used_d = used_t = 0
-    for idx in order:
-        if used_t < args.max_triplos:
-            picks[idx] = {0, 1, 2}
-            used_t += 1
-        elif used_d < args.max_duplos:
-            top2 = np.argsort(P[idx])[::-1][:2]
-            picks[idx] = {int(top2[0]), int(top2[1])}
-            used_d += 1
+    dft = pd.DataFrame(choices).sort_values("confidence", ascending=False).head(args.top_n).reset_index(drop=True)
 
-    sym = {0:"1", 1:"X", 2:"2"}
-    rows = []
-    for _, r in M.sort_values("match_id").iterrows():
-        mid = int(r["match_id"])
-        choice = "".join(sorted(sym[x] for x in sorted(list(picks[mid-1]))))
-        rows.append({"match_id": mid, "home": r["home"], "away": r["away"], "pick": choice})
+    # Numera 1..N para formato de cartão
+    dft.insert(0, "jogo", dft.index + 1)
 
-    out_csv = base / "loteca_ticket.csv"
-    pd.DataFrame(rows).to_csv(out_csv, index=False)
+    out = os.path.join(out_dir, "loteca_ticket.csv")
+    dft.to_csv(out, index=False)
 
-    combos = 1
-    cnt_d = cnt_t = 0
-    for r in rows:
-        m = len(r["pick"]); combos *= m
-        if m == 2: cnt_d += 1
-        if m == 3: cnt_t += 1
-
-    out_txt = base / "loteca_ticket.txt"
-    with open(out_txt, "w", encoding="utf-8") as f:
-        f.write(f"Cartão Loteca — {args.rodada}\n")
-        f.write(f"(Duplos={cnt_d}, Triplos={cnt_t}, Combinações={combos})\n")
-        f.write(f"[Probabilidades usadas: {used}]\n\n")
-        for r in rows:
-            f.write(f"{r['match_id']:>2}  {r['home']} x {r['away']:<24} → {r['pick']}\n")
-
-    print("[ticket] Fonte de prob:", used, "| Duplos:", cnt_d, "Triplos:", cnt_t, "Combinações:", combos)
+    if args.debug:
+        print(dft)
 
 if __name__ == "__main__":
     main()
