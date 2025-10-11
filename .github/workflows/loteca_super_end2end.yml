@@ -1,3 +1,4 @@
+---
 name: Loteca Super End2End (Odds + XG + Kelly)
 
 on:
@@ -48,20 +49,9 @@ jobs:
           if [ -f requirements.txt ]; then
             python -m pip install -r requirements.txt
           fi
-          # Garantias mínimas exigidas pelos scripts
           python -m pip install --upgrade \
-            pandas numpy scikit-learn unidecode pyyaml matplotlib \
-            rapidfuzz==3.* --no-python-version-warning
-          # Verificação explícita (falha cedo se faltar)
-          python - <<'PY'
-import sys
-try:
-    import rapidfuzz
-    print("rapidfuzz OK:", getattr(rapidfuzz, "__version__", "unknown"))
-except Exception as e:
-    print("::error::rapidfuzz import failed:", e)
-    sys.exit(1)
-PY
+            pandas numpy scikit-learn unidecode pyyaml matplotlib rapidfuzz==3.*
+          python -c "import sys; import rapidfuzz; print('rapidfuzz OK:', getattr(rapidfuzz,'__version__','unknown'))" || { echo '::error::rapidfuzz import failed'; exit 1; }
 
       # === Contexto de execução (define OUT_DIR) ===
       - name: Init run context
@@ -84,7 +74,6 @@ PY
         run: |
           set -euo pipefail
           mkdir -p "${OUT_DIR}"
-          # Garante arquivos de entrada mínimos
           if [ ! -s "data/in/aliases.json" ]; then
             echo '{"teams": {}}' > data/in/aliases.json
           fi
@@ -268,7 +257,7 @@ PY
           python -m scripts.xg_bivariate --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
-      # === Calibração (Platt/Isotonic conforme seu script) ===
+      # === Calibração ===
       - name: Calibrate probabilities
         shell: bash
         run: |
