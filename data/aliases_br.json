@@ -199,3 +199,26 @@ Nacional de Muriaé,Nacional Muriae
     ]
   }
 }
+{
+  "teams": {
+    "Ponte Preta": ["Ponte Preta/SP", "AA Ponte Preta", "Ponte Preta SP"],
+    "Guarani": ["Guarani/SP", "Guarani SP", "Guarani Campinas"],
+
+    "Criciuma": ["Criciúma", "Criciuma EC", "Criciuma-SC", "Criciuma SC"],
+    "America": ["América-MG", "America Mineiro", "América MG"],
+
+    "Gremio Novorizontino": ["Grêmio Novorizontino", "Novorizontino", "Gremio Novorizontino/SP", "Novorizontino SP"],
+    "Operario PR": ["Operário", "Operario Ferroviario", "Operário Ferroviário", "Operário/PR", "Operario PR"],
+
+    "Bulgaria": ["Bulgária"],
+    "Turkey": ["Turquia", "Türkiye"],
+    "Portugal": ["Seleção de Portugal"],
+    "Ireland": ["Irlanda", "Republic of Ireland", "República da Irlanda"],
+    "Romania": ["Romênia", "Romenia"],
+    "Austria": ["Áustria", "Austria"],
+    "Denmark": ["Dinamarca"],
+    "Greece": ["Grécia", "Grecia"],
+    "Lithuania": ["Lituânia", "Lituania"],
+    "Poland": ["Polônia", "Polonia"]
+  }
+}
