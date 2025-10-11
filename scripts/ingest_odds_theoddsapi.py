@@ -13,13 +13,17 @@ import sys
 import json
 import time
 import argparse
-from datetime import datetime, timezone
 from unicodedata import normalize as _ucnorm
 
 import requests
 import pandas as pd
 
 CSV_COLS = ["match_id", "home", "away", "odds_home", "odds_draw", "odds_away"]
+
+STOPWORD_TOKENS = {
+    "aa","ec","ac","sc","fc","afc","cf","ca","cd","ud",
+    "sp","pr","rj","rs","mg","go","mt","ms","pa","pe","pb","rn","ce","ba","al","se","pi","ma","df","es","sc",
+}
 
 def log(level, msg):
     print(f"[theoddsapi][{level}] {msg}", flush=True)
@@ -32,16 +36,19 @@ def parse_args():
     ap.add_argument("--debug", action="store_true")
     return ap.parse_args()
 
-# ---------- Normalização / Aliases ----------
 def _deaccent(s: str) -> str:
     return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
 
 def norm_key(s: str) -> str:
-    s = _deaccent(s).lower().strip()
-    s = re.sub(r"/[a-z]{2}($|[^a-z])", " ", s)   # remove "/SP" etc
-    s = re.sub(r"[^a-z0-9 ]+", " ", s)
-    s = re.sub(r"\s+", " ", s)
+    s = _deaccent(s).lower()
+    s = s.replace("&", " e ")
+    s = re.sub(r"[()/\-_.]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
     return s
+
+def norm_key_tokens(s: str) -> str:
+    toks = [t for t in re.split(r"\s+", norm_key(s)) if t and t not in STOPWORD_TOKENS]
+    return " ".join(toks)
 
 def load_aliases_lenient(path: str) -> dict[str, set[str]]:
     if not os.path.isfile(path):
@@ -54,9 +61,9 @@ def load_aliases_lenient(path: str) -> dict[str, set[str]]:
         data = json.loads(txt)
         norm = {}
         for k, vals in (data or {}).items():
-            base = norm_key(k)
+            base = norm_key_tokens(k)
             lst = vals if isinstance(vals, list) else []
-            allv = {norm_key(k)} | {norm_key(v) for v in lst}
+            allv = {norm_key_tokens(k)} | {norm_key_tokens(v) for v in lst}
             norm[base] = allv
         log("INFO", f"{len(norm)} aliases carregados (lenient).")
         return norm
@@ -64,7 +71,6 @@ def load_aliases_lenient(path: str) -> dict[str, set[str]]:
         log("WARN", f"Falha lendo aliases.json: {e}")
         return {}
 
-# ---------- TheOddsAPI ----------
 class TheOdds:
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -88,8 +94,7 @@ class TheOdds:
 
     def list_active_soccer_sports(self):
         sports = self.get("sports", {"all": "true"}) or []
-        keys = [s["key"] for s in sports if s.get("active") and str(s.get("group","")).lower().startswith("soccer")]
-        return keys
+        return [s["key"] for s in sports if s.get("active") and str(s.get("group","")).lower().startswith("soccer")]
 
     def fetch_all_soccer_events(self, regions: str):
         events = []
@@ -110,22 +115,22 @@ def extract_odds_from_game(game: dict):
     for bk in game.get("bookmakers", []):
         for mk in bk.get("markets", []):
             if mk.get("key") == "h2h":
-                # outcomes: name == home_team | away_team | Draw
                 oh = od = oa = None
                 for o in mk.get("outcomes", []):
-                    nm = (o.get("name") or "").lower()
+                    nm = (o.get("name") or "")
                     price = o.get("price")
-                    if nm == "draw":
-                        od = price
-                    elif nm == (home or "").lower():
-                        oh = price
-                    elif nm == (away or "").lower():
-                        oa = price
+                    if not isinstance(price, (int, float)):
+                        continue
+                    if nm.lower() == "draw":
+                        od = float(price)
+                    elif norm_key(nm) == norm_key(home):
+                        oh = float(price)
+                    elif norm_key(nm) == norm_key(away):
+                        oa = float(price)
                 if oh and od and oa:
                     return oh, od, oa
     return None
 
-# ---------- Main ----------
 def main():
     args = parse_args()
     rodada = args.rodada
@@ -142,50 +147,64 @@ def main():
         pd.DataFrame(columns=CSV_COLS).to_csv(os.path.join(rodada, "odds_theoddsapi.csv"), index=False)
         sys.exit(5)
 
-    # carregar whitelist
-    df = pd.read_csv(wl_path)
-
-    # carregar aliases (tolerante)
+    df_wl = pd.read_csv(wl_path)
     aliases = load_aliases_lenient(args.aliases)
 
-    # baixa todos os eventos de SOCCER (uma vez por run) e indexa
+    # Baixa todos os eventos de soccer e indexa por tokens
     cli = TheOdds(api_key)
     all_events = cli.fetch_all_soccer_events(regions)
-    index = {}
+
+    idx = {}
     for key, g in all_events:
-        h = norm_key(g.get("home_team", ""))
-        a = norm_key(g.get("away_team", ""))
-        ok = extract_odds_from_game(g)
-        if not ok:
+        h_raw = g.get("home_team", "") or ""
+        a_raw = g.get("away_team", "") or ""
+        odds = extract_odds_from_game(g)
+        if not odds:
             continue
-        idx1 = f"{h}|{a}"
-        idx2 = f"{a}|{h}"
-        index[idx1] = ok
-        index[idx2] = (ok[2], ok[1], ok[0])  # invertido
+        # índices “fortes” por tokens e também por normalização simples
+        keys = set()
+        keys.add(f"{norm_key_tokens(h_raw)}|{norm_key_tokens(a_raw)}")
+        keys.add(f"{norm_key(h_raw)}|{norm_key(a_raw)}")
+        # exemplo: inverter
+        keys.add(f"{norm_key_tokens(a_raw)}|{norm_key_tokens(h_raw)}")
+        keys.add(f"{norm_key(a_raw)}|{norm_key(h_raw)}")
 
-    results, missing = [], []
+        for k in keys:
+            if k not in idx:
+                idx[k] = odds
 
-    for _, r in df.iterrows():
+    results = []
+    missing = []
+
+    for _, r in df_wl.iterrows():
         mid = str(r["match_id"])
         home = str(r["home"])
         away = str(r["away"])
+
         log("INFO", f"{mid}: {home} x {away}")
 
-        # tentar com aliases
-        homes = {norm_key(home)}
-        aways = {norm_key(away)}
+        cands = []
+
+        # chaves primárias por tokens
+        cands_keys = {
+            f"{norm_key_tokens(home)}|{norm_key_tokens(away)}",
+            f"{norm_key(home)}|{norm_key(away)}",
+        }
+
+        # expande com aliases (se houver)
+        hset = {norm_key_tokens(home), norm_key(home)}
+        aset = {norm_key_tokens(away), norm_key(away)}
         if aliases:
-            homes |= (aliases.get(norm_key(home), set()))
-            aways |= (aliases.get(norm_key(away), set()))
+            hset |= aliases.get(norm_key_tokens(home), set())
+            aset |= aliases.get(norm_key_tokens(away), set())
+        for hh in hset:
+            for aa in aset:
+                cands_keys.add(f"{hh}|{aa}")
 
         found = None
-        for h in homes:
-            for a in aways:
-                key = f"{h}|{a}"
-                if key in index:
-                    found = index[key]
-                    break
-            if found:
+        for k in cands_keys:
+            if k in idx:
+                found = idx[k]
                 break
 
         if not found:
@@ -201,7 +220,7 @@ def main():
     pd.DataFrame(results, columns=CSV_COLS).to_csv(out_path, index=False)
 
     if not results:
-        log("ERROR", "Nenhuma odd válida encontrada para gerar consenso.")
+        log("ERROR", "Nenhuma odd válida encontrada para gerar arquivo.")
         sys.exit(5)
 
     if missing:
