@@ -1,43 +1,39 @@
 # scripts/xg_bivariado.py
-from __future__ import annotations
-import argparse, os, pickle
+import argparse, sys, os
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import brier_score_loss, log_loss
-from sklearn.model_selection import train_test_split
+import numpy as np
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Treino bivariado (usa 2 features das odds).")
-    ap.add_argument("--train", default="data/training/historico.csv")
-    ap.add_argument("--outdir", default="data/models/ml_new/bivariado")
-    ap.add_argument("--target", default="target_home_win")
-    ap.add_argument("--test_size", type=float, default=0.2)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--debug", dest="debug", action="store_true")
     args = ap.parse_args()
 
-    os.makedirs(args.outdir, exist_ok=True)
-    df = pd.read_csv(args.train).dropna(subset=["home_odds","away_odds"])
+    out_dir = args.rodada
+    cons = os.path.join(out_dir, "odds_consensus.csv")
+    uni  = os.path.join(out_dir, "xg_univariate.csv")
 
-    # Duas features simples
-    X = pd.DataFrame({
-        "inv_home_price": 1.0 / df["home_odds"].astype(float),
-        "inv_away_price": 1.0 / df["away_odds"].astype(float),
-    })
-    y = df[args.target].astype(int)
+    if not os.path.exists(cons):
+        sys.exit("odds_consensus.csv not found")
+    if not os.path.exists(uni):
+        sys.exit("xg_univariate.csv not found")
 
-    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=args.test_size, random_state=42, stratify=y)
-    clf = HistGradientBoostingClassifier(random_state=42)
-    clf.fit(Xtr, ytr)
-    proba = clf.predict_proba(Xte)[:, 1]
+    dfc = pd.read_csv(cons)
+    dfu = pd.read_csv(uni)
 
-    try:
-        print("[xg_bi] logloss:", log_loss(yte, proba))
-    except Exception:
-        pass
-    print("[xg_bi] brier:", brier_score_loss(yte, proba))
+    # Junta para gerar interações bivariadas coerentes com as odds
+    df = dfc.merge(dfu, on=["team_home","team_away"], how="inner")
 
-    with open(os.path.join(args.outdir, "model.pkl"), "wb") as f:
-        pickle.dump(clf, f)
-    print(f"[xg_bi] salvo -> {os.path.join(args.outdir,'model.pkl')}")
+    # Interações simples: diferenças e razões — não “inventam” dados, só derivam dos existentes
+    df["xg_diff_bi"] = df["xg_home_uni"] - df["xg_away_uni"]
+    df["xg_ratio_bi"] = np.where(dfu["xg_away_uni"]>0,
+                                 dfu["xg_home_uni"] / dfu["xg_away_uni"],
+                                 np.nan)
+
+    out = os.path.join(out_dir, "xg_bivariate.csv")
+    df[["team_home","team_away","xg_home_uni","xg_away_uni","xg_diff_bi","xg_ratio_bi"]].to_csv(out, index=False)
+    if args.debug:
+        print(df.head())
 
 if __name__ == "__main__":
     main()
