@@ -14,23 +14,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup actionlint
-        uses: shogo82148/actions-setup-actionlint@v1
-
-      - name: actionlint (validate GitHub Actions syntax)
+      # Instala o actionlint diretamente do repositório oficial (sem depender de uma action de terceiros)
+      - name: Install actionlint
+        shell: bash
         run: |
           set -euo pipefail
-          # Varre todos os workflows e mostra todos os problemas
+          curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+            | bash -s -- latest /usr/local/bin
+          actionlint --version
+
+      - name: actionlint (validate GitHub Actions syntax)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Varre todos os workflows e mostra todos os problemas de uma vez
           actionlint -color -verbose
 
       - name: Install yamllint
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y yamllint
 
       - name: yamllint (validate YAML)
+        shell: bash
         run: |
-          # Usa um conjunto de regras menos rígido para evitar travar por comprimento de linha
+          set -euo pipefail
+          # Regras menos rígidas para não travar por comprimento de linha
           cat > .yamllint.yml <<'YAML'
           extends: default
           rules:
