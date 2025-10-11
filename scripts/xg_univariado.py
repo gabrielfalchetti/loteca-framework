@@ -1,42 +1,54 @@
 # scripts/xg_univariado.py
-from __future__ import annotations
-import argparse, os, pickle
+import argparse, sys, os
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import brier_score_loss, log_loss
-from sklearn.model_selection import train_test_split
+import numpy as np
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Treino univariado (usa apenas uma feature transformada das odds).")
-    ap.add_argument("--train", default="data/training/historico.csv")
-    ap.add_argument("--outdir", default="data/models/ml_new/univariado")
-    ap.add_argument("--target", default="target_home_win")
-    ap.add_argument("--test_size", type=float, default=0.2)
+REQ_COLS = ["team_home","team_away","odds_home","odds_draw","odds_away"]
+
+def implied_probs(row):
+    # Probabilidades implícitas com ajuste de overround
+    inv = np.array([1/row["odds_home"], 1/row["odds_draw"], 1/row["odds_away"]], dtype=float)
+    s = inv.sum()
+    if s <= 0:
+        return pd.Series([np.nan, np.nan, np.nan], index=["p_home","p_draw","p_away"])
+    p = inv / s
+    return pd.Series({"p_home":p[0], "p_draw":p[1], "p_away":p[2]})
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--debug", dest="debug", action="store_true")
     args = ap.parse_args()
 
-    os.makedirs(args.outdir, exist_ok=True)
-    df = pd.read_csv(args.train)
+    out_dir = args.rodada
+    cons = os.path.join(out_dir, "odds_consensus.csv")
+    if not os.path.exists(cons):
+        sys.exit("odds_consensus.csv not found")
 
-    # Feature univariada simples: 'price' do mandante => 1/home_odds (proxy de prob)
-    df = df.dropna(subset=["home_odds"])
-    X = pd.DataFrame({"inv_home_price": 1.0 / df["home_odds"].astype(float)})
-    y = df[args.target].astype(int)
+    df = pd.read_csv(cons)
+    for c in REQ_COLS:
+        if c not in df.columns:
+            sys.exit(f"missing column '{c}' in odds_consensus.csv")
 
-    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=args.test_size, random_state=42, stratify=y)
-    clf = HistGradientBoostingClassifier(random_state=42)
-    clf.fit(Xtr, ytr)
-    proba = clf.predict_proba(Xte)[:, 1]
+    probs = df.apply(implied_probs, axis=1)
+    dfu = pd.concat([df[["team_home","team_away"]], probs], axis=1)
 
-    # métricas rápidas
-    try:
-        print("[xg_uni] logloss:", log_loss(yte, proba))
-    except Exception:
-        pass
-    print("[xg_uni] brier:", brier_score_loss(yte, proba))
+    # Heurística neutra p/ xG derivada das probabilidades (sem “inventar” dados externos):
+    # média de gols do jogo ~ 2.4; divide por “força” de cada lado ~ prob de não-perder
+    mean_goals = 2.4
+    strength_home = dfu["p_home"] + 0.5*dfu["p_draw"]
+    strength_away = dfu["p_away"] + 0.5*dfu["p_draw"]
+    total = strength_home + strength_away
+    # Evita divisão por zero
+    total = total.replace(0, np.nan)
 
-    with open(os.path.join(args.outdir, "model.pkl"), "wb") as f:
-        pickle.dump(clf, f)
-    print(f"[xg_uni] salvo -> {os.path.join(args.outdir,'model.pkl')}")
+    dfu["xg_home_uni"] = mean_goals * (strength_home / total)
+    dfu["xg_away_uni"] = mean_goals * (strength_away / total)
+
+    out = os.path.join(out_dir, "xg_univariate.csv")
+    dfu.to_csv(out, index=False)
+    if args.debug:
+        print(dfu.head())
 
 if __name__ == "__main__":
     main()
