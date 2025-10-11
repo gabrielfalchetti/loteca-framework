@@ -26,33 +26,38 @@ env:
 
 jobs:
   end2end:
-    name: End2End pipeline (strict, single job)
+    name: End2End pipeline (STRICT • tudo em 1 job)
     runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
+
     steps:
-      # ---------- Checkout ----------
+      # ============== Checkout ==============
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- Lint (yamllint + actionlint) ----------
+      # ============== Lint rápido (não bloqueia) ==============
       - name: Install yamllint
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y yamllint
       - name: Run yamllint
+        continue-on-error: true
         run: |
           yamllint .github/workflows/*.yml || true
+
       - name: Install actionlint
         run: |
-          curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- -b "${HOME}/.local/bin" latest
-          echo "${HOME}/.local/bin" >> $GITHUB_PATH
+          curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+          | bash -s -- -b "${HOME}/.local/bin" latest
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
       - name: Run actionlint (all workflows)
+        continue-on-error: true
         run: |
           actionlint -color -verbose || true
 
-      # ---------- Python ----------
+      # ============== Python ==============
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -71,7 +76,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --upgrade unidecode pandas numpy scikit-learn xgboost pyyaml
 
-      # ---------- INIT (OUT_DIR fix) ----------
+      # ============== INIT (gera OUT_DIR e valida entradas) ==============
       - name: Init run id & dirs
         id: init
         run: |
@@ -87,14 +92,16 @@ jobs:
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           fi
 
-          mkdir -p "data/in" "$OUT_DIR"
-          [ -s "data/in/aliases.json" ] || echo '{"teams": {}}' > data/in/aliases.json
+          mkdir -p "data/in" "${OUT_DIR}"
+
+          # insumos obrigatórios
           [ -s "data/in/matches_source.csv" ] || { echo "::error::Arquivo obrigatório ausente: data/in/matches_source.csv"; exit 2; }
+          [ -s "data/in/aliases.json" ] || echo '{"teams": {}}' > data/in/aliases.json
 
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      # ---------- NORMALIZAÇÃO + VALIDAÇÃO ----------
+      # ============== Normalização & Validação de nomes (pré-ingest) ==============
       - name: Normalize + validate whitelist names (pre-ingest)
         run: |
           set -euo pipefail
@@ -179,10 +186,11 @@ jobs:
 
           LINES=$(wc -l < "$DST_NORM" | tr -d " ")
           [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
+
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_NORM" || true
 
-      # ---------- INGEST (obrigatório nas 2 APIs) ----------
+      # ============== Ingest — API-Football (OBRIGATÓRIA) ==============
       - name: Ingest API-Football (RapidAPI)
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -206,6 +214,7 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
           done
 
+      # ============== Ingest — TheOddsAPI (OBRIGATÓRIA) ==============
       - name: Ingest TheOddsAPI
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -230,7 +239,7 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
           done
 
-      # ---------- CONSENSO (strict) ----------
+      # ============== Consenso (STRICT) ==============
       - name: Build consensus odds (strict)
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -246,7 +255,7 @@ jobs:
           done
           head -n 20 "$OUT_FILE" || true
 
-      # ---------- FEATURES ----------
+      # ============== Features (uni e bivariadas) ==============
       - name: Build features (univariate + bivariate)
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -257,7 +266,7 @@ jobs:
           python -m scripts.features_univariate --rodada "${OUT_DIR}"
           python -m scripts.features_bivariate  --rodada "${OUT_DIR}"
 
-      # ---------- MODELOS ----------
+      # ============== Modelos (XGB uni/bivariado) ==============
       - name: Train + predict (XGB Univariate)
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -274,7 +283,7 @@ jobs:
           [ -f scripts/xgb_bivariate.py ] || { echo "::error::scripts/xgb_bivariate.py not found"; exit 8; }
           python -m scripts.xgb_bivariate --rodada "${OUT_DIR}"
 
-      # ---------- CALIBRAÇÃO ----------
+      # ============== Calibração ==============
       - name: Calibrate probabilities
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -283,7 +292,7 @@ jobs:
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
           python -m scripts.calibrate_probs --rodada "${OUT_DIR}"
 
-      # ---------- KELLY ----------
+      # ============== Kelly & Stake ==============
       - name: Kelly & stake sizing
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -303,7 +312,7 @@ jobs:
             --topn "${KELLY_TOP_N}" \
             --round-to "${ROUND_TO}"
 
-      # ---------- TICKET ----------
+      # ============== Ticket da Loteca ==============
       - name: Compose Loteca ticket
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -315,7 +324,7 @@ jobs:
           echo "==== PREVIEW TICKET ===="
           column -s, -t < "${OUT_DIR}/loteca_ticket.csv" | head -n 30 || true
 
-      # ---------- Artefatos ----------
+      # ============== Artefatos ==============
       - name: Upload artifacts (rodada)
         uses: actions/upload-artifact@v4
         with:
