@@ -1,0 +1,360 @@
+---
+name: Loteca Super End2End (Odds + XG + Kelly)
+
+on:
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Debug mode?"
+        required: false
+        default: "false"
+  push:
+    paths:
+      - ".github/workflows/loteca_super_end2end.yml"
+      - "scripts/**"
+      - "data/**"
+      - "requirements*.txt"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_WARN_SCRIPT_LOCATION: "1"
+  SEASON: "2025"
+  REGIONS: "uk,eu,us,au"
+  LOOKAHEAD_DAYS: "3"
+  BANKROLL: "1000"
+  KELLY_FRACTION: "0.5"
+  KELLY_CAP: "0.1"
+  KELLY_TOP_N: "14"
+  ROUND_TO: "1"
+
+jobs:
+  lint:
+    name: Lint workflows (yamllint + actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y yamllint
+
+      - name: Run yamllint
+        run: |
+          yamllint .github/workflows/*.yml || true
+
+      - name: Install actionlint
+        uses: rhysd/actionlint@v1
+
+      - name: Run actionlint (all workflows)
+        run: |
+          actionlint -color
+
+  super-end2end:
+    name: End2End pipeline
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install deps
+        run: |
+          set -euo pipefail
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          # Garantias mínimas p/ scripts usados abaixo
+          pip install --upgrade \
+            pandas numpy scikit-learn unidecode pyyaml
+
+      - name: Bootstrap run context
+        id: ctx
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="$(date +%s)"
+          echo "RUN_ID=${RUN_ID}"            >> "$GITHUB_OUTPUT"
+          echo "OUT_DIR=data/out/${RUN_ID}"  >> "$GITHUB_OUTPUT"
+          echo "OUT_DIR=data/out/${RUN_ID}"  >> "$GITHUB_ENV"
+
+          if [ "${{ github.event.inputs.debug || 'false' }}" = "true" ] || \
+             [ "${DEBUG:-}" = "true" ] || [ "${DEBUG:-}" = "1" ]; then
+            echo "DEBUG_FLAG=--debug" >> "$GITHUB_ENV"
+          else
+            echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
+          fi
+
+          mkdir -p "data/in" "${{ steps.ctx.outputs.OUT_DIR }}"
+
+          # Garante arquivos de entrada mínimos
+          [ -s "data/in/aliases.json" ] || echo '{"teams": {}}' > data/in/aliases.json
+          if [ ! -s "data/in/matches_source.csv" ]; then
+            echo "::error::Arquivo obrigatório ausente: data/in/matches_source.csv"
+            exit 2
+          fi
+
+      - name: Validar e normalizar nomes (antes do ingest)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="data/in/matches_source.csv"
+          DST_RAW="${OUT_DIR}/matches_whitelist_raw.csv"
+          DST_NORM="${OUT_DIR}/matches_whitelist.csv"
+
+          tr -d '\r' < "$SRC" | sed -E 's/[[:space:]]+/ /g; s/ *, */,/g; s/^ //; s/ $//' > "$DST_RAW"
+
+          header="$(head -n1 "$DST_RAW")"
+          h_low="$(echo "$header" | tr '[:upper:]' '[:lower:]')"
+          for need in match_id home away; do
+            echo "$h_low" | grep -qiE "(^|,)$need(,|$)" \
+              || { echo "::error::missing column '$need' in matches_source.csv"; exit 2; }
+          done
+
+          awk -F',' -v OFS=',' '
+            function rmuf(s){ gsub(/\/[A-Za-z]{2}($|[^A-Za-z])/, "", s); return s }
+            function deacc(s){
+              gsub(/á|à|ã|â|ä/,"a",s); gsub(/Á|À|Ã|Â|Ä/,"A",s);
+              gsub(/é|ê|è|ë/,"e",s);  gsub(/É|Ê|È|Ë/,"E",s);
+              gsub(/í|î|ì|ï/,"i",s);  gsub(/Í|Î|Ì|Ï/,"I",s);
+              gsub(/ó|ô|ò|õ|ö/,"o",s); gsub(/Ó|Ô|Ò|Õ|Ö/,"O",s);
+              gsub(/ú|û|ù|ü/,"u",s);  gsub(/Ú|Û|Ù|Ü/,"U",s);
+              gsub(/ç/,"c",s);        gsub(/Ç/,"C",s);
+              gsub(/ñ/,"n",s);        gsub(/Ñ/,"N",s);
+              return s
+            }
+            function trim(s){ sub(/^ +/,"",s); sub(/ +$/,"",s); return s }
+            function map_pt_en(s,  l){
+              l=tolower(s)
+              if(l=="estonia") return "Estonia"
+              if(l=="italia") return "Italy"
+              if(l=="bulgaria") return "Bulgaria"
+              if(l=="turquia") return "Turkey"
+              if(l=="espanha") return "Spain"
+              if(l=="georgia") return "Georgia"
+              if(l=="servia" || l=="serbia/ser" || l=="serbia") return "Serbia"
+              if(l=="albania") return "Albania"
+              if(l=="portugal") return "Portugal"
+              if(l=="irlanda") return "Ireland"
+              if(l=="holanda" || l=="paises baixos") return "Netherlands"
+              if(l=="finlandia") return "Finland"
+              if(l=="romenia") return "Romania"
+              if(l=="austria") return "Austria"
+              if(l=="dinamarca") return "Denmark"
+              if(l=="grecia") return "Greece"
+              if(l=="lituania") return "Lithuania"
+              if(l=="polonia") return "Poland"
+              if(l=="ponte preta") return "Ponte Preta"
+              if(l=="guarani") return "Guarani"
+              if(l=="palmeiras") return "Palmeiras"
+              if(l=="juventude") return "Juventude"
+              if(l=="criciuma") return "Criciuma"
+              if(l=="america/mg" || l=="america mg" || l=="america-mg" || l=="america mineiro") return "America Mineiro"
+              if(l=="cuiaba") return "Cuiaba"
+              if(l=="coritiba") return "Coritiba"
+              if(l=="novorizontino" || l=="gremio novorizontino" || l=="grêmio novorizontino") return "Gremio Novorizontino"
+              if(l=="operario" || l=="operario pr" || l=="operario/pr" || l=="operário/pr") return "Operario PR"
+              return s
+            }
+            NR==1{
+              for(i=1;i<=NF;i++){
+                k=tolower($i);
+                if(k=="match_id") mi=i;
+                if(k=="home") hi=i;
+                if(k=="away") ai=i;
+              }
+              if(!(mi&&hi&&ai)){ print "::error::header mapping failed"; exit 2 }
+              print "match_id","home","away";
+              next
+            }
+            {
+              mid=$mi; home=$hi; away=$ai;
+              home=rmuf(home); away=rmuf(away);
+              home=deacc(home); away=deacc(away);
+              home=trim(home);  away=trim(away);
+              home=map_pt_en(home); away=map_pt_en(away);
+              if(mid=="" || home=="" || away==""){ print "::error::empty field on line " NR; exit 2 }
+              if(seen[mid]++){ print "::error::duplicate match_id: " mid; exit 2 }
+              print mid,home,away
+            }
+          ' "$DST_RAW" > "$DST_NORM"
+
+          LINES=$(wc -l < "$DST_NORM" | tr -d " ")
+          [ "$LINES" -ge 2 ] || { echo "::error::whitelist empty after normalization"; exit 3; }
+
+          echo "===== Preview normalized whitelist ====="
+          head -n 30 "$DST_NORM" || true
+
+      - name: Ingest — API-Football (obrigatória)
+        env:
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -f scripts/ingest_odds_apifootball_rapidapi.py ] \
+            || { echo "::error::scripts/ingest_odds_apifootball_rapidapi.py not found"; exit 5; }
+
+          a=0
+          until [ $a -ge 3 ]; do
+            python -m scripts.ingest_odds_apifootball_rapidapi \
+              --rodada "${OUT_DIR}" \
+              --season "${SEASON}" \
+              ${DEBUG_FLAG} && break
+            a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
+          done
+          OUT="${OUT_DIR}/odds_apifootball.csv"
+          test -s "$OUT" || { echo "::error::odds_apifootball.csv not generated"; exit 5; }
+          header="$(head -n1 "$OUT" | tr -d '\r')"
+          for c in match_id home away odds_home odds_draw odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
+          done
+
+      - name: Ingest — TheOddsAPI (obrigatória)
+        env:
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -f scripts/ingest_odds_theoddsapi.py ] \
+            || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
+
+          a=0
+          until [ $a -ge 3 ]; do
+            python -m scripts.ingest_odds_theoddsapi \
+              --rodada "${OUT_DIR}" \
+              --regions "${REGIONS}" \
+              --aliases "data/in/aliases.json" \
+              ${DEBUG_FLAG} && break
+            a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
+          done
+
+          OUT="${OUT_DIR}/odds_theoddsapi.csv"
+          test -s "$OUT" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
+          header="$(head -n1 "$OUT" | tr -d '\r')"
+          for c in match_id home away odds_home odds_draw odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
+          done
+
+      - name: Consenso das odds (estrito)
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -f scripts/consensus_odds_safe.py ] \
+            || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
+
+          python -m scripts.consensus_odds_safe \
+            --rodada "${OUT_DIR}" --strict
+
+          OUT_FILE="${OUT_DIR}/odds_consensus.csv"
+          test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv not generated"; exit 6; }
+          header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
+          for c in team_home team_away odds_home odds_draw odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
+          done
+          head -n 20 "$OUT_FILE" || true
+
+      - name: XG Univariado
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/xg_univar.py ]; then
+            echo "::error::scripts/xg_univar.py not found"
+            exit 7
+          fi
+          python -m scripts.xg_univar \
+            --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          test -s "${OUT_DIR}/xg_univar.csv" \
+            || { echo "::error::xg_univar.csv not generated"; exit 7; }
+
+      - name: XG Bivariado
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/xg_bivar.py ]; then
+            echo "::error::scripts/xg_bivar.py not found"
+            exit 8
+          fi
+          python -m scripts.xg_bivar \
+            --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          test -s "${OUT_DIR}/xg_bivar.csv" \
+            || { echo "::error::xg_bivar.csv not generated"; exit 8; }
+
+      - name: Calibração de probabilidades
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/calibrate_odds.py ]; then
+            echo "::error::scripts/calibrate_odds.py not found"
+            exit 9
+          fi
+          python -m scripts.calibrate_odds \
+            --rodada "${OUT_DIR}" \
+            --consensus "${OUT_DIR}/odds_consensus.csv" \
+            --xg-univar "${OUT_DIR}/xg_univar.csv" \
+            --xg-bivar "${OUT_DIR}/xg_bivar.csv" \
+            ${DEBUG_FLAG}
+          test -s "${OUT_DIR}/calibrated_probs.csv" \
+            || { echo "::error::calibrated_probs.csv not generated"; exit 9; }
+
+      - name: Kelly staking
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/kelly.py ]; then
+            echo "::error::scripts/kelly.py not found"
+            exit 10
+          fi
+          python -m scripts.kelly \
+            --rodada "${OUT_DIR}" \
+            --bankroll "${BANKROLL}" \
+            --kelly-fraction "${KELLY_FRACTION}" \
+            --kelly-cap "${KELLY_CAP}" \
+            --top-n "${KELLY_TOP_N}" \
+            --round-to "${ROUND_TO}" \
+            ${DEBUG_FLAG}
+          test -s "${OUT_DIR}/kelly_recommendations.csv" \
+            || { echo "::error::kelly_recommendations.csv not generated"; exit 10; }
+
+      - name: Montar Cartão da Loteca
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/build_ticket.py ]; then
+            echo "::error::scripts/build_ticket.py not found"
+            exit 11
+          fi
+          python -m scripts.build_ticket \
+            --rodada "${OUT_DIR}" ${DEBUG_FLAG}
+          test -s "${OUT_DIR}/loteca_ticket.csv" \
+            || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
+          echo "==== Prévia do cartão ===="
+          column -s, -t "${OUT_DIR}/loteca_ticket.csv" | head -n 30 || true
+
+      - name: Upload artefatos
+        uses: actions/upload-artifact@v4
+        with:
+          name: loteca-super-end2end-${{ steps.ctx.outputs.RUN_ID }}
+          path: |
+            ${{ steps.ctx.outputs.OUT_DIR }}/*
+          if-no-files-found: error
