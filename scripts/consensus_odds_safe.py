@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Gera odds de consenso a partir dos arquivos:
+Gera odds de consenso a partir de:
   - <rodada>/odds_theoddsapi.csv
   - <rodada>/odds_apifootball.csv
 
@@ -12,24 +12,20 @@ Saída:
 Colunas:
   team_home, team_away, odds_home, odds_draw, odds_away
 
-Regras:
- - Junta por nomes normalizados (tolerante a acentos, sufixos tipo "FC", siglas de estado etc.).
- - Se houver múltiplas fontes, usa MEDIANA por mercado (mais robusta).
- - Em modo --strict, falha se QUALQUER jogo da whitelist não tiver odds em nenhuma fonte.
+Novidades:
+ - --ignore-match-ids "1,7,14" -> ignora esses jogos da whitelist
+ - Junta por nomes normalizados (tolerante a acentos, FC/AA etc.)
+ - Em --strict, falha se algum jogo (após ignorados) ficar sem odds
 """
 
 import os
 import re
 import sys
-import json
-import math
 import argparse
 from unicodedata import normalize as _ucnorm
-
 import pandas as pd
 
 REQ_COLS = ["team_home", "team_away", "odds_home", "odds_draw", "odds_away"]
-WL_MAP = {"match_id": "match_id", "home": "team_home", "away": "team_away"}
 
 STOPWORD_TOKENS = {
     "aa","ec","ac","sc","fc","afc","cf","ca","cd","ud",
@@ -37,7 +33,8 @@ STOPWORD_TOKENS = {
 }
 
 def log(level, msg):
-    print(f"[consensus] {msg}" if level == "INFO" else f"[consensus][{level}] {msg}", flush=True)
+    tag = "" if level == "INFO" else f"[{level}] "
+    print(f"[consensus]{tag}{msg}", flush=True)
 
 def _deaccent(s: str) -> str:
     return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
@@ -50,27 +47,14 @@ def norm_key(name: str) -> str:
     return s
 
 def norm_key_tokens(name: str) -> str:
-    """Normalização *por tokens* removendo stopwords comuns (AA, FC, siglas de estado etc.)."""
     toks = [t for t in re.split(r"\s+", norm_key(name)) if t and t not in STOPWORD_TOKENS]
     return " ".join(toks)
 
-def read_csv_safe(path: str, expected_cols=None):
+def read_csv_safe(path: str):
     if not os.path.isfile(path):
         return pd.DataFrame()
     try:
-        df = pd.read_csv(path)
-        # uniformizar nomes esperados se presentes
-        if expected_cols:
-            for c in expected_cols:
-                if c not in df.columns:
-                    # tentar mapear variantes comuns
-                    alt = None
-                    lower_cols = {col.lower(): col for col in df.columns}
-                    if c in lower_cols:
-                        alt = lower_cols[c]
-                    if alt and alt != c:
-                        df[c] = df[alt]
-        return df
+        return pd.read_csv(path)
     except Exception as e:
         log("WARN", f"Falha lendo {path}: {e}")
         return pd.DataFrame()
@@ -87,28 +71,27 @@ def median_ignore_none(vals):
         return None
     f.sort()
     n = len(f)
-    mid = n // 2
-    if n % 2 == 1:
-        return f[mid]
-    return (f[mid - 1] + f[mid]) / 2.0
+    m = n // 2
+    return f[m] if n % 2 else (f[m-1] + f[m]) / 2.0
 
-def build_index(df: pd.DataFrame, home_col="home", away_col="away"):
+def build_index(df: pd.DataFrame):
     """
-    Recebe DF com colunas: [match_id?, home, away, odds_home, odds_draw, odds_away]
-    Retorna dicionário indexado por (norm_tokens(home)|norm_tokens(away)) -> lista de odds (para mediana).
+    Recebe DF com colunas: [match_id?, home|team_home, away|team_away, odds_*]
+    Retorna index: "homeTok|awayTok" -> [(oh,od,oa), ...]
     """
     idx = {}
     if df.empty:
         return idx
-    # renomear possíveis variantes
-    rename_map = {}
-    if "team_home" in df.columns: rename_map["team_home"] = "home"
-    if "team_away" in df.columns: rename_map["team_away"] = "away"
-    df = df.rename(columns=rename_map)
+    # normaliza nomes de colunas
+    cols = {c.lower(): c for c in df.columns}
+    home_col = cols.get("home", cols.get("team_home"))
+    away_col = cols.get("away", cols.get("team_away"))
+    if not home_col or not away_col:
+        return idx
 
     for _, r in df.iterrows():
-        h = str(r.get("home", "") or "")
-        a = str(r.get("away", "") or "")
+        h = str(r.get(home_col, "") or "")
+        a = str(r.get(away_col, "") or "")
         if not h or not a:
             continue
         k = f"{norm_key_tokens(h)}|{norm_key_tokens(a)}"
@@ -123,8 +106,8 @@ def build_index(df: pd.DataFrame, home_col="home", away_col="away"):
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    ap.add_argument("--strict", action="store_true", help="Falha se algum jogo ficar sem odds")
-    ap.add_argument("--aliases", default=os.getenv("ALIASES_JSON", "data/aliases.json"))
+    ap.add_argument("--strict", action="store_true", help="Falha se algum jogo (não ignorado) ficar sem odds")
+    ap.add_argument("--ignore-match-ids", default="", help='Lista separada por vírgula. Ex: "1,7,14"')
     return ap.parse_args()
 
 def load_whitelist(path: str) -> pd.DataFrame:
@@ -132,37 +115,53 @@ def load_whitelist(path: str) -> pd.DataFrame:
         log("CRITICAL", f"Whitelist não encontrada: {path}")
         sys.exit(6)
     df = pd.read_csv(path)
-    # manter colunas esperadas
+    # renomeia para colunas padrão de saída
     df = df.rename(columns={"home": "team_home", "away": "team_away"})
     return df[["match_id", "team_home", "team_away"]].copy()
+
+def parse_ignore_ids(s: str):
+    ids = set()
+    for part in re.split(r"[,\s]+", s.strip()):
+        if part:
+            ids.add(part.strip())
+    return ids
 
 def main():
     args = parse_args()
     rodada = args.rodada
     wl_path = os.path.join(rodada, "matches_whitelist.csv")
+
     log("INFO", "==================================================")
-    log("INFO", f"STRICT MODE — RODADA: {rodada}" if args.strict else f"RODADA: {rodada}")
+    log("INFO", f"{'STRICT MODE — ' if args.strict else ''}RODADA: {rodada}")
     log("INFO", "==================================================")
 
     wl = load_whitelist(wl_path)
+
+    ignore_ids = parse_ignore_ids(args.ignore_match_ids)
+    if ignore_ids:
+        before = len(wl)
+        wl = wl[~wl["match_id"].astype(str).isin(ignore_ids)].copy()
+        skipped = before - len(wl)
+        log("INFO", f"Ignorando {skipped} jogo(s) por --ignore-match-ids: {sorted(ignore_ids)}")
+
     log("INFO", f"whitelist: {wl_path}  linhas={len(wl)}  mapping={{'match_id':'match_id','home':'home','away':'away'}}")
 
-    # ler fontes
+    # fontes
     p_theodds = os.path.join(rodada, "odds_theoddsapi.csv")
     p_apifoot = os.path.join(rodada, "odds_apifootball.csv")
-    df_theodds = read_csv_safe(p_theodds)
-    df_apifoot = read_csv_safe(p_apifoot)
+    df_the = read_csv_safe(p_theodds)
+    df_api = read_csv_safe(p_apifoot)
+    n_the = 0 if df_the is None else len(df_the)
+    n_api = 0 if df_api is None else len(df_api)
+    log("INFO", f"fontes: theodds={n_the}  apifoot={n_api}")
 
-    log("INFO", f"fontes: theodds={0 if df_theodds is None else len(df_theodds)}  apifoot={0 if df_apifoot is None else len(df_apifoot)}")
-
-    idx_the = build_index(df_theodds)
-    idx_api = build_index(df_apifoot)
+    idx_the = build_index(df_the)
+    idx_api = build_index(df_api)
 
     out_rows = []
     missing = []
 
     for _, r in wl.iterrows():
-        mid = r["match_id"]
         th = str(r["team_home"])
         ta = str(r["team_away"])
         key = f"{norm_key_tokens(th)}|{norm_key_tokens(ta)}"
@@ -174,7 +173,7 @@ def main():
             cands.extend(idx_api[key])
 
         if not cands:
-            missing.append((mid, th, ta))
+            missing.append((r["match_id"], th, ta))
             continue
 
         oh = median_ignore_none([x[0] for x in cands])
@@ -182,7 +181,7 @@ def main():
         oa = median_ignore_none([x[2] for x in cands])
 
         if oh is None or od is None or oa is None:
-            missing.append((mid, th, ta))
+            missing.append((r["match_id"], th, ta))
             continue
 
         out_rows.append({
@@ -200,7 +199,7 @@ def main():
         print("##[error][CRITICAL] Jogos sem odds após consenso (modo estrito ligado).")
         print("match_id   team_home team_away")
         for mid, th, ta in missing:
-            print(f"{mid:>7} {th}   {ta}")
+            print(f"{str(mid):>7} {th}   {ta}")
         sys.exit(6)
 
     if not out_rows:
@@ -209,7 +208,7 @@ def main():
 
     log("INFO", f"consenso gerado: {out_path}  linhas={len(out_rows)}  missing={len(missing)}")
     if missing:
-        log("WARN", f"Jogos sem odds: {len(missing)} -> {[m[0] for m in missing]}")
+        log("WARN", f"Jogos sem odds (não ignorados): {len(missing)} -> {[m[0] for m in missing]}")
     return 0
 
 if __name__ == "__main__":
