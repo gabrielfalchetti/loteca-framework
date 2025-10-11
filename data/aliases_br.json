@@ -168,3 +168,34 @@ Boa Esporte (MG),Boa Esporte
 Uberaba (MG),Uberaba
 Tupi (MG),Tupi
 Nacional de Muriaé,Nacional Muriae
+{
+  "teams": {
+    "Bulgaria": ["Bulgária"],
+    "Turkey": ["Turquia", "Türkiye"],
+    "Romania": ["Romênia", "Romenia"],
+    "Austria": ["Áustria", "Austria"],
+    "Denmark": ["Dinamarca"],
+    "Greece": ["Grécia", "Grecia"],
+    "Lithuania": ["Lituânia", "Lituania"],
+    "Poland": ["Polônia", "Polonia"],
+
+    "Gremio Novorizontino": [
+      "Novorizontino",
+      "Grêmio Novorizontino",
+      "Novorizontino/SP",
+      "Gremio Novorizontino/SP",
+      "Grêmio Novorizontino/SP"
+    ],
+    "Operario PR": [
+      "Operário",
+      "Operário/PR",
+      "Operario-PR",
+      "Operario PR",
+      "Operario Ferroviario",
+      "Operário Ferroviário",
+      "Operário Ferroviário PR",
+      "Operario Ferroviario PR",
+      "Operario/PR"
+    ]
+  }
+}
