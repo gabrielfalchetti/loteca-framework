@@ -25,22 +25,22 @@ jobs:
       X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
 
     steps:
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
+      - name: "Setup Python 3.11"
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Cache pip
+      - name: "Cache pip"
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
-      - name: Install dependencies (strict)
+      - name: "Install dependencies (strict)"
         shell: bash
         run: |
           set -euo pipefail
@@ -51,7 +51,7 @@ jobs:
             pip install requests pandas numpy pyyaml unidecode
           fi
 
-      - name: Prepare run folders and env
+      - name: "Prepare run folders and env"
         id: prep
         shell: bash
         run: |
@@ -83,7 +83,7 @@ jobs:
             echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           fi
 
-      - name: Normalize and validate matches_source -> whitelist
+      - name: "Normalize and validate matches_source -> whitelist"
         shell: bash
         run: |
           set -euo pipefail
@@ -177,7 +177,7 @@ jobs:
           echo "===== Preview normalized whitelist ====="
           head -n 30 "$DST_FINAL" || true
 
-      - name: Validate team names before ingest (pre-flight)
+      - name: "Validate team names before ingest (pre-flight)"
         shell: bash
         run: |
           set -euo pipefail
@@ -185,7 +185,7 @@ jobs:
           echo "=== Unique teams from whitelist ==="
           awk -F',' 'NR>1{print $2; print $3}' "$WL" | sort -u | nl -ba
 
-      - name: Ingest THEODDSAPI (mandatory)
+      - name: "Ingest THEODDSAPI (mandatory)"
         shell: bash
         run: |
           set -euo pipefail
@@ -208,7 +208,7 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
           done
 
-      - name: Ingest API-Football (RapidAPI, mandatory)
+      - name: "Ingest API-Football (RapidAPI, mandatory)"
         shell: bash
         run: |
           set -euo pipefail
@@ -230,7 +230,7 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
           done
 
-      - name: Consensus odds (STRICT)
+      - name: "Consensus odds (STRICT)"
         shell: bash
         run: |
           set -euo pipefail
@@ -247,20 +247,21 @@ jobs:
           echo "=== Preview odds_consensus.csv ==="
           head -n 20 "$OUT_FILE" || true
 
-      - name: Calibrate probabilities from consensus
+      - name: "Calibrate probabilities from consensus"
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
+import os
 import pandas as pd, numpy as np
-from unidecode import unidecode
 from pathlib import Path
 
-out_dir = Path("${OUT_DIR}")
+out_dir = Path(os.environ["OUT_DIR"])
 wl = pd.read_csv(out_dir/"matches_whitelist.csv")
 cons = pd.read_csv(out_dir/"odds_consensus.csv")
 
 def norm(s):
+    from unidecode import unidecode
     return unidecode(str(s).strip().lower())
 
 wl["home_n"] = wl["home"].map(norm)
@@ -272,9 +273,8 @@ m = wl.merge(cons, on=["home_n","away_n"], how="inner")
 if m.empty:
     raise SystemExit("::error::no matches joined between whitelist and consensus. Check name normalization.")
 
-# implied probs and margin normalization
 for col in ("odds_home","odds_draw","odds_away"):
-    if (m[col] <= 1).any():
+    if (m[col].astype(float) <= 1).any():
         raise SystemExit(f"::error::invalid odds <=1 found in consensus: column {col}")
 
 inv = pd.DataFrame({
@@ -293,17 +293,17 @@ print("calibrated_probs.csv written with", len(m), "rows")
 PY
           test -s "${OUT_DIR}/calibrated_probs.csv" || { echo "::error::calibrated_probs.csv not generated"; exit 7; }
 
-      - name: XG - Univariate (feature engineering)
+      - name: "XG - Univariate (feature engineering)"
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
+import os
 import pandas as pd
 from pathlib import Path
-out_dir = Path("${OUT_DIR}")
+out_dir = Path(os.environ["OUT_DIR"])
 df = pd.read_csv(out_dir/"calibrated_probs.csv")
 
-# Proxy xG simples (engineering, não oficial)
 df["xg_home"] = 1.8*df["p_home"] + 0.9*df["p_draw"]
 df["xg_away"] = 1.8*df["p_away"] + 0.9*df["p_draw"]
 
@@ -313,14 +313,15 @@ print("xg_univariate.csv written with", len(df))
 PY
           test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 8; }
 
-      - name: XG - Bivariate (feature engineering)
+      - name: "XG - Bivariate (feature engineering)"
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
+import os
 import pandas as pd
 from pathlib import Path
-out_dir = Path("${OUT_DIR}")
+out_dir = Path(os.environ["OUT_DIR"])
 u = pd.read_csv(out_dir/"xg_univariate.csv")
 
 u["xg_sum"] = u["xg_home"] + u["xg_away"]
@@ -333,7 +334,7 @@ print("xg_bivariate.csv written with", len(u))
 PY
           test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 9; }
 
-      - name: Kelly stakes
+      - name: "Kelly stakes"
         shell: bash
         run: |
           set -euo pipefail
@@ -341,16 +342,17 @@ PY
           python scripts/publish_kelly.py --rodada "${OUT_DIR}" ${DEBUG_FLAG}
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv não gerado"; exit 25; }
 
-      - name: Montar Cartão Loteca
+      - name: "Montar Cartão Loteca"
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
+import os
 import pandas as pd
 from pathlib import Path
 from unidecode import unidecode
 
-out_dir = Path("${OUT_DIR}")
+out_dir = Path(os.environ["OUT_DIR"])
 wl  = pd.read_csv(out_dir/"matches_whitelist.csv")
 cal = pd.read_csv(out_dir/"calibrated_probs.csv")
 
@@ -382,7 +384,7 @@ PY
           echo "==== Preview loteca_card.txt ===="
           head -n 50 "${OUT_DIR}/loteca_card.txt" || true
 
-      - name: Upload artifacts (entire OUT_DIR)
+      - name: "Upload artifacts (entire OUT_DIR)"
         uses: actions/upload-artifact@v4
         with:
           name: loteca_${{ steps.prep.outputs.RUN_ID }}
