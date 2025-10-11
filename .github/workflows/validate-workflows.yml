@@ -1,0 +1,44 @@
+# .github/workflows/validate-workflows.yml
+name: validate-workflows
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup actionlint
+        uses: shogo82148/actions-setup-actionlint@v1
+
+      - name: actionlint (validate GitHub Actions syntax)
+        run: |
+          set -euo pipefail
+          # Varre todos os workflows e mostra todos os problemas
+          actionlint -color -verbose
+
+      - name: Install yamllint
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y yamllint
+
+      - name: yamllint (validate YAML)
+        run: |
+          # Usa um conjunto de regras menos rígido para evitar travar por comprimento de linha
+          cat > .yamllint.yml <<'YAML'
+          extends: default
+          rules:
+            line-length:
+              max: 160
+              allow-non-breakable-words: true
+              allow-non-breakable-inline-mappings: true
+            truthy:
+              level: warning
+          YAML
+          yamllint .github/workflows/*.yml
