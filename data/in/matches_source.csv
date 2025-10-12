@@ -1,15 +1,12 @@
-match_id,home,away,date
-1,Ponte Preta,Guarani/SP,Sábado
-2,Palmeiras/SP,Juventude/RS,Sábado
-3,Estônia,Itália,Sábado
-4,Bulgária,Turquia,Sábado
-5,Espanha,Geórgia,Sábado
-6,Sérvia/Ser,Albânia,Sábado
-7,Portugal,Irlanda,Sábado
-8,Novorizontino/SP,Operário/PR,Domingo
-9,Holanda,Finlândia,Domingo
-10,Criciúma/SC,América/MG,Domingo
-11,Cuiabá/MT,Coritiba/PR,Domingo
-12,Romênia,Áustria,Domingo
-13,Dinamarca,Grécia,Domingo
-14,Lituânia,Polônia,Domingo
+match_id,home,away
+1,Cuiabá,Coritiba
+2,Austin,Los Angeles
+3,Independiente,Lanus
+4,Deportivo Moron,San Martin de Tucuman
+5,Atlético Bucaramanga,Unión Magdalena
+6,Aguilas Doradas,Deportivo Pasto
+7,Nacional-PAR,Sportivo Luqueño
+8,San Francisco FC,Atletico Nacional
+9,Marquense,Aurora FC
+10,Cusco,Comerciantes Unidos
+11,The Strongest,Jorge Wilstermann
