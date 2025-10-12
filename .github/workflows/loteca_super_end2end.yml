@@ -147,7 +147,6 @@ PY
           done
           [ -n "$WL_CAND" ] || { echo "::error::Whitelist ausente. Coloque matches_whitelist.csv em data/in/"; exit 6; }
 
-          # Normalizar para ${OUT_DIR}/matches_whitelist.csv e validar colunas
           python - "$WL_CAND" "${OUT_DIR}/matches_whitelist.csv" <<'PY'
 import sys, pandas as pd, os
 src, dst = sys.argv[1], sys.argv[2]
