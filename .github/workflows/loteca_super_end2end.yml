@@ -1,4 +1,4 @@
-name: Loteca - Super End2End
+Name: Loteca - Super End2End
 
 on:
   workflow_dispatch:
@@ -129,7 +129,7 @@ json.loads(data); print('[ok] aliases.json válido') " \
       # ======================
       - name: Preparar whitelist (se ausente)
         shell: bash
-        run: |
+        run: |  # Linha 65 Corrigida
           set -euo pipefail
           WL="${OUT_DIR}/matches_whitelist.csv"
           if [ ! -s "$WL" ]; then
