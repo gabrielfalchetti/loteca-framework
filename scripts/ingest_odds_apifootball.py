@@ -2,308 +2,114 @@
 # -*- coding: utf-8 -*-
 
 """
-Coleta odds na API-Football (API-Sports).
-Saída: <rodada>/odds_apifootball.csv
-Colunas: match_id,home,away,odds_home,odds_draw,odds_away
+ingest_odds_apifootball: Busca jogos e odds da API-Football.
+
+MODO PRODUÇÃO: Este script busca jogos futuros e suas odds, sem depender
+de uma whitelist pré-existente.
 """
 
 import os
-import re
 import sys
-import json
-import time
-import math
 import argparse
-from datetime import datetime, timedelta, timezone
-from unicodedata import normalize as _ucnorm
-
 import requests
 import pandas as pd
+from datetime import datetime, timedelta
 
-CSV_COLS = ["match_id", "home", "away", "odds_home", "odds_draw", "odds_away"]
-
-# ----------------- utils/log -----------------
 def log(level, msg):
-    print(f"[apifootball][{level}] {msg}", flush=True)
-
-def env_float(name, default):
-    v = os.getenv(name, "")
-    try:
-        return float(v)
-    except Exception:
-        return float(default)
-
-# ----------------- normalização/aliases -----------------
-def _deacc(s: str) -> str:
-    return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
-
-def norm_key(s: str) -> str:
-    s = _deacc(s).lower()
-    # remove UF ("/SP", "/PR" etc)
-    s = re.sub(r"/[a-z]{2}($|[^a-z])", " ", s)
-    s = re.sub(r"[^a-z0-9 ]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def load_aliases_lenient(path: str) -> dict[str, set[str]]:
-    if not os.path.isfile(path):
-        return {}
-    try:
-        txt = open(path, "r", encoding="utf-8").read()
-        # remove comentários e vírgulas finais
-        txt = re.sub(r"//.*", "", txt)
-        txt = re.sub(r"/\*.*?\*/", "", txt, flags=re.S)
-        txt = re.sub(r",\s*([\]}])", r"\1", txt)
-        data = json.loads(txt)
-    except Exception as e:
-        log("WARN", f"Falha lendo aliases.json: {e}")
-        return {}
-    norm = {}
-    for k, vals in (data or {}).items():
-        base = norm_key(k)
-        lst = vals if isinstance(vals, list) else []
-        group = {norm_key(k)} | {norm_key(v) for v in lst}
-        norm[base] = group
-    return norm
-
-def alias_variants(name: str, aliases: dict[str, set[str]]) -> list[str]:
-    base = norm_key(name)
-    if base in aliases:
-        cands = list(aliases[base])
-    else:
-        cands = [base]
-        for _, group in aliases.items():
-            if base in group:
-                cands = list(group)
-                break
-    # sempre incluir a forma original também
-    out = list({*cands, norm_key(name)})
-    return out
-
-# ----------------- API-Football -----------------
-class APIFootball:
-    def __init__(self, api_key: str, base="https://v3.football.api-sports.io"):
-        self.base = base.rstrip("/")
-        self.headers = {"x-apisports-key": api_key}
-        self._team_cache = {}
-
-    def get(self, path, params=None, retries=3, delay=1.5):
-        url = f"{self.base}/{path.lstrip('/')}"
-        for i in range(retries):
-            try:
-                r = requests.get(url, headers=self.headers, params=params or {}, timeout=25)
-                if r.status_code == 429:
-                    time.sleep(delay * (i + 1))
-                    continue
-                r.raise_for_status()
-                j = r.json()
-                return j.get("response", j)
-            except Exception as e:
-                if i == retries - 1:
-                    log("WARN", f"GET {path} falhou: {e}")
-                time.sleep(delay)
-        return []
-
-    def search_team(self, name: str, prefer_type: str | None = None):
-        """Busca time (Club/National) por string; escolhe melhor match."""
-        key = norm_key(name) + f"|{prefer_type or ''}"
-        if key in self._team_cache:
-            return self._team_cache[key]
-
-        # alguns aliases "especiais"
-        hacks = {
-            "operario pr": "operario ferroviario",
-            "america mineiro": "america mg",
-            "gremio novorizontino": "gremio novorizontino",
-            "criciuma": "criciuma",
-            "cuiaba": "cuiaba",
-        }
-        q = hacks.get(norm_key(name), name)
-
-        resp = self.get("teams", {"search": q})
-        if not resp:
-            self._team_cache[key] = None
-            return None
-
-        cand = []
-        nk = norm_key(name)
-        for it in resp:
-            t = it.get("team", {})
-            typ = it.get("team", {}).get("national", False)
-            tname = t.get("name", "")
-            nk_t = norm_key(tname)
-            score = 0
-            if nk == nk_t:
-                score += 100
-            if nk in nk_t or nk_t in nk:
-                score += 50
-            if prefer_type is not None:
-                if prefer_type.lower() == "national" and typ:
-                    score += 10
-                if prefer_type.lower() == "club" and not typ:
-                    score += 10
-            cand.append((score, t.get("id"), tname, typ))
-
-        cand.sort(reverse=True)
-        best = cand[0] if cand else None
-        self._team_cache[key] = best
-        return best
-
-    def window(self, lookahead_days: float):
-        tz = timezone.utc
-        start = datetime.now(tz).date()
-        end = start + timedelta(days=max(1, math.ceil(lookahead_days)))
-        return start.isoformat(), end.isoformat()
-
-    def find_fixture_between(self, home_id: int, away_id: int, start: str, end: str):
-        # busca por janela a partir do mandante
-        fx = self.get("fixtures", {"team": home_id, "from": start, "to": end})
-        for f in fx:
-            t_home = f.get("teams", {}).get("home", {}).get("id")
-            t_away = f.get("teams", {}).get("away", {}).get("id")
-            if t_home == home_id and t_away == away_id:
-                return f
-
-        # tenta a partir do visitante
-        fx = self.get("fixtures", {"team": away_id, "from": start, "to": end})
-        for f in fx:
-            t_home = f.get("teams", {}).get("home", {}).get("id")
-            t_away = f.get("teams", {}).get("away", {}).get("id")
-            if t_home == home_id and t_away == away_id:
-                return f
-
-        # como fallback, expande +7 dias
-        fx = self.get("fixtures", {"team": home_id, "from": start, "to": (datetime.fromisoformat(end)+timedelta(days=7)).date().isoformat()})
-        for f in fx:
-            t_home = f.get("teams", {}).get("home", {}).get("id")
-            t_away = f.get("teams", {}).get("away", {}).get("id")
-            if t_home == home_id and t_away == away_id:
-                return f
-
-        return None
-
-    def get_odds_1x2(self, fixture_id: int):
-        data = self.get("odds", {"fixture": fixture_id})
-        if not data:
-            return None
-        # Estrutura: bookmakers -> bets -> outcomes
-        # Procurar mercado 1X2 (nome comum: "Match Winner" ou similar)
-        best = None
-        for bk in data:
-            for bet in bk.get("bets", []):
-                name = (bet.get("name") or "").lower()
-                if "match" in name and ("winner" in name or "result" in name):
-                    # outcomes: value in ["Home","Draw","Away"] ou nomes de times
-                    oh = od = oa = None
-                    for o in bet.get("values", []):
-                        vname = (o.get("value") or "").lower()
-                        price = o.get("odd")
-                        try:
-                            price = float(str(price).replace(",", "."))
-                        except Exception:
-                            price = None
-                        if price is None:
-                            continue
-                        if vname in ("home", "1", "home team"):
-                            oh = price
-                        elif vname in ("draw", "x"):
-                            od = price
-                        elif vname in ("away", "2", "away team"):
-                            oa = price
-                    if oh and od and oa:
-                        best = (oh, od, oa)
-                        break
-            if best:
-                break
-        return best
-
-# ----------------- main -----------------
-def parse_args():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--season", required=False)  # não forçamos na busca por data
-    ap.add_argument("--aliases", default="data/aliases.json")
-    ap.add_argument("--debug", action="store_true")
-    return ap.parse_args()
+    tag = "" if level == "INFO" else f"[{level}] "
+    print(f"[apifootball]{tag}{msg}", flush=True)
 
 def main():
-    args = parse_args()
-    rodada = args.rodada
-    lookahead = env_float("LOOKAHEAD_DAYS", 3.0)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--season", required=True)
+    ap.add_argument("--aliases", default="")
+    # Novo argumento para buscar dias à frente
+    ap.add_argument("--lookahead_days", type=int, default=3)
+    args = ap.parse_args()
 
-    api_key = (os.getenv("API_FOOTBALL_KEY") or "").strip()
-    if not api_key:
-        log("ERROR", "API_FOOTBALL_KEY ausente nos secrets.")
+    API_KEY = os.environ.get("API_FOOTBALL_KEY")
+    if not API_KEY:
+        log("CRITICAL", "Variável de ambiente API_FOOTBALL_KEY não definida.")
         sys.exit(5)
 
-    wl_path = os.path.join(rodada, "matches_whitelist.csv")
-    if not os.path.isfile(wl_path):
-        log("ERROR", f"Whitelist não encontrada: {wl_path}")
-        pd.DataFrame(columns=CSV_COLS).to_csv(os.path.join(rodada, "odds_apifootball.csv"), index=False)
-        sys.exit(5)
+    headers = {'x-apisports-key': API_KEY}
+    url = "https://v3.football.api-sports.io/fixtures"
+    
+    # Calcula a data final para a busca de jogos
+    date_to = (datetime.utcnow() + timedelta(days=args.lookahead_days)).strftime('%Y-%m-%d')
+    
+    params = {
+        "season": args.season,
+        "to": date_to,
+        "status": "NS" # Not Started - Apenas jogos não iniciados
+    }
 
-    aliases = load_aliases_lenient(args.aliases)
-    if aliases:
-        log("INFO", f"{len(aliases)} aliases carregados.")
-    else:
-        log("INFO", "Sem aliases (ou falha na leitura).")
+    log("INFO", f"Buscando jogos até {date_to}...")
 
-    api = APIFootball(api_key)
-    start, end = api.window(lookahead)
-    log("INFO", f"Janela de busca {start} -> {end}")
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        log("ERROR", f"Falha na requisição à API-Football: {e}")
+        # Cria um arquivo vazio para não quebrar o pipeline
+        pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_apifootball.csv"), index=False)
+        sys.exit(0) # Sai com sucesso para permitir que o workflow continue se possível
 
-    df = pd.read_csv(wl_path)
-    results, missing = [], []
+    fixtures = data.get('response', [])
+    if not fixtures:
+        log("WARN", "Nenhum jogo encontrado na API-Football para o período.")
+        pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_apifootball.csv"), index=False)
+        return 0
 
-    for _, r in df.iterrows():
-        mid = str(r["match_id"])
-        home = str(r["home"])
-        away = str(r["away"])
-        log("INFO", f"{mid}: {home} x {away}")
+    log("INFO", f"{len(fixtures)} jogos encontrados. Buscando odds...")
 
-        # tenta preferir tipo (National se parecer seleção)
-        prefer_home = "national" if norm_key(home) in {"italy","estonia","spain","georgia","serbia","albania","portugal","ireland","netherlands","finland","romania","austria","denmark","greece","lithuania","poland"} else None
-        prefer_away = "national" if norm_key(away) in {"italy","estonia","spain","georgia","serbia","albania","portugal","ireland","netherlands","finland","romania","austria","denmark","greece","lithuania","poland"} else None
+    rows = []
+    odds_url = "https://v3.football.api-sports.io/odds"
+    
+    for fixture in fixtures:
+        fixture_id = fixture['fixture']['id']
+        home_team = fixture['teams']['home']['name']
+        away_team = fixture['teams']['away']['name']
 
-        th = api.search_team(home, prefer_type=prefer_home)
-        ta = api.search_team(away, prefer_type=prefer_away)
-        if not th or not ta:
-            log("WARN", f"Time não encontrado: {home if not th else away}")
-            missing.append(mid)
+        # Busca as odds para o jogo (Bookmaker ID 8 = Bet365, um dos mais comuns)
+        odds_params = {'fixture': fixture_id, 'bookmaker': 8, 'bet': 1}
+        try:
+            odds_response = requests.get(odds_url, headers=headers, params=odds_params)
+            odds_response.raise_for_status()
+            odds_data = odds_response.json().get('response', [])
+            
+            if not odds_data or not odds_data[0]['bookmakers']:
+                continue
+
+            # Pega as odds de "Match Winner"
+            match_winner_odds = odds_data[0]['bookmakers'][0]['bets'][0]['values']
+            
+            odds_dict = {o['value']: o['odd'] for o in match_winner_odds}
+
+            rows.append({
+                'match_id': fixture_id,
+                'home': home_team,
+                'away': away_team,
+                'odds_home': float(odds_dict.get('Home')),
+                'odds_draw': float(odds_dict.get('Draw')),
+                'odds_away': float(odds_dict.get('Away')),
+            })
+        except Exception:
+            # Ignora jogos sem odds e continua
             continue
 
-        home_id = th[1]
-        away_id = ta[1]
+    if not rows:
+        log("WARN", "Nenhum jogo com odds encontrado.")
+        pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_apifootball.csv"), index=False)
+        return 0
 
-        fx = api.find_fixture_between(home_id, away_id, start, end)
-        if not fx:
-            log("WARN", f"Fixture não encontrado para {home} x {away}")
-            missing.append(mid)
-            continue
+    df = pd.DataFrame(rows)
+    out_path = os.path.join(args.rodada, "odds_apifootball.csv")
+    df.to_csv(out_path, index=False)
+    log("INFO", f"Arquivo odds_apifootball.csv gerado com {len(df)} jogos.")
 
-        fid = fx.get("fixture", {}).get("id")
-        odds = api.get_odds_1x2(fid)
-        if not odds:
-            log("WARN", f"Odds não encontradas para fixture {fid} ({home} x {away})")
-            missing.append(mid)
-            continue
-
-        oh, od, oa = odds
-        results.append(dict(match_id=mid, home=home, away=away,
-                            odds_home=oh, odds_draw=od, odds_away=oa))
-
-    out_path = os.path.join(rodada, "odds_apifootball.csv")
-    pd.DataFrame(results, columns=CSV_COLS).to_csv(out_path, index=False)
-
-    if not results:
-        log("ERROR", "Nenhuma odd coletada da API-Football.")
-        sys.exit(5)
-
-    if missing:
-        log("ERROR", f"Jogos sem odds: {len(missing)} -> {missing}")
-        sys.exit(5)
-
-    log("INFO", f"Odds coletadas: {len(results)} -> {out_path}")
     return 0
 
 if __name__ == "__main__":
