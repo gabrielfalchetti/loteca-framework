@@ -1,20 +1,13 @@
-name: loteca-super-end2end
+name: Loteca - Super End2End
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 12 * * 4"  # quinta 12:00 UTC
-
-permissions:
-  contents: read
+  push:
+    branches: [ main, master ]
 
 jobs:
-  run:
+  super-end2end:
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        shell: bash
 
     env:
       SEASON: "2025"
@@ -27,184 +20,212 @@ jobs:
       ROUND_TO: "1"
       ALIASES_JSON: "data/aliases.json"
 
-      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-      THEODDS_API_KEY:  ${{ secrets.THEODDS_API_KEY }}
-      X_RAPIDAPI_KEY:   ${{ secrets.X_RAPIDAPI_KEY }}
-
-      PYTHONUTF8: "1"
-      PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PIP_NO_WARN_SCRIPT_LOCATION: "1"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Instalar dependências
         run: |
           set -euo pipefail
+          python -V
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install pandas numpy requests python-dateutil unidecode
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas numpy requests python-dateutil unidecode
+          fi
 
-      - name: Preflight secrets
-        run: |
-          set -euo pipefail
-          ok=1
-          [ -n "${API_FOOTBALL_KEY}" ] || { echo "::warning::API_FOOTBALL_KEY missing"; ok=0; }
-          [ -n "${THEODDS_API_KEY}" ]  || { echo "::warning::THEODDS_API_KEY missing"; ok=0; }
-          [ $ok -eq 1 ] || echo "::notice::Running with available sources."
-
-      - name: Init RUN_ID and OUT_DIR
-        id: init
+      - name: Preparar diretórios e variáveis da rodada
+        id: prep
         run: |
           set -euo pipefail
           RUN_ID="$(date +%s)"
-          echo "RUN_ID=${RUN_ID}" >> "$GITHUB_OUTPUT"
-          echo "OUT_DIR=data/out/${RUN_ID}" >> "$GITHUB_ENV"
-          echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
+          echo "RUN_ID=${RUN_ID}"           | tee -a "$GITHUB_OUTPUT"
+          echo "OUT_DIR=data/out/${RUN_ID}" | tee -a "$GITHUB_ENV"
+          echo "DEBUG_FLAG="                | tee -a "$GITHUB_ENV"
           mkdir -p "data/in" "data/out/${RUN_ID}"
           echo "RUN_ID=${RUN_ID}"
-          echo "OUT_DIR=data/out/${RUN_ID}"
+          echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Validate aliases.json (tolerant)
+      - name: Validar aliases.json (tolerante)
         run: |
           set -euo pipefail
-          if [ -f "${ALIASES_JSON}" ]; then
-            python - <<'PY' || { echo "::warning::aliases.json invalid — disabling for this run"; echo "ALIASES_JSON=" >> "$GITHUB_ENV"; }
-import json, sys
-json.load(open('data/aliases.json','r',encoding='utf-8'))
-print("[ok] aliases.json valid")
+          if [ -n "${ALIASES_JSON}" ] && [ -f "${ALIASES_JSON}" ]; then
+            if python - <<'PY'
+import json, sys, os
+p = os.getenv("ALIASES_JSON")
+try:
+    with open(p, "r", encoding="utf-8") as fh:
+        json.load(fh)
+    print("[ok] aliases.json válido")
+except Exception as e:
+    print(f"[warn] aliases.json inválido: {e}")
+    sys.exit(2)
 PY
+            then
+              echo "[ok] aliases.json válido"
+            else
+              echo "::warning::aliases.json inválido — desabilitando nesta run."
+              echo "ALIASES_JSON=" >> "$GITHUB_ENV"
+            fi
           else
-            echo "::notice::No aliases.json — automatic normalization will be used."
+            echo "::notice::Sem aliases.json — normalização automática será usada."
           fi
 
-      # ===================== INGESTIONS =====================
-      - name: Ingest - API-Football (direct)
+      # ======================
+      # INGESTÃO DE ODDS — API-FOOTBALL (DIRECT)
+      # ======================
+      - name: Ingestão API-FOOTBALL
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
-          ALIASES_ARG=""
-          if [ -n "${ALIASES_JSON:-}" ] && [ -f "${ALIASES_JSON}" ]; then ALIASES_ARG="--aliases ${ALIASES_JSON}"; fi
+
           a=0
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_apifootball \
               --rodada "${OUT_DIR}" \
               --season "${SEASON}" \
-              ${ALIASES_ARG} \
+              --aliases "${ALIASES_JSON}" \
               ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
           done
-          OUT="${OUT_DIR}/odds_apifootball.csv"
-          if [ -s "$OUT" ]; then
-            header="$(head -n1 "$OUT" | tr -d '\r')"
-            for c in match_id home away odds_home odds_draw odds_away; do
-              echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
-            done
-          else
-            echo "::warning::odds_apifootball.csv not generated — continuing without this source."
-          fi
 
-      - name: Ingest - TheOddsAPI
+          OUT="${OUT_DIR}/odds_apifootball.csv"
+          test -s "$OUT" || { echo "::error::odds_apifootball.csv not generated"; exit 5; }
+
+          header="$(head -n1 "$OUT" | tr -d $'\r')"
+          for c in match_id home away odds_home odds_draw odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
+          done
+
+      # ======================
+      # INGESTÃO DE ODDS — THEODDSAPI
+      # ======================
+      - name: Ingestão TheOddsAPI
+        env:
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
-          ALIASES_ARG=""
-          if [ -n "${ALIASES_JSON:-}" ] && [ -f "${ALIASES_JSON}" ]; then ALIASES_ARG="--aliases ${ALIASES_JSON}"; fi
+
           a=0
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
               --rodada "${OUT_DIR}" \
               --regions "${REGIONS}" \
-              ${ALIASES_ARG} \
+              --aliases "${ALIASES_JSON}" \
               ${DEBUG_FLAG} && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
           done
+
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
-          if [ -s "$OUT" ]; then
-            header="$(head -n1 "$OUT" | tr -d '\r')"
-            for c in match_id home away odds_home odds_draw odds_away; do
-              echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
-            done
-          else
-            echo "::warning::odds_theoddsapi.csv not generated — continuing without this source."
-          fi
+          test -s "$OUT" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
 
-      # ===================== WHITELIST (REQUIRED) =====================
-      - name: Ensure matches_whitelist.csv (required)
-        run: |
-          set -euo pipefail
-          WL_CAND=""
-          for CAND in "${OUT_DIR}/matches_whitelist.csv" "data/in/matches_whitelist.csv" "data/in/loteca_card.csv" "data/in/card.csv" "data/in/fixtures.csv"; do
-            if [ -s "$CAND" ]; then WL_CAND="$CAND"; break; fi
+          header="$(head -n1 "$OUT" | tr -d $'\r')"
+          for c in match_id home away odds_home odds_draw odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
           done
-          [ -n "$WL_CAND" ] || { echo "::error::Whitelist missing. Provide matches_whitelist.csv in data/in/"; exit 6; }
 
-          python - "$WL_CAND" "${OUT_DIR}/matches_whitelist.csv" <<'PY'
-import sys, pandas as pd, os
-src, dst = sys.argv[1], sys.argv[2]
-df = pd.read_csv(src)
-cols = {c.lower().strip(): c for c in df.columns}
-def pick(opts):
-    for o in opts:
-        if o in cols: return cols[o]
-c_id = pick(['match_id','id','jogo','numero','num','index','indice'])
-c_h  = pick(['home','team_home','mandante','casa','time_casa','time_home','home_team'])
-c_a  = pick(['away','team_away','visitante','fora','time_fora','time_away','away_team'])
-assert c_h and c_a, "Whitelist invalida: precisa colunas de mandante/visitante"
-out_df = pd.DataFrame({
-    'match_id': df[c_id] if c_id else range(1, len(df)+1),
-    'home': df[c_h].astype(str),
-    'away': df[c_a].astype(str),
-})
-out_df = out_df[['match_id','home','away']].dropna().drop_duplicates().reset_index(drop=True)
-os.makedirs(os.path.dirname(dst), exist_ok=True)
-out_df.to_csv(dst, index=False)
-print(f"[whitelist] OK -> {dst} ({len(out_df)} rows)")
-PY
-
-      # ===================== CONSENSUS (STRICT, NO SKIP) =====================
-      - name: Consensus odds (STRICT)
+      # ======================
+      # CONSENSO DE ODDS (MODO ESTRITO)
+      # ======================
+      - name: Consenso de odds (estrito)
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
+
+          # Se a whitelist não existir, gerar a partir das fontes disponíveis (sem ignorar jogos depois no estrito)
+          WL="${OUT_DIR}/matches_whitelist.csv"
+          if [ ! -s "$WL" ]; then
+            python - <<'PY'
+import os, pandas as pd
+out_dir = os.environ["OUT_DIR"]
+wl_path = os.path.join(out_dir, "matches_whitelist.csv")
+cands = []
+for fn in ["odds_apifootball.csv","odds_theoddsapi.csv"]:
+    p = os.path.join(out_dir, fn)
+    if os.path.exists(p) and os.path.getsize(p) > 0:
+        df = pd.read_csv(p)
+        cols = {c.lower():c for c in df.columns}
+        need = ["match_id","home","away"]
+        if all(any(col == c or col.lower() == c for col in df.columns) for c in need):
+            df2 = df.rename(columns={cols.get("match_id","match_id"):"match_id",
+                                     cols.get("home","home"):"home",
+                                     cols.get("away","away"):"away"})[["match_id","home","away"]]
+            cands.append(df2)
+if not cands:
+    raise SystemExit(0)
+wl = pd.concat(cands, ignore_index=True).drop_duplicates(subset=["home","away"], keep="first")
+# reordena por match_id se houver, senão cria sequencial estável
+if "match_id" in wl.columns and wl["match_id"].notna().all():
+    wl = wl.sort_values("match_id", kind="stable")
+else:
+    wl = wl.drop(columns=[c for c in wl.columns if c=="match_id"])
+    wl = wl.assign(match_id=range(1, len(wl)+1))
+    wl = wl[["match_id","home","away"]]
+wl.to_csv(wl_path, index=False)
+print(f"[consensus] whitelist gerada: {wl_path} linhas={len(wl)}")
+PY
+          fi
+
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
+
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
           test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv not generated"; exit 6; }
-          header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
-          for c in team_home team_away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
-          done
 
-      # ===================== xG REQUIRED =====================
-      - name: xG Univariate (required)
+          header="$(head -n1 "$OUT_FILE" | tr -d $'\r')"
+          for c in team_home team_away odds_home odds_draw odds_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" \
+              || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
+          done
+          head -n 20 "$OUT_FILE" || true
+
+      # ======================
+      # xG UNIVARIATE (OBRIGATÓRIO)
+      # ======================
+      - name: xG Univariate (obrigatório)
         run: |
           set -euo pipefail
           [ -f scripts/xg_univariate.py ] || { echo "::error::scripts/xg_univariate.py not found"; exit 7; }
           python -m scripts.xg_univariate --rodada "${OUT_DIR}"
-          test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
+          OUT="${OUT_DIR}/xg_univariate.csv"
+          test -s "$OUT" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
 
-      - name: xG Bivariate (required)
+      # ======================
+      # xG BIVARIATE (OBRIGATÓRIO)
+      # ======================
+      - name: xG Bivariate (obrigatório)
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
           python -m scripts.xg_bivariate --rodada "${OUT_DIR}"
-          test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
+          OUT="${OUT_DIR}/xg_bivariate.csv"
+          test -s "$OUT" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
-      # ===================== CALIBRATION & KELLY =====================
-      - name: Calibrate probabilities
+      # ======================
+      # CALIBRAÇÃO DE PROBABILIDADES
+      # ======================
+      - name: Calibrar probabilidades
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
           python -m scripts.calibrate_probs --rodada "${OUT_DIR}"
-          test -s "${OUT_DIR}/probs_calibrated.csv" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
+          OUT="${OUT_DIR}/probs_calibrated.csv"
+          test -s "$OUT" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
 
-      - name: Kelly bets
+      # ======================
+      # APOSTAS (KELLY)
+      # ======================
+      - name: Gerar stakes (Kelly)
         run: |
           set -euo pipefail
           [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 10; }
@@ -215,31 +236,27 @@ PY
             --cap "${KELLY_CAP}" \
             --topn "${KELLY_TOP_N}" \
             --round_to "${ROUND_TO}"
-          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
 
-      # ===================== TICKET =====================
-      - name: Make Loteca ticket (3 triples, 5 doubles)
+          OUT="${OUT_DIR}/kelly_stakes.csv"
+          test -s "$OUT" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
+
+      # ======================
+      # GERAR TICKET LOTECA
+      # ======================
+      - name: Montar ticket Loteca
         run: |
           set -euo pipefail
           [ -f scripts/make_loteca_ticket.py ] || { echo "::error::scripts/make_loteca_ticket.py not found"; exit 11; }
-          python -m scripts.make_loteca_ticket --rodada "${OUT_DIR}" --triplos 3 --duplos 5
-          test -s "${OUT_DIR}/loteca_ticket.csv" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
+          python -m scripts.make_loteca_ticket --rodada "${OUT_DIR}"
+          OUT="${OUT_DIR}/loteca_ticket.csv"
+          test -s "$OUT" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
 
-      - name: Output samples (log)
-        run: |
-          set -euo pipefail
-          for f in odds_consensus.csv xg_univariate.csv xg_bivariate.csv probs_calibrated.csv kelly_stakes.csv loteca_ticket.csv; do
-            p="${OUT_DIR}/$f"
-            if [ -s "$p" ]; then
-              echo "==== $f ===="; head -n 20 "$p" | sed 's/\r$//'; echo
-            fi
-          done
-
-      - name: Upload artifacts
+      - name: Publicar artefatos da rodada
         uses: actions/upload-artifact@v4
         with:
-          name: rodada-${{ steps.init.outputs.RUN_ID }}
+          name: loteca_${{ steps.prep.outputs.RUN_ID }}
           path: |
             ${{ env.OUT_DIR }}/*.csv
             ${{ env.OUT_DIR }}/*.json
-          if-no-files-found: warn
+            ${{ env.OUT_DIR }}/*.txt
+          if-no-files-found: error
