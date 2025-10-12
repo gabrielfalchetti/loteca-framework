@@ -38,7 +38,6 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-            # Adicionando dependências de ML
             pip install scikit-learn joblib
           else
             pip install pandas numpy requests python-dateutil unidecode scikit-learn joblib
@@ -55,20 +54,16 @@ jobs:
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
           echo "DEBUG_FLAG=" >> "$GITHUB_ENV"
           mkdir -p "data/in" "${OUT_DIR}"
-          # Cria diretório para modelos de Calibração (usado por calibrate_probs.py)
           mkdir -p models/calibration
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Validar aliases.json (tolerante)
+      - name: Validar aliases.json (tolerante) - CORRIGIDO
         shell: bash
         run: |
           set -euo pipefail
           if [ -n "${ALIASES_JSON}" ] && [ -f "${ALIASES_JSON}" ]; then
-            python -c "import json,sys; p='${ALIASES_JSON}';\
-from pathlib import Path; import codecs;\
-data=codecs.open(p,'r','utf-8').read();\
-json.loads(data); print('[ok] aliases.json válido') " \
+            python -c "import json, sys, codecs; json.loads(codecs.open('${ALIASES_JSON}', 'r', 'utf-8').read()); print('[ok] aliases.json válido')" \
             || { echo '::warning::aliases.json inválido — desabilitando nesta run.'; echo "ALIASES_JSON=" >> "$GITHUB_ENV"; }
           else
             echo "::notice::Sem aliases.json — normalização automática será usada."
@@ -137,20 +132,18 @@ json.loads(data); print('[ok] aliases.json válido') " \
           set -euo pipefail
           WL="${OUT_DIR}/matches_whitelist.csv"
           if [ ! -s "$WL" ]; then
-            python -c "import os, csv
+            python -c "import os, csv, pandas as pd
 out=os.environ['OUT_DIR']
 paths=[os.path.join(out,'odds_apifootball.csv'), os.path.join(out,'odds_theoddsapi.csv')]
 rows=[]
 for p in paths:
     if os.path.exists(p) and os.path.getsize(p)>0:
-        import pandas as pd
         df=pd.read_csv(p)
         cols=[c.lower() for c in df.columns]
         need=['match_id','home','away']
         if all(n in cols for n in need):
             df=df[['match_id','home','away']].dropna()
             for r in df.itertuples(index=False): rows.append((int(r[0]), str(r[1]), str(r[2])))
-# de-duplica por (home,away) mantendo primeiro match_id
 seen=set(); dedup=[]
 for mid,h,a in sorted(rows, key=lambda x:x[0]):
     key=(h,a)
@@ -189,7 +182,6 @@ print('[consensus] whitelist gerada' if dedup else '[consensus] sem dados para w
         run: |
           set -euo pipefail
           [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 12; }
-          # Este script busca histórico, treina o modelo Dynamic BPD e salva os parâmetros de habilidade.
           python -m scripts.train_dynamic_model --rodada "${OUT_DIR}"
           OUT="${OUT_DIR}/dynamic_params.json"
           test -s "$OUT" || { echo "::error::dynamic_params.json not generated"; exit 12; }
@@ -214,7 +206,6 @@ print('[consensus] whitelist gerada' if dedup else '[consensus] sem dados para w
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
-          # O script 'xg_bivariate' agora vai ler dynamic_params.json para prever com edge.
           python -m scripts.xg_bivariate --rodada "${OUT_DIR}"
           OUT="${OUT_DIR}/xg_bivariate.csv"
           test -s "$OUT" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
