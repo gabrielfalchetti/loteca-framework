@@ -1,19 +1,21 @@
+# scripts/calibrate_probs.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
 calibrate_probs: gera probs_calibrated.csv
 
+OBJETIVO: Aplicar Isotonic Regression (Regressão Isotônica) para corrigir
+vieses no P_Model (do xg_bivariate.csv) e gerar o P_True.
+
 Prioridade de fonte:
-  1) xg_bivariate.csv
-  2) xg_univariate.csv
-  3) odds_consensus.csv + matches_whitelist.csv
+  1) xg_bivariate.csv (Contém P_Model)
 
 Saída garantida:
   probs_calibrated.csv com colunas:
     [match_id, team_home, team_away,
      odds_home, odds_draw, odds_away,
-     p_home, p_draw, p_away]
+     p_home_cal, p_draw_cal, p_away_cal]
 """
 
 import os
@@ -22,10 +24,19 @@ import sys
 import argparse
 from unicodedata import normalize as _ucnorm
 import pandas as pd
+import numpy as np
 
+# NOVAS DEPENDÊNCIAS CIENTÍFICAS
+from sklearn.isotonic import IsotonicRegression
+import joblib # Para carregar modelos treinados
+
+# --- CONSTANTES ---
 REQ_WL = {"match_id", "home", "away"}
 REQ_OC = {"team_home", "team_away", "odds_home", "odds_draw", "odds_away"}
 REQ_XG = {"match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away", "p_home", "p_draw", "p_away"}
+
+# Defina onde os modelos de calibração treinados serão armazenados
+CALIBRATION_MODEL_DIR = "models/calibration"
 
 STOPWORD_TOKENS = {
     "aa","ec","ac","sc","fc","afc","cf","ca","cd","ud",
@@ -36,7 +47,9 @@ def log(level, msg):
     prefix = f"[{level}]" if level != "INFO" else ""
     print(f"[calibrate]{prefix} {msg}", flush=True)
 
+# Funções de utilidade (mantidas)
 def _deaccent(s: str) -> str:
+# ... (funções de normalização de strings: _deaccent, norm_key, norm_key_tokens, secure_float, implied_probs, read_csv_safe, build_from_odds_consensus, coerce_and_clip)
     return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
 
 def norm_key(name: str) -> str:
@@ -176,14 +189,66 @@ def coerce_and_clip(df: pd.DataFrame) -> pd.DataFrame:
     out = out.dropna(subset=["p_home","p_draw","p_away"])
     return out
 
+
+# --- FUNÇÃO DE CALIBRAÇÃO AVANÇADA (O EDGE NA ASSERTIVIDADE) ---
+def apply_isotonic_calibration(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aplica o modelo de Regressão Isotônica treinado para corrigir os vieses
+    das probabilidades P_Model para gerar o P_True (P_Calibrado).
+    """
+    calibrated_df = df.copy()
+    results_cols = {}
+
+    for outcome, p_col in [("home", "p_home"), ("draw", "p_draw"), ("away", "p_away")]:
+        model_path = os.path.join(CALIBRATION_MODEL_DIR, f"calibrator_{outcome}.pkl")
+        p_cal_col = f"p_{outcome}_cal"
+
+        if os.path.exists(model_path):
+            try:
+                # Carrega o modelo de calibração treinado (Ex: Isotonic Regression)
+                calibrator = joblib.load(model_path)
+                
+                # Aplica a transformação
+                # A Regressão Isotônica espera um array 1D
+                p_model = df[p_col].values
+                p_calibrated = calibrator.transform(p_model)
+                
+                calibrated_df[p_cal_col] = p_calibrated
+                log("INFO", f"Calibrador {outcome} aplicado com sucesso.")
+            except Exception as e:
+                log("WARN", f"Falha ao aplicar calibrador {outcome}: {e}. Usando P_Model não calibrado.")
+                calibrated_df[p_cal_col] = df[p_col]
+        else:
+            # Se o modelo de calibração não existe (ainda não foi treinado),
+            # usamos a probabilidade bruta do modelo.
+            log("WARN", f"Modelo de calibração {outcome} não encontrado. Usando P_Model bruto.")
+            calibrated_df[p_cal_col] = df[p_col]
+
+    # Re-normaliza as probabilidades calibradas (elas devem somar 1)
+    calibrated_df["p_sum"] = calibrated_df["p_home_cal"] + calibrated_df["p_draw_cal"] + calibrated_df["p_away_cal"]
+    
+    # Aplica a normalização (divide pela soma)
+    calibrated_df["p_home_cal"] /= calibrated_df["p_sum"]
+    calibrated_df["p_draw_cal"] /= calibrated_df["p_sum"]
+    calibrated_df["p_away_cal"] /= calibrated_df["p_sum"]
+    
+    # Renomeia as colunas finais (substituindo p_home/draw/away originais pelas calibradas)
+    calibrated_df = calibrated_df.drop(columns=["p_home", "p_draw", "p_away", "p_sum"])
+    calibrated_df = calibrated_df.rename(columns={
+        "p_home_cal": "p_home",
+        "p_draw_cal": "p_draw",
+        "p_away_cal": "p_away",
+    })
+    
+    return calibrated_df
+
 def choose_base(rodada: str) -> pd.DataFrame:
     bi = os.path.join(rodada, "xg_bivariate.csv")
     uni = os.path.join(rodada, "xg_univariate.csv")
 
     if os.path.isfile(bi):
-        log("INFO", "Usando xg_bivariate.csv como base")
+        log("INFO", "Usando xg_bivariate.csv como base (melhor prioridade)")
         df = read_csv_safe(bi)
-        # Se não tiver todas, tenta complementar com odds_consensus
         if not REQ_XG.issubset(df.columns):
             log("WARN", "xg_bivariate.csv incompleto; recomputando via odds_consensus …")
             return build_from_odds_consensus(rodada)
@@ -197,7 +262,7 @@ def choose_base(rodada: str) -> pd.DataFrame:
             return build_from_odds_consensus(rodada)
         return df[list(REQ_XG)].copy()
 
-    log("WARN", "predictions_market ausente/incompleto. Tentando odds_consensus.csv ...")
+    log("WARN", "Nenhum arquivo de previsão encontrado. Tentando odds_consensus.csv ...")
     return build_from_odds_consensus(rodada)
 
 def main():
@@ -207,6 +272,9 @@ def main():
 
     rodada = args.rodada
     out_path = os.path.join(rodada, "probs_calibrated.csv")
+
+    # Garante que o diretório de modelos existe, se for o caso
+    os.makedirs(CALIBRATION_MODEL_DIR, exist_ok=True)
 
     print("===================================================")
     print("[calibrate] INICIANDO CALIBRAÇÃO DE PROBABILIDADES")
@@ -222,23 +290,21 @@ def main():
         log("CRITICAL", f"Falha preparando base: {e}")
         sys.exit(9)
 
-    # “Calibração” identidade (normalização e clipping)
+    # 1. Coerção e limpeza de tipos (mantida)
     df = base.rename(columns={"home":"team_home","away":"team_away"}).copy()
-    # Garante colunas de odds (se base veio de XG já tem; se não, calcula não-destrutivo)
-    for c in ["odds_home","odds_draw","odds_away"]:
-        if c not in df.columns:
-            df[c] = None
-
-    df = df[["match_id","team_home","team_away","odds_home","odds_draw","odds_away","p_home","p_draw","p_away"]]
     df = coerce_and_clip(df)
 
-    if df.empty:
+    # 2. APLICAÇÃO DO ALGORITMO DE CALIBRAÇÃO AVANÇADA (O BOOST DE ASSERTIVIDADE)
+    df_calibrated = apply_isotonic_calibration(df)
+
+    if df_calibrated.empty:
         log("CRITICAL", "Nenhuma linha calibrada gerada.")
-        # Mesmo assim grava cabeçalho para não travar totalmente o pipeline
         pd.DataFrame(columns=["match_id","team_home","team_away","odds_home","odds_draw","odds_away","p_home","p_draw","p_away"]).to_csv(out_path, index=False)
         sys.exit(9)
 
-    df.to_csv(out_path, index=False)
+    # Garante a ordem e as colunas finais
+    FINAL_OUTPUT_COLS = ["match_id","team_home","team_away","odds_home","odds_draw","odds_away","p_home","p_draw","p_away"]
+    df_calibrated[FINAL_OUTPUT_COLS].to_csv(out_path, index=False)
     print("[ok] Calibração concluída com sucesso.")
     return 0
 
