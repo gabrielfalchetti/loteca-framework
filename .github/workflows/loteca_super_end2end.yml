@@ -3,7 +3,7 @@ name: loteca-super-end2end
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * 4"   # quinta 12:00 UTC
+    - cron: "0 12 * * 4"  # quinta 12:00 UTC
 
 permissions:
   contents: read
@@ -11,6 +11,10 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
 
     env:
       SEASON: "2025"
@@ -40,22 +44,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Instalar dependências
+      - name: Install deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pandas numpy requests python-dateutil unidecode
 
-      - name: Pré-flight (secrets)
+      - name: Preflight secrets
         run: |
           set -euo pipefail
           ok=1
-          [ -n "${API_FOOTBALL_KEY}" ] || { echo "::warning::API_FOOTBALL_KEY ausente"; ok=0; }
-          [ -n "${THEODDS_API_KEY}" ]  || { echo "::warning::THEODDS_API_KEY ausente"; ok=0; }
-          [ $ok -eq 1 ] || echo "::notice::Rodando com fontes disponíveis."
+          [ -n "${API_FOOTBALL_KEY}" ] || { echo "::warning::API_FOOTBALL_KEY missing"; ok=0; }
+          [ -n "${THEODDS_API_KEY}" ]  || { echo "::warning::THEODDS_API_KEY missing"; ok=0; }
+          [ $ok -eq 1 ] || echo "::notice::Running with available sources."
 
-      - name: Inicializar RUN_ID e OUT_DIR
+      - name: Init RUN_ID and OUT_DIR
         id: init
         run: |
           set -euo pipefail
@@ -67,27 +71,21 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=data/out/${RUN_ID}"
 
-      - name: Validar aliases.json (tolerante)
+      - name: Validate aliases.json (tolerant)
         run: |
           set -euo pipefail
           if [ -f "${ALIASES_JSON}" ]; then
-            if python - <<'PY'
-import json
-json.load(open('${ALIASES_JSON}','r',encoding='utf-8'))
-print("[ok] aliases.json válido")
+            python - <<'PY' || { echo "::warning::aliases.json invalid — disabling for this run"; echo "ALIASES_JSON=" >> "$GITHUB_ENV"; }
+import json, sys
+json.load(open('data/aliases.json','r',encoding='utf-8'))
+print("[ok] aliases.json valid")
 PY
-            then
-              echo "[ok] aliases.json válido"
-            else
-              echo "::warning::aliases.json inválido — desabilitando nesta run."
-              echo "ALIASES_JSON=" >> "$GITHUB_ENV"
-            fi
           else
-            echo "::notice::Sem aliases.json — normalização automática será usada."
+            echo "::notice::No aliases.json — automatic normalization will be used."
           fi
 
-      # ===================== INGESTÕES =====================
-      - name: Ingestão — API-Football (direto)
+      # ===================== INGESTIONS =====================
+      - name: Ingest - API-Football (direct)
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
@@ -109,10 +107,10 @@ PY
               echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_apifootball.csv"; exit 5; }
             done
           else
-            echo "::warning::odds_apifootball.csv não gerado — seguirá sem esta fonte."
+            echo "::warning::odds_apifootball.csv not generated — continuing without this source."
           fi
 
-      - name: Ingestão — TheOddsAPI
+      - name: Ingest - TheOddsAPI
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
@@ -134,18 +132,18 @@ PY
               echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_theoddsapi.csv"; exit 5; }
             done
           else
-            echo "::warning::odds_theoddsapi.csv não gerado — seguirá sem esta fonte."
+            echo "::warning::odds_theoddsapi.csv not generated — continuing without this source."
           fi
 
-      # ===================== WHITELIST (OBRIGATÓRIO) =====================
-      - name: Verificar matches_whitelist.csv (obrigatório)
+      # ===================== WHITELIST (REQUIRED) =====================
+      - name: Ensure matches_whitelist.csv (required)
         run: |
           set -euo pipefail
           WL_CAND=""
           for CAND in "${OUT_DIR}/matches_whitelist.csv" "data/in/matches_whitelist.csv" "data/in/loteca_card.csv" "data/in/card.csv" "data/in/fixtures.csv"; do
             if [ -s "$CAND" ]; then WL_CAND="$CAND"; break; fi
           done
-          [ -n "$WL_CAND" ] || { echo "::error::Whitelist ausente. Coloque matches_whitelist.csv em data/in/"; exit 6; }
+          [ -n "$WL_CAND" ] || { echo "::error::Whitelist missing. Provide matches_whitelist.csv in data/in/"; exit 6; }
 
           python - "$WL_CAND" "${OUT_DIR}/matches_whitelist.csv" <<'PY'
 import sys, pandas as pd, os
@@ -158,7 +156,7 @@ def pick(opts):
 c_id = pick(['match_id','id','jogo','numero','num','index','indice'])
 c_h  = pick(['home','team_home','mandante','casa','time_casa','time_home','home_team'])
 c_a  = pick(['away','team_away','visitante','fora','time_fora','time_away','away_team'])
-assert c_h and c_a, "Whitelist inválido: precisa ter colunas de mandante/visitante"
+assert c_h and c_a, "Whitelist invalida: precisa colunas de mandante/visitante"
 out_df = pd.DataFrame({
     'match_id': df[c_id] if c_id else range(1, len(df)+1),
     'home': df[c_h].astype(str),
@@ -167,11 +165,11 @@ out_df = pd.DataFrame({
 out_df = out_df[['match_id','home','away']].dropna().drop_duplicates().reset_index(drop=True)
 os.makedirs(os.path.dirname(dst), exist_ok=True)
 out_df.to_csv(dst, index=False)
-print(f"[whitelist] OK -> {dst} ({len(out_df)} linhas)")
+print(f"[whitelist] OK -> {dst} ({len(out_df)} rows)")
 PY
 
-      # ===================== CONSENSO (ESTRITO, SEM IGNORAR JOGOS) =====================
-      - name: Consenso de odds (STRICT, sem ignorar jogos)
+      # ===================== CONSENSUS (STRICT, NO SKIP) =====================
+      - name: Consensus odds (STRICT)
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -183,23 +181,23 @@ PY
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
-      # ===================== xG OBRIGATÓRIOS =====================
-      - name: xG Univariate (obrigatório)
+      # ===================== xG REQUIRED =====================
+      - name: xG Univariate (required)
         run: |
           set -euo pipefail
           [ -f scripts/xg_univariate.py ] || { echo "::error::scripts/xg_univariate.py not found"; exit 7; }
           python -m scripts.xg_univariate --rodada "${OUT_DIR}"
           test -s "${OUT_DIR}/xg_univariate.csv" || { echo "::error::xg_univariate.csv not generated"; exit 7; }
 
-      - name: xG Bivariate (obrigatório)
+      - name: xG Bivariate (required)
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
           python -m scripts.xg_bivariate --rodada "${OUT_DIR}"
           test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
-      # ===================== CALIBRAÇÃO & KELLY =====================
-      - name: Calibrar probabilidades
+      # ===================== CALIBRATION & KELLY =====================
+      - name: Calibrate probabilities
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
@@ -220,14 +218,14 @@ PY
           test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
 
       # ===================== TICKET =====================
-      - name: Gerar ticket Loteca (3 triplos, 5 duplos)
+      - name: Make Loteca ticket (3 triples, 5 doubles)
         run: |
           set -euo pipefail
           [ -f scripts/make_loteca_ticket.py ] || { echo "::error::scripts/make_loteca_ticket.py not found"; exit 11; }
           python -m scripts.make_loteca_ticket --rodada "${OUT_DIR}" --triplos 3 --duplos 5
           test -s "${OUT_DIR}/loteca_ticket.csv" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
 
-      - name: Amostras de saída (log)
+      - name: Output samples (log)
         run: |
           set -euo pipefail
           for f in odds_consensus.csv xg_univariate.csv xg_bivariate.csv probs_calibrated.csv kelly_stakes.csv loteca_ticket.csv; do
@@ -237,7 +235,7 @@ PY
             fi
           done
 
-      - name: Publicar artefatos
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: rodada-${{ steps.init.outputs.RUN_ID }}
