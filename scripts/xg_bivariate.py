@@ -3,14 +3,14 @@
 # -*- coding: utf-8 -*-
 
 """
-xg_bivariate: BASE CIENTÍFICA (Dynamic Bivariate Poisson)
+xg_bivariate: MODELO CIENTÍFICO BIVARIATE POISSON DINÂMICO (V2.1)
 
-Objetivo: Gerar P_True (Probabilidade Verdadeira) do nosso modelo, e não do mercado.
+OBJETIVO:
+  Gerar P_True (Probabilidade Verdadeira) lendo as Forças Dinâmicas (alfa/beta) 
+  do dynamic_params.json e usando a fórmula log-linear do Bivariate Poisson.
 
-O PONTO DE MÁXIMA ASSERTIVIDADE está na função 'calculate_dynamic_bivariate_poisson_probs',
-que usará o Filtro de Kalman para ajustar as lambdas (habilidades dos times) a cada rodada.
-
-Entradas/Saídas: (Inalteradas)
+Entradas CRÍTICAS:
+  - dynamic_params.json  [Parâmetros alfa e beta de todos os times]
 """
 
 import os
@@ -21,9 +21,12 @@ from unicodedata import normalize as _ucnorm
 import pandas as pd
 import numpy as np
 from scipy.stats import poisson
+import json
+import math # Necessário para math.exp
 
 # --- CONSTANTES CIENTÍFICAS ---
-MAX_GOALS = 6 # Limite de placar para cálculo (simplificação comum em modelos BPD)
+MAX_GOALS = 6
+DYNAMIC_PARAMS_FILE = "dynamic_params.json"
 # ------------------------------
 
 REQ_WL = {"match_id", "home", "away"}
@@ -41,7 +44,6 @@ def log(level, msg):
     tag = "" if level == "INFO" else f"[{level}] "
     print(f"[xg_bi]{tag}{msg}", flush=True)
 
-# Funções de normalização e segurança (mantidas)
 def _deaccent(s: str) -> str:
     return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
 
@@ -72,8 +74,7 @@ def read_csv_safe(path: str) -> pd.DataFrame:
         log("CRITICAL", f"Falha lendo {path}: {e}")
         sys.exit(8)
 
-# A antiga 'implied_probs' não é mais usada, mas mantida para referência.
-# --- INÍCIO: NOVAS FUNÇÕES CIENTÍFICAS (O EDGE PREDITIVO) ---
+# --- FUNÇÕES CIENTÍFICAS ---
 
 def biv_poisson_match_probs(lambda_h: float, lambda_a: float) -> tuple[float, float, float]:
     """
@@ -82,12 +83,9 @@ def biv_poisson_match_probs(lambda_h: float, lambda_a: float) -> tuple[float, fl
     """
     p_home, p_draw, p_away = 0.0, 0.0, 0.0
     
-    # Matriz de probabilidades de placar (truncada para MAX_GOALS)
     for h in range(MAX_GOALS):
         for a in range(MAX_GOALS):
-            # p(h, a | lambda_h, lambda_a) = P(h | lambda_h) * P(a | lambda_a)
-            # Nota: O Bivariate Poisson COMPLETO incluiria um termo de correlação 'gamma'
-            # (Dixon & Coles), mas esta aproximação é o ponto de partida ideal.
+            # P(h, a) = P(h | lambda_h) * P(a | lambda_a)
             p_score = poisson.pmf(h, lambda_h) * poisson.pmf(a, lambda_a)
             
             if h > a:
@@ -97,7 +95,6 @@ def biv_poisson_match_probs(lambda_h: float, lambda_a: float) -> tuple[float, fl
             else:
                 p_away += p_score
 
-    # Re-normaliza (devido ao truncation em MAX_GOALS)
     total_final = p_home + p_draw + p_away
     if total_final > 0:
         p_home /= total_final
@@ -106,40 +103,77 @@ def biv_poisson_match_probs(lambda_h: float, lambda_a: float) -> tuple[float, fl
     
     return round(p_home, 6), round(p_draw, 6), round(p_away, 6)
 
-def calculate_dynamic_bivariate_poisson_probs(match_id: int, team_home: str, team_away: str) -> tuple[float, float, float]:
+def calculate_dynamic_bivariate_poisson_probs(
+    team_home: str, team_away: str, params: dict
+) -> tuple[float, float, float]:
     """
-    *** HOOK CIENTÍFICO CHAVE ***
-    Esta função será o ponto de integração com o modelo de Espaço de Estados (Filtro de Kalman).
-    Ela deve buscar os *parâmetros* (lambdas) reais, dinâmicos e preditivos.
-    
-    * Referência Dinâmica: Koopman & Lit (2012).
+    HOOK CIENTÍFICO CHAVE: Calcula lambdas a partir dos parâmetros dinâmicos.
+    (Implementação da fórmula log-linear de Koopman/Dixon & Coles)
     """
     
-    # --- PARÂMETROS MOCK/PLACEHOLDER (SERÃO SUBSTITUÍDOS) ---
-    # Estes valores mock SÃO O SEU GARGALO de assertividade.
-    # A V3.0 deste script buscará os parâmetros alfa e beta do modelo treinado.
-    MOCK_LAMBDA_HOME = 1.5 # (Habilidade de Ataque do Home Team)
-    MOCK_LAMBDA_AWAY = 1.1 # (Habilidade de Ataque do Away Team)
-
-    # Note que a vantagem do fator casa (se for incluído) deve entrar no Lambda.
-    # Ex: lambda_h = exp(ataque_i - defesa_j + fator_casa)
+    home_key = norm_key_tokens(team_home)
+    away_key = norm_key_tokens(team_away)
     
-    # Chamada ao núcleo matemático do modelo
-    return biv_poisson_match_probs(MOCK_LAMBDA_HOME, MOCK_LAMBDA_AWAY)
+    team_params = params.get("team_params", {})
+    fixed_effects = params.get("league_fixed_effects", {})
+    
+    home_data = team_params.get(home_key)
+    away_data = team_params.get(away_key)
+    # Pega o coeficiente de vantagem de casa (δ)
+    home_advantage = fixed_effects.get("home_advantage", 0.0) 
+    
+    if not home_data or not away_data:
+        log("WARN", f"Parâmetros dinâmicos ausentes para {team_home} ({home_key}) ou {team_away} ({away_key}). Pulando.")
+        return None, None, None
 
-# --- FIM: NOVAS FUNÇÕES CIENTÍFICAS ---
+    # Parâmetros de Força (em log-escala):
+    alpha_h = home_data.get("alpha", 0.0) # Ataque Home
+    beta_h = home_data.get("beta", 0.0)   # Defesa Home
+    alpha_a = away_data.get("alpha", 0.0)  # Ataque Away
+    beta_a = away_data.get("beta", 0.0)    # Defesa Away
+
+    # Fórmulas Log-Lineares:
+    # λ_home = exp( home_advantage + alpha_home - beta_away )
+    lambda_h = math.exp(home_advantage + alpha_h - beta_a)
+
+    # λ_away = exp( alpha_away - beta_home )
+    lambda_a = math.exp(alpha_a - beta_h)
+
+    if lambda_h <= 0 or lambda_a <= 0:
+        log("WARN", f"Lambda inválido (<=0) para {team_home} vs {team_away}. Pulando.")
+        return None, None, None
+
+    return biv_poisson_match_probs(lambda_h, lambda_a)
 
 
 def build_model_predictions(rodada: str) -> pd.DataFrame:
     """
-    REVISÃO: Gera probabilidades usando o Modelo Bivariate Poisson.
+    REVISÃO: Gera probabilidades usando o Modelo Bivariate Poisson, lendo os parâmetros dinâmicos.
     """
     wl_path = os.path.join(rodada, "matches_whitelist.csv")
     oc_path = os.path.join(rodada, "odds_consensus.csv")
+    params_path = os.path.join(rodada, DYNAMIC_PARAMS_FILE)
 
     wl = read_csv_safe(wl_path)
     oc = read_csv_safe(oc_path)
+
+    # --- CARREGAMENTO DOS PARÂMETROS DINÂMICOS ---
+    try:
+        with open(params_path, 'r', encoding='utf-8') as f:
+            dynamic_params = json.load(f)
+    except FileNotFoundError:
+        log("CRITICAL", f"Arquivo {DYNAMIC_PARAMS_FILE} ausente. Treinamento falhou.")
+        sys.exit(8)
+    except json.JSONDecodeError as e:
+        log("CRITICAL", f"Falha lendo {DYNAMIC_PARAMS_FILE} (JSON inválido): {e}")
+        sys.exit(8)
     
+    if not dynamic_params:
+        log("CRITICAL", "Parâmetros dinâmicos vazios. Impossível prever.")
+        sys.exit(8)
+    
+    # -----------------------------------------------
+
     # Lógica de merge e limpeza (mantida)
     wl = wl.rename(columns={"home":"team_home","away":"team_away"})[["match_id","team_home","team_away"]].copy()
     wl["key"] = wl["team_home"].apply(norm_key_tokens) + "|" + wl["team_away"].apply(norm_key_tokens)
@@ -162,11 +196,11 @@ def build_model_predictions(rodada: str) -> pd.DataFrame:
         
         # --- AQUI: O SEU EDGE PREDITIVO É GERADO ---
         ph, pdr, pa = calculate_dynamic_bivariate_poisson_probs(
-            wlr["match_id"], wlr["team_home"], wlr["team_away"]
+            wlr["team_home"], wlr["team_away"], dynamic_params
         )
         # ------------------------------------------
 
-        if None in (oh, od, oa): # Mantém as odds do mercado para o arquivo de saída
+        if None in (oh, od, oa, ph, pdr, pa): 
             continue
 
         rows.append({
@@ -185,12 +219,7 @@ def build_model_predictions(rodada: str) -> pd.DataFrame:
         log("CRITICAL", "Nenhuma linha gerada (sem match entre whitelist e odds_consensus).")
         sys.exit(8)
 
-    out_df = pd.DataFrame(rows, columns=OUTPUT_COLS)
-    
-    # SAÍDA DO MODELO: As probabilidades P_Home, P_Draw, P_Away AGORA são do nosso modelo.
-    # O passo de CALIBRAÇÃO a seguir (scripts/calibrate_probs.py) é crucial.
-    
-    return out_df
+    return pd.DataFrame(rows, columns=OUTPUT_COLS)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -200,9 +229,8 @@ def main():
     rodada = args.rodada
     out_path = os.path.join(rodada, "xg_bivariate.csv")
     
-    log("INFO", "Substituindo lógica: Usando Modelo Científico Bivariate Poisson.")
+    log("INFO", "Iniciando previsão com Modelo Científico Bivariate Poisson Dinâmico.")
     
-    # O script agora SEMPRE usa o modelo para prever
     df = build_model_predictions(rodada)
 
     # Salva resultado
