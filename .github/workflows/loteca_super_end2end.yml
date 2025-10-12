@@ -39,7 +39,6 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Garante que as dependências de ML estão instaladas
           pip install pandas numpy requests python-dateutil unidecode scikit-learn joblib
 
       - name: Preparar diretórios e variáveis da rodada
@@ -65,8 +64,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Assumindo que o script foi corrigido para NÃO precisar de uma whitelist
-          python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --season "${SEASON}" --aliases "${ALIASES_JSON}"
+          # CORREÇÃO: O argumento --season foi removido, pois o script agora usa um intervalo de datas.
+          python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --aliases "${ALIASES_JSON}"
 
       # ======================
       # INGESTÃO DE ODDS — THEODDSAPI (PASSO 2)
@@ -77,17 +76,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Assumindo que o script foi corrigido para NÃO precisar de uma whitelist
           python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --regions "${REGIONS}" --aliases "${ALIASES_JSON}"
 
       # ======================
-      # PREPARAR WHITELIST (PASSO 3 - AGORA NA ORDEM CORRETA)
+      # PREPARAR WHITELIST (PASSO 3)
       # ======================
       - name: Preparar whitelist a partir dos dados ingeridos
         shell: bash
         run: |
           set -euo pipefail
-          # Este script agora cria a whitelist a partir dos arquivos de odds gerados acima
           python -m scripts.prepare_whitelist --rodada "${OUT_DIR}"
           WL="${OUT_DIR}/matches_whitelist.csv"
           test -s "$WL" || echo "::warning::Whitelist não foi gerada (nenhum jogo encontrado nas APIs)."
@@ -101,7 +98,6 @@ jobs:
           set -euo pipefail
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
-          # Esta etapa pode não gerar um arquivo se não houver jogos em comum, então o erro é um aviso
           test -s "$OUT_FILE" || echo "::warning::odds_consensus.csv não gerado (sem jogos em comum entre as fontes)."
           if [ -s "$OUT_FILE" ]; then
             head -n 20 "$OUT_FILE" || true
@@ -155,7 +151,6 @@ jobs:
             --topn "${KELLY_TOP_N}" \
             --round_to "${ROUND_TO}"
           OUT="${OUT_DIR}/kelly_stakes.csv"
-          # Pode não gerar apostas, então é um aviso
           test -s "$OUT" || echo "::warning::Nenhuma aposta gerada (kelly_stakes.csv vazio)."
 
       # ======================
