@@ -129,7 +129,7 @@ json.loads(data); print('[ok] aliases.json válido') " \
       # ======================
       - name: Preparar whitelist (se ausente)
         shell: bash
-        run: |  # Linha 65 Corrigida
+        run: |
           set -euo pipefail
           WL="${OUT_DIR}/matches_whitelist.csv"
           if [ ! -s "$WL" ]; then
