@@ -35,7 +35,7 @@ REQ_WL = {"match_id", "home", "away"}
 REQ_OC = {"team_home", "team_away", "odds_home", "odds_draw", "odds_away"}
 REQ_XG = {"match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away", "p_home", "p_draw", "p_away"}
 
-# Defina onde os modelos de calibração treinados serão armazenados
+# Diretório onde os modelos de calibração treinados estão salvos
 CALIBRATION_MODEL_DIR = "models/calibration"
 
 STOPWORD_TOKENS = {
@@ -49,7 +49,6 @@ def log(level, msg):
 
 # Funções de utilidade (mantidas)
 def _deaccent(s: str) -> str:
-# ... (funções de normalização de strings: _deaccent, norm_key, norm_key_tokens, secure_float, implied_probs, read_csv_safe, build_from_odds_consensus, coerce_and_clip)
     return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
 
 def norm_key(name: str) -> str:
@@ -89,13 +88,17 @@ def read_csv_safe(path: str, required=None) -> pd.DataFrame:
     return df
 
 def build_from_odds_consensus(rodada: str) -> pd.DataFrame:
+    # (Lógica de fallback mantida)
     wl_path = os.path.join(rodada, "matches_whitelist.csv")
     oc_path = os.path.join(rodada, "odds_consensus.csv")
 
-    wl = read_csv_safe(wl_path, REQ_WL).rename(columns={"home":"team_home","away":"team_away"})[
-        ["match_id","team_home","team_away"]
-    ].copy()
-    oc = read_csv_safe(oc_path, REQ_OC)[["team_home","team_away","odds_home","odds_draw","odds_away"]].copy()
+    try:
+        wl = read_csv_safe(wl_path, REQ_WL).rename(columns={"home":"team_home","away":"team_away"})[
+            ["match_id","team_home","team_away"]
+        ].copy()
+        oc = read_csv_safe(oc_path, REQ_OC)[["team_home","team_away","odds_home","odds_draw","odds_away"]].copy()
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Arquivos base para fallback ausentes: {e}")
 
     wl["key"] = wl["team_home"].apply(norm_key_tokens) + "|" + wl["team_away"].apply(norm_key_tokens)
     oc["key"] = oc["team_home"].apply(norm_key_tokens) + "|" + oc["team_away"].apply(norm_key_tokens)
@@ -190,26 +193,27 @@ def coerce_and_clip(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# --- FUNÇÃO DE CALIBRAÇÃO AVANÇADA (O EDGE NA ASSERTIVIDADE) ---
+# --- FUNÇÃO DE CALIBRAÇÃO AVANÇADA (O BOOST DE ASSERTIVIDADE) ---
 def apply_isotonic_calibration(df: pd.DataFrame) -> pd.DataFrame:
     """
     Aplica o modelo de Regressão Isotônica treinado para corrigir os vieses
     das probabilidades P_Model para gerar o P_True (P_Calibrado).
     """
     calibrated_df = df.copy()
-    results_cols = {}
-
+    
+    # Colunas de probabilidade que o modelo gerou (P_Model)
+    p_cols = ["p_home", "p_draw", "p_away"]
+    
     for outcome, p_col in [("home", "p_home"), ("draw", "p_draw"), ("away", "p_away")]:
         model_path = os.path.join(CALIBRATION_MODEL_DIR, f"calibrator_{outcome}.pkl")
         p_cal_col = f"p_{outcome}_cal"
 
         if os.path.exists(model_path):
             try:
-                # Carrega o modelo de calibração treinado (Ex: Isotonic Regression)
+                # Carrega o modelo de calibração treinado (Isotonic Regression)
                 calibrator = joblib.load(model_path)
                 
-                # Aplica a transformação
-                # A Regressão Isotônica espera um array 1D
+                # Aplica a transformação. O Isotonic Regression espera um array 1D
                 p_model = df[p_col].values
                 p_calibrated = calibrator.transform(p_model)
                 
@@ -225,6 +229,10 @@ def apply_isotonic_calibration(df: pd.DataFrame) -> pd.DataFrame:
             calibrated_df[p_cal_col] = df[p_col]
 
     # Re-normaliza as probabilidades calibradas (elas devem somar 1)
+    # Primeiro move as colunas brutas para as calibradas (se o calibrador falhou, elas serão iguais)
+    for outcome in ["home", "draw", "away"]:
+        calibrated_df[f"p_{outcome}_cal"] = calibrated_df.get(f"p_{outcome}_cal", calibrated_df[f"p_{outcome}"])
+
     calibrated_df["p_sum"] = calibrated_df["p_home_cal"] + calibrated_df["p_draw_cal"] + calibrated_df["p_away_cal"]
     
     # Aplica a normalização (divide pela soma)
@@ -273,9 +281,6 @@ def main():
     rodada = args.rodada
     out_path = os.path.join(rodada, "probs_calibrated.csv")
 
-    # Garante que o diretório de modelos existe, se for o caso
-    os.makedirs(CALIBRATION_MODEL_DIR, exist_ok=True)
-
     print("===================================================")
     print("[calibrate] INICIANDO CALIBRAÇÃO DE PROBABILIDADES")
     print(f"[calibrate] Diretório de rodada : {rodada}")
@@ -294,7 +299,7 @@ def main():
     df = base.rename(columns={"home":"team_home","away":"team_away"}).copy()
     df = coerce_and_clip(df)
 
-    # 2. APLICAÇÃO DO ALGORITMO DE CALIBRAÇÃO AVANÇADA (O BOOST DE ASSERTIVIDADE)
+    # 2. APLICAÇÃO DO ALGORITMO DE CALIBRAÇÃO AVANÇADA
     df_calibrated = apply_isotonic_calibration(df)
 
     if df_calibrated.empty:
