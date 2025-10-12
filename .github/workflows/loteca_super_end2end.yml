@@ -58,7 +58,7 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Validar aliases.json (tolerante) - CORRIGIDO
+      - name: Validar aliases.json (tolerante)
         shell: bash
         run: |
           set -euo pipefail
@@ -124,37 +124,16 @@ jobs:
           done
 
       # ======================
-      # PREPARAR WHITELIST (SE AUSENTE)
+      # PREPARAR WHITELIST (SE AUSENTE) - CORRIGIDO
       # ======================
       - name: Preparar whitelist (se ausente)
         shell: bash
         run: |
           set -euo pipefail
+          # Chama o script Python dedicado para evitar erros de sintaxe YAML
+          python -m scripts.prepare_whitelist --rodada "${OUT_DIR}"
           WL="${OUT_DIR}/matches_whitelist.csv"
-          if [ ! -s "$WL" ]; then
-            python -c "import os, csv, pandas as pd
-out=os.environ['OUT_DIR']
-paths=[os.path.join(out,'odds_apifootball.csv'), os.path.join(out,'odds_theoddsapi.csv')]
-rows=[]
-for p in paths:
-    if os.path.exists(p) and os.path.getsize(p)>0:
-        df=pd.read_csv(p)
-        cols=[c.lower() for c in df.columns]
-        need=['match_id','home','away']
-        if all(n in cols for n in need):
-            df=df[['match_id','home','away']].dropna()
-            for r in df.itertuples(index=False): rows.append((int(r[0]), str(r[1]), str(r[2])))
-seen=set(); dedup=[]
-for mid,h,a in sorted(rows, key=lambda x:x[0]):
-    key=(h,a)
-    if key in seen: continue
-    seen.add(key); dedup.append((mid,h,a))
-if dedup:
-    with open(os.path.join(out,'matches_whitelist.csv'),'w',newline='',encoding='utf-8') as f:
-        w=csv.writer(f); w.writerow(['match_id','home','away']); w.writerows(dedup)
-print('[consensus] whitelist gerada' if dedup else '[consensus] sem dados para whitelist')" || true
-          fi
-          test -s "$WL" || echo "::notice::Whitelist não gerada (será responsabilidade dos scripts de consenso)."
+          test -s "$WL" || echo "::notice::Whitelist não gerada (nenhum dado de odds encontrado)."
 
       # ======================
       # CONSENSO DE ODDS (MODO ESTRITO)
