@@ -2,232 +2,115 @@
 # -*- coding: utf-8 -*-
 
 """
-Coleta odds via TheOddsAPI.
-Saída: <rodada>/odds_theoddsapi.csv
-Colunas: match_id,home,away,odds_home,odds_draw,odds_away
+ingest_odds_theoddsapi: Busca jogos e odds da TheOddsAPI.
+
+MODO PRODUÇÃO: Este script busca jogos futuros e suas odds, sem depender
+de uma whitelist pré-existente.
 """
 
 import os
-import re
 import sys
-import json
-import time
 import argparse
-from unicodedata import normalize as _ucnorm
-
 import requests
 import pandas as pd
-
-CSV_COLS = ["match_id", "home", "away", "odds_home", "odds_draw", "odds_away"]
-
-STOPWORD_TOKENS = {
-    "aa","ec","ac","sc","fc","afc","cf","ca","cd","ud",
-    "sp","pr","rj","rs","mg","go","mt","ms","pa","pe","pb","rn","ce","ba","al","se","pi","ma","df","es","sc",
-}
+import hashlib
 
 def log(level, msg):
-    print(f"[theoddsapi][{level}] {msg}", flush=True)
-
-def parse_args():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--regions", default="uk,eu,us,au")
-    ap.add_argument("--aliases", default="data/aliases.json")
-    ap.add_argument("--debug", action="store_true")
-    return ap.parse_args()
-
-def _deaccent(s: str) -> str:
-    return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
-
-def norm_key(s: str) -> str:
-    s = _deaccent(s).lower()
-    s = s.replace("&", " e ")
-    s = re.sub(r"[()/\-_.]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def norm_key_tokens(s: str) -> str:
-    toks = [t for t in re.split(r"\s+", norm_key(s)) if t and t not in STOPWORD_TOKENS]
-    return " ".join(toks)
-
-def load_aliases_lenient(path: str) -> dict[str, set[str]]:
-    if not os.path.isfile(path):
-        return {}
-    try:
-        txt = open(path, "r", encoding="utf-8").read()
-        txt = re.sub(r"//.*", "", txt)
-        txt = re.sub(r"/\*.*?\*/", "", txt, flags=re.S)
-        txt = re.sub(r",\s*([\]}])", r"\1", txt)
-        data = json.loads(txt)
-        norm = {}
-        for k, vals in (data or {}).items():
-            base = norm_key_tokens(k)
-            lst = vals if isinstance(vals, list) else []
-            allv = {norm_key_tokens(k)} | {norm_key_tokens(v) for v in lst}
-            norm[base] = allv
-        log("INFO", f"{len(norm)} aliases carregados (lenient).")
-        return norm
-    except Exception as e:
-        log("WARN", f"Falha lendo aliases.json: {e}")
-        return {}
-
-class TheOdds:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base = "https://api.the-odds-api.com/v4"
-
-    def get(self, path, params=None, retries=3, delay=1.5):
-        url = f"{self.base}/{path.lstrip('/')}"
-        for i in range(retries):
-            try:
-                r = requests.get(url, params={**(params or {}), "apiKey": self.api_key}, timeout=25)
-                if r.status_code == 429:
-                    time.sleep(delay*(i+1))
-                    continue
-                r.raise_for_status()
-                return r.json()
-            except Exception as e:
-                if i == retries-1:
-                    log("WARN", f"GET {path} falhou: {e}")
-                time.sleep(delay)
-        return None
-
-    def list_active_soccer_sports(self):
-        sports = self.get("sports", {"all": "true"}) or []
-        return [s["key"] for s in sports if s.get("active") and str(s.get("group","")).lower().startswith("soccer")]
-
-    def fetch_all_soccer_events(self, regions: str):
-        events = []
-        for key in self.list_active_soccer_sports():
-            data = self.get(f"sports/{key}/odds", {
-                "regions": regions,
-                "markets": "h2h",
-                "oddsFormat": "decimal",
-                "dateFormat": "iso"
-            }) or []
-            for g in data:
-                events.append((key, g))
-        return events
-
-def extract_odds_from_game(game: dict):
-    home = game.get("home_team")
-    away = game.get("away_team")
-    for bk in game.get("bookmakers", []):
-        for mk in bk.get("markets", []):
-            if mk.get("key") == "h2h":
-                oh = od = oa = None
-                for o in mk.get("outcomes", []):
-                    nm = (o.get("name") or "")
-                    price = o.get("price")
-                    if not isinstance(price, (int, float)):
-                        continue
-                    if nm.lower() == "draw":
-                        od = float(price)
-                    elif norm_key(nm) == norm_key(home):
-                        oh = float(price)
-                    elif norm_key(nm) == norm_key(away):
-                        oa = float(price)
-                if oh and od and oa:
-                    return oh, od, oa
-    return None
+    tag = "" if level == "INFO" else f"[{level}] "
+    print(f"[theoddsapi]{tag}{msg}", flush=True)
 
 def main():
-    args = parse_args()
-    rodada = args.rodada
-    regions = args.regions
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--regions", default="us,eu,uk,au")
+    ap.add_argument("--aliases", default="")
+    args = ap.parse_args()
 
-    api_key = (os.getenv("THEODDS_API_KEY") or "").strip()
-    if not api_key:
-        log("ERROR", "THEODDS_API_KEY ausente nos secrets.")
+    API_KEY = os.environ.get("THEODDS_API_KEY")
+    if not API_KEY:
+        log("CRITICAL", "Variável de ambiente THEODDS_API_KEY não definida.")
         sys.exit(5)
 
-    wl_path = os.path.join(rodada, "matches_whitelist.csv")
-    if not os.path.isfile(wl_path):
-        log("ERROR", f"Whitelist não encontrada: {wl_path}")
-        pd.DataFrame(columns=CSV_COLS).to_csv(os.path.join(rodada, "odds_theoddsapi.csv"), index=False)
-        sys.exit(5)
+    # Lista de ligas de futebol populares (pode ser expandida)
+    # A TheOddsAPI usa "key" para identificar esportes/ligas
+    SPORT_KEY = "soccer_all_leagues" # Chave genérica para buscar várias ligas
 
-    df_wl = pd.read_csv(wl_path)
-    aliases = load_aliases_lenient(args.aliases)
+    url = f"https://api.the-odds-api.com/v4/sports/{SPORT_KEY}/odds"
+    params = {
+        'apiKey': API_KEY,
+        'regions': args.regions,
+        'markets': 'h2h', # Head-to-head, que inclui o empate
+        'oddsFormat': 'decimal'
+    }
+    
+    log("INFO", f"Buscando jogos de futebol para as regiões: {args.regions}...")
 
-    # Baixa todos os eventos de soccer e indexa por tokens
-    cli = TheOdds(api_key)
-    all_events = cli.fetch_all_soccer_events(regions)
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        log("ERROR", f"Falha na requisição à TheOddsAPI: {e}")
+        pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_theoddsapi.csv"), index=False)
+        sys.exit(0)
 
-    idx = {}
-    for key, g in all_events:
-        h_raw = g.get("home_team", "") or ""
-        a_raw = g.get("away_team", "") or ""
-        odds = extract_odds_from_game(g)
-        if not odds:
-            continue
-        # índices “fortes” por tokens e também por normalização simples
-        keys = set()
-        keys.add(f"{norm_key_tokens(h_raw)}|{norm_key_tokens(a_raw)}")
-        keys.add(f"{norm_key(h_raw)}|{norm_key(a_raw)}")
-        # exemplo: inverter
-        keys.add(f"{norm_key_tokens(a_raw)}|{norm_key_tokens(h_raw)}")
-        keys.add(f"{norm_key(a_raw)}|{norm_key(h_raw)}")
+    if not data:
+        log("WARN", "Nenhum jogo encontrado na TheOddsAPI.")
+        pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_theoddsapi.csv"), index=False)
+        return 0
 
-        for k in keys:
-            if k not in idx:
-                idx[k] = odds
+    log("INFO", f"{len(data)} jogos encontrados. Processando odds...")
+    
+    rows = []
+    for game in data:
+        home_team = game.get('home_team')
+        away_team = game.get('away_team')
 
-    results = []
-    missing = []
+        # Cria um 'match_id' estável a partir dos nomes dos times e data, já que a API não fornece um
+        # O hash garante um ID único para o par de times + data do jogo
+        identifier = f"{home_team}-{away_team}-{game.get('commence_time')}"
+        match_id = int(hashlib.md5(identifier.encode()).hexdigest(), 16) % (10**8)
 
-    for _, r in df_wl.iterrows():
-        mid = str(r["match_id"])
-        home = str(r["home"])
-        away = str(r["away"])
+        # Encontra o bookmaker com as odds (ex: 'Betfair') ou pega o primeiro
+        bookmaker = next((b for b in game['bookmakers'] if b['key'] == 'betfair'), game['bookmakers'][0])
+        markets = bookmaker.get('markets', [])
+        h2h_market = next((m for m in markets if m['key'] == 'h2h'), None)
 
-        log("INFO", f"{mid}: {home} x {away}")
-
-        cands = []
-
-        # chaves primárias por tokens
-        cands_keys = {
-            f"{norm_key_tokens(home)}|{norm_key_tokens(away)}",
-            f"{norm_key(home)}|{norm_key(away)}",
-        }
-
-        # expande com aliases (se houver)
-        hset = {norm_key_tokens(home), norm_key(home)}
-        aset = {norm_key_tokens(away), norm_key(away)}
-        if aliases:
-            hset |= aliases.get(norm_key_tokens(home), set())
-            aset |= aliases.get(norm_key_tokens(away), set())
-        for hh in hset:
-            for aa in aset:
-                cands_keys.add(f"{hh}|{aa}")
-
-        found = None
-        for k in cands_keys:
-            if k in idx:
-                found = idx[k]
-                break
-
-        if not found:
-            log("WARN", f"Nenhum evento mapeado para {home} x {away}")
-            missing.append(mid)
+        if not h2h_market:
             continue
 
-        oh, od, oa = found
-        results.append(dict(match_id=mid, home=home, away=away,
-                            odds_home=oh, odds_draw=od, odds_away=oa))
+        outcomes = h2h_market.get('outcomes', [])
+        
+        # As odds podem estar em ordens diferentes, então precisamos mapeá-las
+        odds_map = {o['name']: o['price'] for o in outcomes}
+        
+        # O nome do time da casa e visitante na API corresponde à ordem
+        odds_home = odds_map.get(home_team)
+        odds_away = odds_map.get(away_team)
+        odds_draw = odds_map.get('Draw')
+        
+        if not all([odds_home, odds_draw, odds_away]):
+            continue
 
-    out_path = os.path.join(rodada, "odds_theoddsapi.csv")
-    pd.DataFrame(results, columns=CSV_COLS).to_csv(out_path, index=False)
+        rows.append({
+            'match_id': match_id,
+            'home': home_team,
+            'away': away_team,
+            'odds_home': float(odds_home),
+            'odds_draw': float(odds_draw),
+            'odds_away': float(odds_away)
+        })
 
-    if not results:
-        log("ERROR", "Nenhuma odd válida encontrada para gerar arquivo.")
-        sys.exit(5)
+    if not rows:
+        log("WARN", "Nenhum jogo com odds completas (1X2) encontrado.")
+        pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_theoddsapi.csv"), index=False)
+        return 0
 
-    if missing:
-        log("ERROR", f"Alguns jogos sem odds ({len(missing)}): {missing}")
-        sys.exit(5)
+    df = pd.DataFrame(rows)
+    out_path = os.path.join(args.rodada, "odds_theoddsapi.csv")
+    df.to_csv(out_path, index=False)
+    log("INFO", f"Arquivo odds_theoddsapi.csv gerado com {len(df)} jogos.")
 
-    log("INFO", f"Odds coletadas: {len(results)} salvas em {out_path}")
     return 0
 
 if __name__ == "__main__":
