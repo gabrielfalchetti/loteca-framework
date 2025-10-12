@@ -1,4 +1,4 @@
-Name: Loteca - Super End2End
+name: Loteca - Super End2End
 
 on:
   workflow_dispatch:
@@ -124,7 +124,7 @@ jobs:
           done
 
       # ======================
-      # PREPARAR WHITELIST (SE AUSENTE) - CORRIGIDO
+      # PREPARAR WHITELIST (SE AUSENTE)
       # ======================
       - name: Preparar whitelist (se ausente)
         shell: bash
