@@ -4,8 +4,8 @@
 """
 Prepara o arquivo matches_whitelist.csv a partir dos arquivos de odds.
 
-Este script consolida os jogos encontrados nos arquivos de odds, remove duplicatas
-e cria uma "whitelist" de jogos a serem processados.
+CORREÇÃO: Garante que o arquivo de saída seja sempre criado, mesmo que
+apenas com o cabeçalho, para evitar erros de "File Not Found" no pipeline.
 """
 
 import os
@@ -26,11 +26,7 @@ def main():
     out_dir = args.rodada
     wl_path = os.path.join(out_dir, "matches_whitelist.csv")
 
-    if os.path.exists(wl_path) and os.path.getsize(wl_path) > 0:
-        log("INFO", "matches_whitelist.csv já existe. Nenhuma ação necessária.")
-        return 0
-
-    log("INFO", "matches_whitelist.csv não encontrado ou vazio. Gerando a partir dos arquivos de odds...")
+    log("INFO", "Gerando whitelist a partir dos arquivos de odds...")
 
     paths = [
         os.path.join(out_dir, 'odds_apifootball.csv'),
@@ -39,10 +35,9 @@ def main():
     
     rows = []
     for p in paths:
-        if os.path.exists(p) and os.path.getsize(p) > 0:
+        if os.path.exists(p) and os.path.getsize(p) > 50: # Verifica se o arquivo tem mais que o cabeçalho
             try:
                 df = pd.read_csv(p)
-                # Normaliza nomes de colunas para minúsculas para robustez
                 df.columns = [c.lower() for c in df.columns]
                 
                 required_cols = {'match_id', 'home', 'away'}
@@ -50,37 +45,35 @@ def main():
                     df_subset = df[['match_id', 'home', 'away']].dropna()
                     for r in df_subset.itertuples(index=False):
                         rows.append((int(r.match_id), str(r.home), str(r.away)))
-                else:
-                    log("WARN", f"Arquivo {os.path.basename(p)} não contém as colunas necessárias: {required_cols - set(df.columns)}")
             except Exception as e:
                 log("WARN", f"Falha ao processar {os.path.basename(p)}: {e}")
 
-    if not rows:
-        log("WARN", "Nenhum dado de jogo encontrado nos arquivos de odds para gerar a whitelist.")
-        return 0
+    # Garante que o arquivo seja criado mesmo se não houver jogos
+    try:
+        with open(wl_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['match_id', 'home', 'away'])
+            
+            if rows:
+                seen = set()
+                dedup = []
+                for mid, h, a in sorted(rows, key=lambda x: x[0]):
+                    key = (str(h).lower(), str(a).lower())
+                    if key not in seen:
+                        seen.add(key)
+                        dedup.append((mid, h, a))
 
-    # De-duplica por (home, away), mantendo o primeiro match_id encontrado
-    seen = set()
-    dedup = []
-    # Ordena por match_id para garantir consistência
-    for mid, h, a in sorted(rows, key=lambda x: x[0]):
-        key = (h, a)
-        if key not in seen:
-            seen.add(key)
-            dedup.append((mid, h, a))
+                if dedup:
+                    writer.writerows(dedup)
+                    log("INFO", f"Whitelist gerada com sucesso em {wl_path} com {len(dedup)} jogos.")
+                else:
+                    log("WARN", "Nenhum jogo único encontrado para criar a whitelist.")
+            else:
+                log("WARN", "Nenhum dado de jogo encontrado nos arquivos de odds para gerar a whitelist.")
 
-    if dedup:
-        try:
-            with open(wl_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(['match_id', 'home', 'away'])
-                writer.writerows(dedup)
-            log("INFO", f"Whitelist gerada com sucesso em {wl_path} com {len(dedup)} jogos.")
-        except Exception as e:
-            log("CRITICAL", f"Falha ao escrever em {wl_path}: {e}")
-            return 1
-    else:
-        log("WARN", "Nenhum jogo único encontrado para criar a whitelist.")
+    except Exception as e:
+        log("CRITICAL", f"Falha ao escrever em {wl_path}: {e}")
+        return 1
 
     return 0
 
