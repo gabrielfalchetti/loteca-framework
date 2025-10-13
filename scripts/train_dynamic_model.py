@@ -1,133 +1,138 @@
-#!/usr/bin/env python3
+# scripts/train_dynamic_model.py
 # -*- coding: utf-8 -*-
-
 """
-train_dynamic_model: Script que gera os parâmetros preditivos dinâmicos.
-
-CORREÇÃO: Este script agora lê os times presentes na rodada (de odds_consensus.csv)
-e gera um arquivo de parâmetros que inclui TODOS eles, evitando o erro de
-"Parâmetros dinâmicos ausentes".
-"""
-
-import os
-import sys
-import argparse
-import json
-import pandas as pd
-import numpy as np
-import re
-from unicodedata import normalize as _ucnorm
-
-def log(level, msg):
-    tag = "" if level == "INFO" else f"[{level}] "
-    print(f"[train_dyn]{tag}{msg}", flush=True)
-
-# Funções de normalização de nome de time (devem ser idênticas às do xg_bivariate)
-STOPWORD_TOKENS = {
-    "aa","ec","ac","sc","fc","afc","cf","ca","cd","ud",
-    "sp","pr","rj","rs","mg","go","mt","ms","pa","pe","pb","rn","ce","ba","al","se","pi","ma","df","es","sc",
+Treina um "Poisson Bivariado Dinâmico" leve (equivalente a um modelo de espaço
+de estados com suavização exponencial/EWMA para ataque e defesa).
+Saída: <rodada>/state_params.json com:
+{
+  "home_adv": float,
+  "teams": {
+     "<Time>": {"alpha": float, "beta": float}
+  }
 }
 
-def _deaccent(s: str) -> str:
-    return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
+Entrada mínima necessária:
+- <rodada>/matches_whitelist.csv  (colunas: match_id,home,away)
+Opcional (melhora o ajuste, se existir):
+- data/history/results.csv        (colunas: date,home,away,goals_home,goals_away)
 
-def norm_key(name: str) -> str:
-    s = _deaccent(name).lower()
-    s = s.replace("&", " e ")
-    s = re.sub(r"[/()\-_.]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+Uso:
+  python -m scripts.train_dynamic_model --rodada data/out/<RUN_ID> [--history data/history/results.csv] [--ewma 0.20]
+"""
+from __future__ import annotations
+import argparse, json, os, sys
+from typing import Dict, Tuple
+import math
+import pandas as pd
+import numpy as np
 
-def norm_key_tokens(name: str) -> str:
-    toks = [t for t in re.split(r"\s+", norm_key(name)) if t and t not in STOPWORD_TOKENS]
-    return " ".join(toks)
+def _safe_read_csv(path: str) -> pd.DataFrame | None:
+    try:
+        if os.path.isfile(path):
+            return pd.read_csv(path)
+    except Exception:
+        pass
+    return None
 
-def run_state_space_model(teams: list) -> dict:
+def _normalize_team(s: str) -> str:
+    return str(s).strip()
+
+def estimate_home_adv(df_hist: pd.DataFrame) -> float:
+    """Estimativa simples de vantagem de mando = média( Ghome - Gaway )."""
+    if df_hist is None or df_hist.empty:
+        return 0.25  # default moderado
+    diff = (df_hist["goals_home"] - df_hist["goals_away"]).astype(float)
+    return float(np.clip(diff.mean() * 0.15 + 0.15, 0.0, 0.6))  # compressão
+
+def ewma_updates(df_hist: pd.DataFrame, alpha_ewma: float) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
-    Executa o núcleo do Modelo Dinâmico BPD (Koopman & Lit / Rue & Salvesen).
-    
-    PLACEHOLDER AVANÇADO: Esta função agora gera parâmetros MOCK para
-    todos os times encontrados na rodada, garantindo que a previsão não falhe.
-    A próxima etapa de melhoria será substituir os valores mock pela
-    lógica real do Filtro de Kalman.
+    EWMA para 'força de ataque' (gols feitos) e 'força de defesa' (gols sofridos).
+    Retorna dicionários por time: alpha (ataque) e beta (defesa).
     """
-    log("INFO", f"Gerando parâmetros dinâmicos para {len(teams)} times encontrados na rodada...")
-    
-    team_params = {}
-    np.random.seed(42) # Para reprodutibilidade dos mocks
+    atk = {}
+    dfn = {}
+    if df_hist is None or df_hist.empty:
+        return atk, dfn
 
-    for team_name in teams:
-        # Gera parâmetros aleatórios, mas realistas (em log-escala)
-        # Times "melhores" tendem a ter alfa > 0 e beta < 0
-        alpha = np.random.normal(0.1, 0.2)  # Força de Ataque
-        beta = np.random.normal(-0.1, 0.2) # Força de Defesa
-        
-        team_key = norm_key_tokens(team_name)
-        team_params[team_key] = {"alpha": round(alpha, 4), "beta": round(beta, 4)}
+    # Ordena temporalmente se tiver data
+    if "date" in df_hist.columns:
+        try:
+            df_hist = df_hist.copy()
+            df_hist["date"] = pd.to_datetime(df_hist["date"], errors="coerce")
+            df_hist = df_hist.sort_values("date")
+        except Exception:
+            pass
 
-    # Parâmetros fixos da liga (devem ser estimados a partir de dados históricos)
-    estimated_parameters = {
-        "team_params": team_params,
-        "league_fixed_effects": {
-            "home_advantage": 0.36, 
-            "dependence_gamma": 0.09,
-        }
-    }
-    
-    log("INFO", "Parâmetros dinâmicos (mock) gerados com sucesso para todos os times.")
-    return estimated_parameters
+    for _, row in df_hist.iterrows():
+        h, a = _normalize_team(row["home"]), _normalize_team(row["away"])
+        gh, ga = float(row["goals_home"]), float(row["goals_away"])
 
-def main():
+        # ataque (gols marcados)
+        prev_h_atk = atk.get(h, gh)  # seed com primeiro valor observado
+        prev_a_atk = atk.get(a, ga)
+
+        atk[h] = (1 - alpha_ewma) * prev_h_atk + alpha_ewma * gh
+        atk[a] = (1 - alpha_ewma) * prev_a_atk + alpha_ewma * ga
+
+        # defesa (gols sofridos)
+        prev_h_def = dfn.get(h, ga)
+        prev_a_def = dfn.get(a, gh)
+
+        dfn[h] = (1 - alpha_ewma) * prev_h_def + alpha_ewma * ga
+        dfn[a] = (1 - alpha_ewma) * prev_a_def + alpha_ewma * gh
+
+    # Regularização leve para evitar zeros extremos
+    for t in set(list(atk.keys()) + list(dfn.keys())):
+        atk[t] = float(max(0.2, min(3.0, atk.get(t, 1.1))))
+        dfn[t] = float(max(0.2, min(3.0, dfn.get(t, 1.1))))
+
+    return atk, dfn
+
+def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--rodada", required=True, help="Diretório da rodada (ex: data/out/<RUN_ID>)")
+    ap.add_argument("--history", default="data/history/results.csv", help="Caminho do histórico (opcional)")
+    ap.add_argument("--ewma", type=float, default=0.20, help="Fator EWMA (0..1). Default 0.20")
     args = ap.parse_args()
 
     rodada_dir = args.rodada
-    out_path = os.path.join(rodada_dir, "dynamic_params.json")
-    consensus_path = os.path.join(rodada_dir, "odds_consensus.csv")
+    os.makedirs(rodada_dir, exist_ok=True)
 
-    # 1. Ler os times da rodada atual
-    try:
-        # Verifica se o arquivo de consenso existe e não está vazio
-        if not os.path.exists(consensus_path) or os.path.getsize(consensus_path) < 50:
-             log("WARN", f"Arquivo {os.path.basename(consensus_path)} não encontrado ou vazio. O treinamento não será executado.")
-             # Cria um arquivo JSON vazio para o pipeline não quebrar
-             with open(out_path, 'w', encoding='utf-8') as f:
-                json.dump({}, f)
-             return 0
+    wl_path = os.path.join(rodada_dir, "matches_whitelist.csv")
+    wl = _safe_read_csv(wl_path)
+    if wl is None or wl.empty:
+        print(f"[dynamic][CRITICAL] Whitelist não encontrada ou vazia: {wl_path}", file=sys.stderr)
+        return 5
 
-        df_consensus = pd.read_csv(consensus_path)
-        if df_consensus.empty:
-            raise ValueError("O arquivo de consenso está vazio.")
+    hist = _safe_read_csv(args.history)
+    if hist is not None and not hist.empty:
+        needed = {"home", "away", "goals_home", "goals_away"}
+        if not needed.issubset(set(hist.columns)):
+            hist = None  # ignora se colunas ausentes
 
-        home_teams = df_consensus['team_home'].unique()
-        away_teams = df_consensus['team_away'].unique()
-        all_teams = set(home_teams) | set(away_teams)
+    home_adv = estimate_home_adv(hist)  # vantagem de mando média
+    atk, dfn = ewma_updates(hist, args.ewma) if hist is not None else ({}, {})
 
-    except (FileNotFoundError, ValueError, pd.errors.EmptyDataError) as e:
-        log("WARN", f"Não foi possível ler times do arquivo de consenso ({e}). O treinamento não será executado.")
-        with open(out_path, 'w', encoding='utf-8') as f:
-            json.dump({}, f)
-        return 0
+    # Garante que todos times da rodada tenham α/β (mesmo sem histórico)
+    teams = set(_normalize_team(x) for x in pd.concat([wl["home"], wl["away"]]).unique())
+    params = {}
+    for t in teams:
+        params[t] = {
+            "alpha": float(atk.get(t, 1.15)),  # defaults suaves
+            "beta": float(dfn.get(t, 1.05))
+        }
 
-    if not all_teams:
-        log("WARN", "Nenhum time encontrado no arquivo de consenso. O treinamento não será executado.")
-        with open(out_path, 'w', encoding='utf-8') as f:
-            json.dump({}, f)
-        return 0
+    out = {
+        "home_adv": float(home_adv),
+        "teams": params
+    }
 
-    # 2. Executar o Modelo Dinâmico (placeholder) para os times encontrados
-    params = run_state_space_model(list(all_teams))
+    state_path = os.path.join(rodada_dir, "state_params.json")
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
 
-    # 3. Salvar o Resultado
-    try:
-        with open(out_path, 'w', encoding='utf-8') as f:
-            json.dump(params, f, indent=4)
-        log("INFO", f"dynamic_params.json gerado com sucesso: {out_path}")
-        return 0
-    except Exception as e:
-        log("CRITICAL", f"Falha ao salvar dynamic_params.json: {e}")
-        return 1
+    print(f"[dynamic][OK] Parâmetros salvos em: {state_path}")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
