@@ -31,6 +31,7 @@ def main():
         
     try:
         source_df = pd.read_csv(args.source_csv)
+        # Cria um set de tuplas para busca rápida: {('timea', 'timeb'), ...}
         target_games = { (str(row['home']).lower(), str(row['away']).lower()) for _, row in source_df.iterrows() }
     except FileNotFoundError:
         log("CRITICAL", f"Arquivo de origem {args.source_csv} não encontrado.")
@@ -63,26 +64,27 @@ def main():
     rows = []
     for game in all_games_from_api:
         try:
-            home_team = game['home_team']
-            away_team = game['away_team']
+            home_team_api = game['home_team']
+            away_team_api = game['away_team']
 
             # Verifica se o jogo da API está na nossa lista de alvos
             # A busca é flexível, verificando se os nomes estão contidos um no outro
             found = False
+            matched_home, matched_away = None, None
             for target_home, target_away in target_games:
-                if (target_home in home_team.lower() and target_away in away_team.lower()):
+                if (target_home in home_team_api.lower() and target_away in away_team_api.lower()):
                     found = True
-                    # Usa os nomes do nosso arquivo fonte para consistência
-                    home_team = source_df.loc[(source_df['home'].str.lower() == target_home) & (source_df['away'].str.lower() == target_away), 'home'].iloc[0]
-                    away_team = source_df.loc[(source_df['home'].str.lower() == target_home) & (source_df['away'].str.lower() == target_away), 'away'].iloc[0]
+                    # Recupera os nomes originais do nosso arquivo fonte para consistência
+                    matched_home = source_df.loc[(source_df['home'].str.lower() == target_home) & (source_df['away'].str.lower() == target_away), 'home'].iloc[0]
+                    matched_away = source_df.loc[(source_df['home'].str.lower() == target_home) & (source_df['away'].str.lower() == target_away), 'away'].iloc[0]
                     break
             
             if not found:
                 continue
             
-            log("INFO", f"Jogo da lista encontrado na API: {home_team} vs {away_team}")
+            log("INFO", f"Jogo da lista encontrado na API: {matched_home} vs {matched_away}")
             
-            identifier = f"{home_team}-{away_team}-{game['commence_time']}"
+            identifier = f"{matched_home}-{matched_away}-{game['commence_time']}"
             match_id = int(hashlib.md5(identifier.encode()).hexdigest(), 16) % (10**8)
 
             bookmaker = next(b for b in game['bookmakers'] if any(m['key'] == 'h2h' for m in b.get('markets', [])))
@@ -90,16 +92,15 @@ def main():
             
             outcomes = {o['name']: o['price'] for o in h2h_market['outcomes']}
             
-            # A API pode ter os nomes ligeiramente diferentes, então fazemos a busca correta
-            odds_home = outcomes.get(game['home_team'])
-            odds_away = outcomes.get(game['away_team'])
+            odds_home = outcomes.get(home_team_api)
+            odds_away = outcomes.get(away_team_api)
             odds_draw = outcomes.get('Draw')
 
             if not all([odds_home, odds_draw, odds_away]):
                 continue
 
             rows.append({
-                'match_id': match_id, 'home': home_team, 'away': away_team,
+                'match_id': match_id, 'home': matched_home, 'away': matched_away,
                 'odds_home': float(odds_home),
                 'odds_draw': float(odds_draw),
                 'odds_away': float(odds_away)
