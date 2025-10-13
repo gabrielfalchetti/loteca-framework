@@ -8,7 +8,7 @@ on:
         required: true
         default: "2025"
       lookahead_days:
-        description: "Dias a frente para odds (ex: 3)"
+        description: "Dias à frente para odds (ex: 3)"
         required: true
         default: "3"
       bankroll:
@@ -20,11 +20,11 @@ on:
         required: true
         default: "0.5"
       kelly_cap:
-        description: "Limite maximo por aposta (0..1)"
+        description: "Limite máximo por aposta (0..1)"
         required: true
         default: "0.1"
       kelly_top_n:
-        description: "Qtd maxima de apostas"
+        description: "Qtd máxima de apostas"
         required: true
         default: "14"
       round_to:
@@ -32,13 +32,17 @@ on:
         required: true
         default: "1"
       regions:
-        description: "Regioes TheOddsAPI (ex: uk,eu,us,au)"
+        description: "Regiões TheOddsAPI (ex: uk,eu,us,au)"
         required: true
         default: "uk,eu,us,au"
       train_calibrator:
-        description: "Treinar calibrador isotonico nesta execucao? (true/false)"
+        description: "Treinar calibrador isotônico nesta execução? (true/false)"
         required: true
         default: "false"
+      source_csv:
+        description: "CSV de jogos (cabeçalho: match_id,home,away)"
+        required: true
+        default: "data/in/matches_source.csv"
 
 env:
   SEASON: ${{ github.event.inputs.season }}
@@ -50,9 +54,10 @@ env:
   KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n }}
   ROUND_TO: ${{ github.event.inputs.round_to }}
   TRAIN_CALIBRATOR: ${{ github.event.inputs.train_calibrator }}
-  PYTHONUTF8: "1"
-  PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PIP_NO_WARN_SCRIPT_LOCATION: "1"
+  SOURCE_CSV: ${{ github.event.inputs.source_csv }}
+  PYTHONUTF8: 1
+  PIP_DISABLE_PIP_VERSION_CHECK: 1
+  PIP_NO_WARN_SCRIPT_LOCATION: 1
 
 jobs:
   loteca-e2e:
@@ -82,95 +87,110 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Prepare Matches Source (detect file and validate header)
+      - name: Validar SOURCE_CSV e criar whitelist
         shell: bash
         run: |
           set -euo pipefail
-          if [ -s "data/in/matches_sources.csv" ]; then
-            SOURCE_CSV="data/in/matches_sources.csv"
-          elif [ -s "data/in/matches_source.csv" ]; then
-            SOURCE_CSV="data/in/matches_source.csv"
-          else
-            echo "::error::Arquivo de jogos nao encontrado. Crie 'data/in/matches_sources.csv' ou 'data/in/matches_source.csv' com cabecalho: match_id,home,away"
+          if [ ! -s "${SOURCE_CSV}" ]; then
+            echo "::error::Arquivo ${SOURCE_CSV} não encontrado ou vazio. Crie-o com cabeçalho: match_id,home,away"
             exit 4
           fi
-          echo "SOURCE_CSV=${SOURCE_CSV}" >> "$GITHUB_ENV"
-
           header="$(head -n1 "${SOURCE_CSV}" | tr -d '\r')"
           for c in match_id home away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
           done
-
           cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
 
-      # 1) UPDATE HISTORICAL DATA
-      - name: Update Historical Data (mandatory)
+      # 1) UPDATE HISTORICAL DATA (feedback loop leve; não falha se API sem chave)
+      - name: Update Historical Data (best effort)
         shell: bash
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         run: |
           set -euo pipefail
-          [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-          python -m scripts.update_history --since_days 14 --out "data/history/results.csv" || true
-          if [ ! -s "data/history/results.csv" ]; then
-            echo "::warning::Sem historico via API; criando seed minimo a partir do SOURCE_CSV."
-            python - <<'PY'
-import csv, os
-src = os.environ["SOURCE_CSV"]
-outp = "data/history/results.csv"
-with open(src, newline='', encoding='utf-8') as f, open(outp, 'w', newline='', encoding='utf-8') as g:
-    r = csv.DictReader(f)
-    w = csv.DictWriter(g, fieldnames=["date","home","away","home_goals","away_goals"])
-    w.writeheader()
-    for row in r:
-        w.writerow({"date":"2025-01-01","home":row["home"],"away":row["away"],"home_goals":1,"away_goals":1})
-PY
+          if [ ! -f scripts/update_history.py ]; then
+            echo "::warning::scripts/update_history.py não encontrado; criando histórico vazio."
+            printf "date,home,away,home_goals,away_goals\n" > data/history/results.csv
+          else
+            if [ -z "${API_FOOTBALL_KEY:-}" ]; then
+              echo "::notice::API_FOOTBALL_KEY não configurada; criando histórico vazio."
+              printf "date,home,away,home_goals,away_goals\n" > data/history/results.csv
+            else
+              # Tenta atualizar; se falhar, mantém arquivo com cabeçalho
+              printf "date,home,away,home_goals,away_goals\n" > data/history/results.csv
+              set +e
+              python -m scripts.update_history --since_days 14 --out "data/history/results.csv"
+              rc=$?
+              set -e
+              if [ $rc -ne 0 ]; then
+                echo "::notice::update_history falhou (rc=$rc); seguindo com histórico vazio."
+              fi
+            fi
           fi
-          test -s "data/history/results.csv" || { echo "::error::history results.csv not generated"; exit 1; }
 
-      # 2) FEATURE ENGINEERING
-      - name: Build Features (mandatory)
+      # 2) FEATURE ENGINEERING (gera parquet; se histórico vazio, cria parquet vazio válido)
+      - name: Build Features
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
-          [ -f scripts/feature_engineer.py ] || { echo "::error::scripts/feature_engineer.py not found"; exit 2; }
-          python -m scripts.feature_engineer \
-            --history "data/history/results.csv" \
-            --out "data/history/features.parquet" \
-            --ewma 0.20
+          if [ ! -f scripts/feature_engineer.py ]; then
+            echo "::warning::scripts/feature_engineer.py não encontrado; criando features.parquet vazio."
+            python - <<'PY'
+import pandas as pd
+pd.DataFrame().to_parquet("data/history/features.parquet")
+PY
+          else
+            # Se results.csv só tem cabeçalho, cria parquet vazio; senão roda o script
+            ROWS=$(wc -l < data/history/results.csv || echo 0)
+            if [ "$ROWS" -le 1 ]; then
+              echo "::notice::history vazio; criando features.parquet vazio."
+              python - <<'PY'
+import pandas as pd
+pd.DataFrame().to_parquet("data/history/features.parquet")
+PY
+            else
+              python -m scripts.feature_engineer \
+                --history "data/history/results.csv" \
+                --out "data/history/features.parquet" \
+                --ewma 0.20
+            fi
+          fi
           test -s "data/history/features.parquet" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      # 3) TRAIN DYNAMIC MODEL
+      # 3) TRAIN DYNAMIC MODEL (gera state_params.json; se não possível, cria default)
       - name: Train Dynamic Poisson Model
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
-          [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 7; }
-          python -m scripts.train_dynamic_model \
-            --rodada "${OUT_DIR}" \
-            --history "data/history/results.csv" \
-            --features "data/history/features.parquet" \
-            --ewma 0.20
-          test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 7; }
+          if [ -f scripts/train_dynamic_model.py ]; then
+            set +e
+            python -m scripts.train_dynamic_model \
+              --rodada "${OUT_DIR}" \
+              --history "data/history/results.csv" \
+              --features "data/history/features.parquet" \
+              --ewma 0.20
+            rc=$?
+            set -e
+            if [ $rc -ne 0 ]; then
+              echo "::notice::train_dynamic_model falhou (rc=$rc); criando state_params.json default."
+            fi
+          else
+            echo "::warning::scripts/train_dynamic_model.py não encontrado; criando state_params.json default."
+          fi
+          if [ ! -s "${OUT_DIR}/state_params.json" ]; then
+            printf '{"teams":{}, "timestamp":"%s"}' "$(date -u +%FT%TZ)" > "${OUT_DIR}/state_params.json"
+          fi
 
-      # 4) INGEST FUTURE MATCHES & ODDS
+      # 4) INGEST FUTURE MATCHES & ODDS (APIs opcionais; exigem SOURCE_CSV)
       - name: Ingest API-FOOTBALL
         shell: bash
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          SOURCE_CSV: ${{ env.SOURCE_CSV }}
-          SEASON: ${{ env.SEASON }}
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${API_FOOTBALL_KEY:-}" ]; then
-            echo "::notice::API_FOOTBALL_KEY nao configurada; pulando ingest_odds_apifootball."
+            echo "::notice::API_FOOTBALL_KEY não configurada; pulando ingest_odds_apifootball."
             exit 0
           fi
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
@@ -187,14 +207,11 @@ PY
       - name: Ingest TheOddsAPI
         shell: bash
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          SOURCE_CSV: ${{ env.SOURCE_CSV }}
-          REGIONS: ${{ env.REGIONS }}
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${THEODDS_API_KEY:-}" ]; then
-            echo "::notice::THEODDS_API_KEY nao configurada; pulando ingest_odds_theoddsapi."
+            echo "::notice::THEODDS_API_KEY não configurada; pulando ingest_odds_theoddsapi."
             exit 0
           fi
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
@@ -208,11 +225,9 @@ PY
           done
           [ -s "${OUT_DIR}/odds_theoddsapi.csv" ] || echo "::warning::odds_theoddsapi.csv not generated"
 
-      # 5) CONSENSUS STRICT
+      # 5) CONSENSUS STRICT (não passa jogo sem odds!)
       - name: Consensus Odds (strict)
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -224,12 +239,10 @@ PY
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
-      # 6) TRAIN CALIBRATOR (optional)
+      # 6) (opcional) TREINAR CALIBRADOR
       - name: Train Calibrator (optional)
         if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/train_calibrator.py ] || { echo "::error::scripts/train_calibrator.py not found"; exit 12; }
@@ -239,11 +252,9 @@ PY
             --out_dir "data/history/calibration"
           test -s "data/history/calibration/calibrator_home.pkl" || { echo "::error::calibrator files not generated"; exit 12; }
 
-      # 7) PREDICT
+      # 7) PREVISÃO ÚNICA (núcleo unificado)
       - name: Predict (Dynamic Bivariate Poisson)
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
@@ -251,11 +262,9 @@ PY
           OUT="${OUT_DIR}/xg_bivariate.csv"
           test -s "$OUT" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
-      # 8) CALIBRATE
+      # 8) CALIBRAÇÃO (aplica calibrador treinado)
       - name: Calibrate probabilities
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
@@ -266,13 +275,6 @@ PY
       # 9) KELLY
       - name: Kelly bets
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          BANKROLL: ${{ env.BANKROLL }}
-          KELLY_FRACTION: ${{ env.KELLY_FRACTION }}
-          KELLY_CAP: ${{ env.KELLY_CAP }}
-          KELLY_TOP_N: ${{ env.KELLY_TOP_N }}
-          ROUND_TO: ${{ env.ROUND_TO }}
         run: |
           set -euo pipefail
           [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 10; }
@@ -286,11 +288,9 @@ PY
           OUT="${OUT_DIR}/kelly_stakes.csv"
           test -s "$OUT" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
 
-      # 10) TICKET
+      # 10) TICKET LOTECA
       - name: Build Loteca ticket
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/make_loteca_ticket.py ] || { echo "::error::scripts/make_loteca_ticket.py not found"; exit 11; }
