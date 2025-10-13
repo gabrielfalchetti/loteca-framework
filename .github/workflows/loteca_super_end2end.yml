@@ -86,6 +86,8 @@ jobs:
       - name: Update Historical Data (mandatory)
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         shell: bash
         run: |
           set -euo pipefail
