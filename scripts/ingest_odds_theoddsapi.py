@@ -20,7 +20,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--regions", default="us,eu,uk,au")
-    ap.add_argument("--source_csv", default="data/in/matches_sources.csv")
+    # CORREÇÃO: Adiciona o argumento --source_csv que estava faltando
+    ap.add_argument("--source_csv", required=True, help="Caminho para o CSV com a lista de jogos")
     args = ap.parse_args()
 
     API_KEY = os.environ.get("THEODDS_API_KEY")
@@ -30,7 +31,6 @@ def main():
         
     try:
         source_df = pd.read_csv(args.source_csv)
-        # Cria um set de tuplas para busca rápida: {('timea', 'timeb'), ...}
         target_games = { (str(row['home']).lower(), str(row['away']).lower()) for _, row in source_df.iterrows() }
     except FileNotFoundError:
         log("CRITICAL", f"Arquivo de origem {args.source_csv} não encontrado.")
@@ -67,10 +67,20 @@ def main():
             away_team = game['away_team']
 
             # Verifica se o jogo da API está na nossa lista de alvos
-            if (home_team.lower(), away_team.lower()) not in target_games:
+            # A busca é flexível, verificando se os nomes estão contidos um no outro
+            found = False
+            for target_home, target_away in target_games:
+                if (target_home in home_team.lower() and target_away in away_team.lower()):
+                    found = True
+                    # Usa os nomes do nosso arquivo fonte para consistência
+                    home_team = source_df.loc[(source_df['home'].str.lower() == target_home) & (source_df['away'].str.lower() == target_away), 'home'].iloc[0]
+                    away_team = source_df.loc[(source_df['home'].str.lower() == target_home) & (source_df['away'].str.lower() == target_away), 'away'].iloc[0]
+                    break
+            
+            if not found:
                 continue
             
-            log("INFO", f"Jogo encontrado na API: {home_team} vs {away_team}")
+            log("INFO", f"Jogo da lista encontrado na API: {home_team} vs {away_team}")
             
             identifier = f"{home_team}-{away_team}-{game['commence_time']}"
             match_id = int(hashlib.md5(identifier.encode()).hexdigest(), 16) % (10**8)
@@ -80,11 +90,19 @@ def main():
             
             outcomes = {o['name']: o['price'] for o in h2h_market['outcomes']}
             
+            # A API pode ter os nomes ligeiramente diferentes, então fazemos a busca correta
+            odds_home = outcomes.get(game['home_team'])
+            odds_away = outcomes.get(game['away_team'])
+            odds_draw = outcomes.get('Draw')
+
+            if not all([odds_home, odds_draw, odds_away]):
+                continue
+
             rows.append({
                 'match_id': match_id, 'home': home_team, 'away': away_team,
-                'odds_home': float(outcomes[home_team]),
-                'odds_draw': float(outcomes['Draw']),
-                'odds_away': float(outcomes[away_team])
+                'odds_home': float(odds_home),
+                'odds_draw': float(odds_draw),
+                'odds_away': float(odds_away)
             })
         except (KeyError, IndexError, StopIteration):
             continue
