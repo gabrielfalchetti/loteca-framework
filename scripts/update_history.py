@@ -1,251 +1,201 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-update_history.py
------------------
-Atualiza (ou cria) um histórico de resultados em CSV.
-
-Interface (compatível com o workflow):
-    python -m scripts.update_history --since_days 14 --out data/history/results.csv
-
-Comportamento:
-- Se houver variável de ambiente API_FOOTBALL_KEY, tenta baixar jogos FINALIZADOS
-  dos últimos `since_days` dias via API-FOOTBALL.
-- Se a chamada falhar (sem chave, sem internet, erro HTTP etc.), o script ainda
-  garante a existência do arquivo de saída com cabeçalho válido.
-- Faz merge com um CSV existente (se existir) e remove duplicatas.
-
-Colunas de saída (todas em minúsculas):
-    date            (ISO 8601, UTC)
-    league          (nome da liga, quando disponível)
-    season          (ano/temporada)
-    home
-    away
-    home_goals
-    away_goals
-    source          (ex.: 'api_football' ou 'manual/unknown')
-    match_id        (id do provedor, quando disponível; caso contrário, hash estável)
-
-Requisitos:
-    pandas, requests
-"""
+# scripts/update_history.py
+# Baixa resultados FINALIZADOS dos últimos N dias via API-FOOTBALL
+# e salva em CSV padronizado para o feature_engineer.py.
+#
+# Uso:
+#   python -m scripts.update_history --since_days 14 --out data/history/results.csv
+#
+# Saída (CSV):
+#   date_utc,home,away,home_goals,away_goals
+#   2025-10-10T19:00:00Z,Time A,Time B,2,1
+#
+# Observações:
+# - Só grava o arquivo se houver pelo menos 1 partida; caso contrário, sai com código 2 e mensagem clara.
+# - Tratei paginação/retry básicos. O endpoint usado é /fixtures?date=YYYY-MM-DD&timezone=UTC
 
 from __future__ import annotations
 
 import argparse
 import csv
-import datetime as dt
-import hashlib
 import os
 import sys
-from typing import List, Dict, Any
+import time
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any, Optional
 
-import pandas as pd
 import requests
 
 
-API_FOOTBALL_BASE = "https://v3.football.api-sports.io/fixtures"
+API_BASE = "https://v3.football.api-sports.io"
+HEADERS_NAME = "x-apisports-key"
 
 
-def _iso_date(d: dt.date) -> str:
-    return d.strftime("%Y-%m-%d")
+def utc_today() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def _safe_int(x) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return 0
+def daterange_utc(days_back: int) -> List[str]:
+    """Lista as datas (YYYY-MM-DD) de hoje até N dias atrás (inclusive), em UTC."""
+    today = utc_today().date()
+    dates = []
+    for i in range(days_back, -1, -1):
+        d = today - timedelta(days=i)
+        dates.append(d.isoformat())
+    return dates
 
 
-def _stable_match_id(row: Dict[str, Any]) -> str:
-    """
-    Constrói um hash estável quando não houver ID do provedor.
-    Usa (date, season, league, home, away).
-    """
-    key = "|".join(
-        [
-            str(row.get("date", "")),
-            str(row.get("season", "")),
-            str(row.get("league", "")),
-            str(row.get("home", "")),
-            str(row.get("away", "")),
-        ]
-    )
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
-
-
-def fetch_api_football(since_days: int) -> List[Dict[str, Any]]:
-    key = os.environ.get("API_FOOTBALL_KEY", "").strip()
-    if not key:
-        print("[history][WARN] API_FOOTBALL_KEY ausente; pulando fetch da API-FOOTBALL.")
-        return []
-
-    end = dt.date.today()
-    start = end - dt.timedelta(days=int(since_days))
-
-    params = {
-        "from": _iso_date(start),
-        "to": _iso_date(end),
-        "timezone": "UTC",
-        # status 'FT' => partidas finalizadas; 'AET' e 'PEN' também podem ocorrer:
-        "status": "FT-AET-PEN",
-    }
-    headers = {"x-apisports-key": key}
-
-    print(
-        f"[history][INFO] Buscando fixtures finalizados via API-FOOTBALL "
-        f"de {params['from']} a {params['to']}."
-    )
-
-    try:
-        r = requests.get(API_FOOTBALL_BASE, params=params, headers=headers, timeout=25)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        print(f"[history][ERROR] Falha ao chamar API-FOOTBALL: {e}")
-        return []
-
-    resp = data.get("response", [])
-    out: List[Dict[str, Any]] = []
-    for fx in resp:
+def api_get(url: str, headers: Dict[str, str], params: Dict[str, Any], max_retries: int = 3, backoff: float = 1.5) -> Optional[Dict[str, Any]]:
+    """GET com retries exponenciais simples."""
+    for attempt in range(1, max_retries + 1):
         try:
-            league = (fx.get("league") or {}).get("name") or ""
-            season = (fx.get("league") or {}).get("season") or ""
-            fixture = fx.get("fixture") or {}
-            teams = fx.get("teams") or {}
-            goals = fx.get("goals") or {}
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+            # 429 / 5xx -> backoff
+            if resp.status_code in (429, 500, 502, 503, 504):
+                wait = backoff ** attempt
+                print(f"[update_history][WARN] status={resp.status_code} retry in {wait:.1f}s (attempt {attempt}/{max_retries})")
+                time.sleep(wait)
+                continue
+            # outros códigos: loga e para
+            print(f"[update_history][ERROR] GET {url} params={params} status={resp.status_code} body={resp.text[:400]}")
+            return None
+        except requests.RequestException as e:
+            wait = backoff ** attempt
+            print(f"[update_history][WARN] exception={e} retry in {wait:.1f}s (attempt {attempt}/{max_retries})")
+            time.sleep(wait)
+    print("[update_history][ERROR] max retries exceeded")
+    return None
 
-            date_iso = fixture.get("date") or ""
-            # Normaliza para YYYY-MM-DD
-            try:
-                dts = pd.to_datetime(date_iso, utc=True)
-                date_short = dts.strftime("%Y-%m-%d")
-            except Exception:
-                date_short = (date_iso or "")[:10]
 
-            home = (teams.get("home") or {}).get("name") or ""
-            away = (teams.get("away") or {}).get("name") or ""
-            hg = _safe_int(goals.get("home"))
-            ag = _safe_int(goals.get("away"))
+def extract_rows(fixtures_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extrai linhas (finalizadas) de um payload /fixtures."""
+    rows: List[Dict[str, Any]] = []
+    if not fixtures_payload or "response" not in fixtures_payload:
+        return rows
+
+    for item in fixtures_payload.get("response", []):
+        try:
+            fixture = item.get("fixture", {})
+            teams = item.get("teams", {})
+            goals = item.get("goals", {})
+
+            status_short = (fixture.get("status", {}) or {}).get("short")
+            # Considera finalizados: FT (tempo regul.), AET (prorrogação), PEN (pênaltis)
+            if status_short not in {"FT", "AET", "PEN"}:
+                continue
+
+            # Data em UTC (a API já retorna ISO 8601 com tz). Normalizamos em Z.
+            date_iso = fixture.get("date")
+            if not date_iso:
+                # fallback via timestamp
+                ts = fixture.get("timestamp")
+                if ts:
+                    dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                    date_iso = dt.isoformat().replace("+00:00", "Z")
+            # normalização
+            if date_iso and date_iso.endswith("+00:00"):
+                date_iso = date_iso.replace("+00:00", "Z")
+
+            home_name = (teams.get("home", {}) or {}).get("name")
+            away_name = (teams.get("away", {}) or {}).get("name")
+
+            hg = goals.get("home")
+            ag = goals.get("away")
+
+            if any(v is None for v in [date_iso, home_name, away_name, hg, ag]):
+                continue
 
             row = {
-                "date": date_short,
-                "league": league,
-                "season": season,
-                "home": home,
-                "away": away,
-                "home_goals": hg,
-                "away_goals": ag,
-                "source": "api_football",
-                "match_id": str((fixture.get("id") or "")),
+                "date_utc": date_iso,
+                "home": str(home_name).strip(),
+                "away": str(away_name).strip(),
+                "home_goals": int(hg),
+                "away_goals": int(ag),
             }
+            rows.append(row)
+        except Exception as e:
+            print(f"[update_history][WARN] skipping item due to parse error: {e}")
 
-            if not row["match_id"]:
-                row["match_id"] = _stable_match_id(row)
-
-            out.append(row)
-        except Exception:
-            # Se algum item vier malformado, ignora apenas aquele
-            continue
-
-    print(f"[history][INFO] Registros coletados da API-FOOTBALL: {len(out)}")
-    return out
+    return rows
 
 
-def ensure_parent(path: str) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+def fetch_finished_since(days: int, api_key: str) -> List[Dict[str, Any]]:
+    headers = {HEADERS_NAME: api_key}
+    all_rows: List[Dict[str, Any]] = []
+
+    # A API aceita "date=YYYY-MM-DD". Iteramos datas (UTC) de hoje até days atrás.
+    dates = daterange_utc(days)
+    for d in dates:
+        page = 1
+        while True:
+            params = {"date": d, "timezone": "UTC", "page": page}
+            payload = api_get(f"{API_BASE}/fixtures", headers=headers, params=params)
+            if not payload:
+                break
+            rows = extract_rows(payload)
+            all_rows.extend(rows)
+
+            # paginação
+            paging = payload.get("paging") or {}
+            current = paging.get("current", 1)
+            total = paging.get("total", 1)
+            if current >= total:
+                break
+            page += 1
+
+    # Remove duplicatas simples por (date_utc, home, away, home_goals, away_goals)
+    uniq = {(r["date_utc"], r["home"], r["away"], r["home_goals"], r["away_goals"]) for r in all_rows}
+    deduped = [
+        {
+            "date_utc": t[0],
+            "home": t[1],
+            "away": t[2],
+            "home_goals": t[3],
+            "away_goals": t[4],
+        }
+        for t in sorted(list(uniq), key=lambda x: x[0])
+    ]
+    return deduped
 
 
-def read_existing_csv(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "league",
-                "season",
-                "home",
-                "away",
-                "home_goals",
-                "away_goals",
-                "source",
-                "match_id",
-            ]
+def write_csv(out_path: str, rows: List[Dict[str, Any]]) -> None:
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["date_utc", "home", "away", "home_goals", "away_goals"],
         )
-    try:
-        return pd.read_csv(path, dtype=str)
-    except Exception:
-        # Se o arquivo estiver corrompido, recomeça do zero (mas não falha)
-        print("[history][WARN] results.csv existente não pôde ser lido; recriando.")
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "league",
-                "season",
-                "home",
-                "away",
-                "home_goals",
-                "away_goals",
-                "source",
-                "match_id",
-            ]
-        )
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--since_days", type=int, default=14)
-    parser.add_argument("--out", type=str, required=True)
+    parser = argparse.ArgumentParser(description="Atualiza histórico com resultados finalizados via API-FOOTBALL.")
+    parser.add_argument("--since_days", type=int, default=14, help="Quantos dias para trás (UTC) buscar (inclui hoje).")
+    parser.add_argument("--out", required=True, help="Caminho do CSV de saída.")
     args = parser.parse_args()
 
-    out_path = args.out
-    ensure_parent(out_path)
+    api_key = os.getenv("API_FOOTBALL_KEY", "").strip()
+    if not api_key:
+        print("[update_history][CRITICAL] Variável de ambiente API_FOOTBALL_KEY ausente.", file=sys.stderr)
+        return 2
 
-    # 1) coleta (se possível)
-    new_rows = fetch_api_football(args.since_days)
-
-    # 2) lê existente
-    df_old = read_existing_csv(out_path)
-
-    # 3) concatena e normaliza tipos
-    df_new = pd.DataFrame(new_rows)
-    all_df = pd.concat([df_old, df_new], ignore_index=True)
-
-    # dtypes básicos
-    for c in ["date", "league", "season", "home", "away", "source", "match_id"]:
-        if c not in all_df.columns:
-            all_df[c] = ""
-        all_df[c] = all_df[c].astype(str)
-
-    for c in ["home_goals", "away_goals"]:
-        if c not in all_df.columns:
-            all_df[c] = 0
-        all_df[c] = pd.to_numeric(all_df[c], errors="coerce").fillna(0).astype(int)
-
-    # 4) remove duplicatas
-    all_df["dedup_key"] = (
-        all_df["match_id"].where(all_df["match_id"].astype(bool), None)
-    )
-    # Se não houver match_id, usa um hash estável:
-    no_id_mask = all_df["dedup_key"].isna()
-    if no_id_mask.any():
-        subset = all_df.loc[no_id_mask, ["date", "season", "league", "home", "away"]]
-        hashes = subset.apply(lambda r: _stable_match_id(r.to_dict()), axis=1)
-        all_df.loc[no_id_mask, "dedup_key"] = hashes
-
-    all_df = all_df.drop_duplicates(subset=["dedup_key"]).drop(columns=["dedup_key"])
-
-    # 5) ordena por data
     try:
-        all_df["_d"] = pd.to_datetime(all_df["date"], errors="coerce")
-    except Exception:
-        all_df["_d"] = pd.NaT
-    all_df = all_df.sort_values(by=["_d", "league", "home", "away"], ascending=True).drop(columns=["_d"])
+        print(f"[update_history] fetching finished fixtures for last {args.since_days} day(s)...")
+        rows = fetch_finished_since(args.since_days, api_key)
+        if not rows:
+            print("[update_history][ERROR] Nenhum jogo finalizado encontrado no intervalo solicitado.", file=sys.stderr)
+            # NÃO grava arquivo vazio; deixa o passo seguinte falhar com clareza
+            return 2
 
-    # 6) salva CSV sempre (mesmo vazio com cabeçalho) — não falhar!
-    all_df.to_csv(out_path, index=False, quoting=csv.QUOTE_MINIMAL, encoding="utf-8")
-    print(f"[history][OK] Histórico salvo em: {out_path}  (linhas={len(all_df)})")
-    return 0
+        write_csv(args.out, rows)
+        print(f"[update_history] written {len(rows)} rows to {args.out}")
+        return 0
+    except Exception as e:
+        print(f"[update_history][CRITICAL] {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
