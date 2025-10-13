@@ -50,6 +50,8 @@ env:
   KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n }}
   ROUND_TO: ${{ github.event.inputs.round_to }}
   TRAIN_CALIBRATOR: ${{ github.event.inputs.train_calibrator }}
+  # Sem aliases. Fonte única de jogos/nomes:
+  SOURCE_CSV: data/in/matches_sources.csv
   PYTHONUTF8: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_WARN_SCRIPT_LOCATION: 1
@@ -57,6 +59,11 @@ env:
 jobs:
   loteca-e2e:
     runs-on: ubuntu-latest
+    env:
+      # Exponha secrets como variáveis para uso em shell (evita if: com secrets.*)
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,7 +76,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy scipy scikit-learn requests unidecode pyarrow
+          pip install pandas numpy scipy scikit-learn requests unidecode pyarrow fastparquet
 
       - name: Prepare RUN_ID and OUT_DIR
         shell: bash
@@ -82,12 +89,26 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
+      - name: Ensure matches_sources.csv exists and whitelist it
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s "${SOURCE_CSV}" ]; then
+            echo "::error::Arquivo ${SOURCE_CSV} não encontrado ou vazio. Crie-o com cabeçalho: match_id,home,away"
+            exit 4
+          fi
+          # Validação de cabeçalho básico
+          header="$(head -n1 "${SOURCE_CSV}" | tr -d '\r')"
+          for c in match_id home away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
+          done
+          # Whitelist para o consenso estrito
+          cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
+
       # 1) UPDATE HISTORICAL DATA (feedback loop)
       - name: Update Historical Data (mandatory)
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         shell: bash
         run: |
           set -euo pipefail
@@ -124,11 +145,12 @@ jobs:
             --ewma 0.20
           test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 7; }
 
-      # 4) INGEST FUTURE MATCHES & ODDS — API-FOOTBALL
+      # 4) INGEST FUTURE MATCHES & ODDS (sem aliases, com source_csv)
       - name: Ingest API-FOOTBALL
         env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
+          SEASON: ${{ env.SEASON }}
+          API_FOOTBALL_KEY: ${{ env.API_FOOTBALL_KEY }}
         shell: bash
         run: |
           set -euo pipefail
@@ -141,17 +163,17 @@ jobs:
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_apifootball \
               --rodada "${OUT_DIR}" \
-              --season "${SEASON}" && break
+              --season "${SEASON}" \
+              --source_csv "${SOURCE_CSV}" && break
             a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
           done
           [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::warning::odds_apifootball.csv not generated"
 
-      # 4b) INGEST FUTURE MATCHES & ODDS — TheOddsAPI
       - name: Ingest TheOddsAPI
         env:
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
           REGIONS: ${{ env.REGIONS }}
+          THEODDS_API_KEY: ${{ env.THEODDS_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
@@ -164,7 +186,8 @@ jobs:
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_theoddsapi \
               --rodada "${OUT_DIR}" \
-              --regions "${REGIONS}" && break
+              --regions "${REGIONS}" \
+              --source_csv "${SOURCE_CSV}" && break
             a=$((a+1)); echo "retry theodds: $a/3"; sleep $((5*a))
           done
           [ -s "${OUT_DIR}/odds_theoddsapi.csv" ] || echo "::warning::odds_theoddsapi.csv not generated"
@@ -177,6 +200,7 @@ jobs:
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
+          # whitelist já criada a partir do SOURCE_CSV
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
           test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv not generated"; exit 6; }
@@ -187,16 +211,12 @@ jobs:
 
       # 6) (opcional) TREINAR CALIBRADOR
       - name: Train Calibrator (optional)
+        if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-          TRAIN_CALIBRATOR: ${{ env.TRAIN_CALIBRATOR }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${TRAIN_CALIBRATOR}" != "true" ]; then
-            echo "::notice::TRAIN_CALIBRATOR=false — pulando treino do calibrador."
-            exit 0
-          fi
           [ -f scripts/train_calibrator.py ] || { echo "::error::scripts/train_calibrator.py not found"; exit 12; }
           python -m scripts.train_calibrator \
             --history "data/history/results.csv" \
