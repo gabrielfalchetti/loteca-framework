@@ -8,7 +8,7 @@ on:
         required: true
         default: "2025"
       lookahead_days:
-        description: "Dias à frente para odds (ex: 3)"
+        description: "Dias a frente para odds (ex: 3)"
         required: true
         default: "3"
       bankroll:
@@ -20,11 +20,11 @@ on:
         required: true
         default: "0.5"
       kelly_cap:
-        description: "Limite máximo por aposta (0..1)"
+        description: "Limite maximo por aposta (0..1)"
         required: true
         default: "0.1"
       kelly_top_n:
-        description: "Qtd máxima de apostas"
+        description: "Qtd maxima de apostas"
         required: true
         default: "14"
       round_to:
@@ -32,11 +32,11 @@ on:
         required: true
         default: "1"
       regions:
-        description: "Regiões TheOddsAPI (ex: uk,eu,us,au)"
+        description: "Regioes TheOddsAPI (ex: uk,eu,us,au)"
         required: true
         default: "uk,eu,us,au"
       train_calibrator:
-        description: "Treinar calibrador isotônico nesta execução? (true/false)"
+        description: "Treinar calibrador isotonico nesta execucao? (true/false)"
         required: true
         default: "false"
 
@@ -82,7 +82,7 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Prepare Matches Source (detect singular/plural + validate header)
+      - name: Prepare Matches Source (detect file and validate header)
         shell: bash
         run: |
           set -euo pipefail
@@ -91,7 +91,7 @@ jobs:
           elif [ -s "data/in/matches_source.csv" ]; then
             SOURCE_CSV="data/in/matches_source.csv"
           else
-            echo "::error::Arquivo de jogos não encontrado. Crie 'data/in/matches_sources.csv' ou 'data/in/matches_source.csv' com cabeçalho: match_id,home,away"
+            echo "::error::Arquivo de jogos nao encontrado. Crie 'data/in/matches_sources.csv' ou 'data/in/matches_source.csv' com cabecalho: match_id,home,away"
             exit 4
           fi
           echo "SOURCE_CSV=${SOURCE_CSV}" >> "$GITHUB_ENV"
@@ -101,24 +101,21 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
           done
 
-          # Whitelist para o consenso estrito
           cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
 
-      # 1) UPDATE HISTORICAL DATA (feedback loop)
+      # 1) UPDATE HISTORICAL DATA
       - name: Update Historical Data (mandatory)
         shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-          # Secrets injetados no ambiente de shell (sem usar expressões em 'if:' YAML)
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         run: |
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-          # Tenta via API; se falhar/voltar vazio, gera seed mínimo a partir do SOURCE_CSV
           python -m scripts.update_history --since_days 14 --out "data/history/results.csv" || true
           if [ ! -s "data/history/results.csv" ]; then
-            echo "::warning::Sem histórico via API; criando seed mínimo a partir do SOURCE_CSV (empates 1-1 fictícios)."
+            echo "::warning::Sem historico via API; criando seed minimo a partir do SOURCE_CSV."
             python - <<'PY'
 import csv, os
 src = os.environ["SOURCE_CSV"]
@@ -147,7 +144,7 @@ PY
             --ewma 0.20
           test -s "data/history/features.parquet" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      # 3) TRAIN DYNAMIC MODEL (único gerador de estado α/β)
+      # 3) TRAIN DYNAMIC MODEL
       - name: Train Dynamic Poisson Model
         shell: bash
         env:
@@ -162,7 +159,7 @@ PY
             --ewma 0.20
           test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 7; }
 
-      # 4) INGEST FUTURE MATCHES & ODDS (passando --source_csv)
+      # 4) INGEST FUTURE MATCHES & ODDS
       - name: Ingest API-FOOTBALL
         shell: bash
         env:
@@ -173,7 +170,7 @@ PY
         run: |
           set -euo pipefail
           if [ -z "${API_FOOTBALL_KEY:-}" ]; then
-            echo "::notice::API_FOOTBALL_KEY não configurada; pulando ingest_odds_apifootball."
+            echo "::notice::API_FOOTBALL_KEY nao configurada; pulando ingest_odds_apifootball."
             exit 0
           fi
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
@@ -197,7 +194,7 @@ PY
         run: |
           set -euo pipefail
           if [ -z "${THEODDS_API_KEY:-}" ]; then
-            echo "::notice::THEODDS_API_KEY não configurada; pulando ingest_odds_theoddsapi."
+            echo "::notice::THEODDS_API_KEY nao configurada; pulando ingest_odds_theoddsapi."
             exit 0
           fi
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
@@ -211,7 +208,7 @@ PY
           done
           [ -s "${OUT_DIR}/odds_theoddsapi.csv" ] || echo "::warning::odds_theoddsapi.csv not generated"
 
-      # 5) CONSENSUS STRICT (não passa jogo sem odds!)
+      # 5) CONSENSUS STRICT
       - name: Consensus Odds (strict)
         shell: bash
         env:
@@ -227,7 +224,7 @@ PY
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
-      # 6) (opcional) TREINAR CALIBRADOR
+      # 6) TRAIN CALIBRATOR (optional)
       - name: Train Calibrator (optional)
         if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
         shell: bash
@@ -242,7 +239,7 @@ PY
             --out_dir "data/history/calibration"
           test -s "data/history/calibration/calibrator_home.pkl" || { echo "::error::calibrator files not generated"; exit 12; }
 
-      # 7) PREVISÃO ÚNICA (núcleo unificado)
+      # 7) PREDICT
       - name: Predict (Dynamic Bivariate Poisson)
         shell: bash
         env:
@@ -254,7 +251,7 @@ PY
           OUT="${OUT_DIR}/xg_bivariate.csv"
           test -s "$OUT" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
-      # 8) CALIBRAÇÃO (aplica calibrador treinado)
+      # 8) CALIBRATE
       - name: Calibrate probabilities
         shell: bash
         env:
@@ -289,7 +286,7 @@ PY
           OUT="${OUT_DIR}/kelly_stakes.csv"
           test -s "$OUT" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
 
-      # 10) TICKET LOTECA
+      # 10) TICKET
       - name: Build Loteca ticket
         shell: bash
         env:
