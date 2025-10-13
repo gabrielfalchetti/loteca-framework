@@ -40,24 +40,35 @@ on:
         required: true
         default: "false"
 
-env:
-  SEASON: ${{ github.event.inputs.season }}
-  LOOKAHEAD_DAYS: ${{ github.event.inputs.lookahead_days }}
-  REGIONS: ${{ github.event.inputs.regions }}
-  BANKROLL: ${{ github.event.inputs.bankroll }}
-  KELLY_FRACTION: ${{ github.event.inputs.kelly_fraction }}
-  KELLY_CAP: ${{ github.event.inputs.kelly_cap }}
-  KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n }}
-  ROUND_TO: ${{ github.event.inputs.round_to }}
-  TRAIN_CALIBRATOR: ${{ github.event.inputs.train_calibrator }}
-  SOURCE_CSV: data/in/matches_source.csv
-  PYTHONUTF8: 1
-  PIP_DISABLE_PIP_VERSION_CHECK: 1
-  PIP_NO_WARN_SCRIPT_LOCATION: 1
-
 jobs:
   loteca-e2e:
     runs-on: ubuntu-latest
+    # Se usar Environment Secrets, descomente a linha abaixo e ajuste o nome:
+    # environment: prod
+
+    env:
+      SEASON: ${{ github.event.inputs.season }}
+      LOOKAHEAD_DAYS: ${{ github.event.inputs.lookahead_days }}
+      REGIONS: ${{ github.event.inputs.regions }}
+      BANKROLL: ${{ github.event.inputs.bankroll }}
+      KELLY_FRACTION: ${{ github.event.inputs.kelly_fraction }}
+      KELLY_CAP: ${{ github.event.inputs.kelly_cap }}
+      KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n }}
+      ROUND_TO: ${{ github.event.inputs.round_to }}
+      TRAIN_CALIBRATOR: ${{ github.event.inputs.train_calibrator }}
+
+      PYTHONUTF8: 1
+      PIP_DISABLE_PIP_VERSION_CHECK: 1
+      PIP_NO_WARN_SCRIPT_LOCATION: 1
+
+      # Secrets injetados no job (não usar expressões em "if:" para secrets)
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      X_RAPIDAPI_KEY:  ${{ secrets.X_RAPIDAPI_KEY }}
+
+      # Caminho da whitelist de jogos (arquivo de entrada do usuário)
+      SOURCE_CSV: data/in/matches_source.csv
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,18 +83,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy scipy scikit-learn requests unidecode pyarrow fastparquet
 
+      - name: (debug) Verificar chaves carregadas
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in API_FOOTBALL_KEY THEODDS_API_KEY X_RAPIDAPI_KEY; do
+            if [ -z "${!v:-}" ]; then
+              echo "::notice::$v está VAZIO (ok se você não usar esta fonte agora)"
+            else
+              echo "::notice::$v está definido"
+            fi
+          done
+
       - name: Prepare RUN_ID and OUT_DIR
         shell: bash
         run: |
           set -euo pipefail
           RUN_ID="$(date +%s)"
           OUT_DIR="data/out/${RUN_ID}"
+          echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
           mkdir -p "data/in" "${OUT_DIR}" "data/history"
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Validate/prepare source CSV (whitelist)
+      - name: Validar matches_source.csv e copiar whitelist
         shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -99,33 +123,27 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
           done
           cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
+          echo "::notice::Whitelist copiada para ${OUT_DIR}/matches_whitelist.csv"
 
-      # 1) UPDATE HISTORICAL DATA (com fallback stub se a API não retornar nada)
-      - name: Update Historical Data (mandatory)
+      # 1) UPDATE HISTORICAL DATA (robusto; garante colunas home_goals/away_goals)
+      - name: Update Historical Data
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-          if ! python -m scripts.update_history --since_days 14 --out "data/history/results.csv"; then
-            echo "::notice::update_history falhou; verificando/gerando stub..."
-          fi
-          if [ ! -s "data/history/results.csv" ] || [ "$(wc -l < data/history/results.csv)" -le 1 ]; then
-            mkdir -p data/history
-            printf "date,home,away,home_goals,away_goals\n1970-01-01,BOOT,BOOT,0,0\n" > data/history/results.csv
-            echo "::notice::Sem histórico recente; criado stub (BOOT vs BOOT 0-0) para destravar as features."
-          fi
+          # tenta buscar; se falhar, criará stub dentro do próprio script
+          python -m scripts.update_history --since_days 14 --out "data/history/results.csv"
+          # sanity check
           header="$(head -n1 data/history/results.csv | tr -d '\r')"
           for c in date home away home_goals away_goals; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c'"; exit 1; }
           done
+          test -s "data/history/results.csv" || { echo "::error::history results.csv not generated"; exit 1; }
 
-      # 2) FEATURE ENGINEERING
-      - name: Build Features (mandatory)
+      # 2) FEATURE ENGINEERING (com fallback de parquet)
+        # mantém sua lógica; usa parquet se disponível (pyarrow/fastparquet), senão CSV
+      - name: Build Features
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/feature_engineer.py ] || { echo "::error::scripts/feature_engineer.py not found"; exit 2; }
@@ -135,7 +153,7 @@ jobs:
             --ewma 0.20
           test -s "data/history/features.parquet" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      # 3) TRAIN DYNAMIC MODEL (único gerador de estado α/β)
+      # 3) (opcional) modelos seus — deixei como estavam
       - name: Train Dynamic Poisson Model
         shell: bash
         env:
@@ -150,8 +168,8 @@ jobs:
             --ewma 0.20
           test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 7; }
 
-      # 4) INGEST FUTURE MATCHES & ODDS (sem aliases; usa SOURCE_CSV)
-      - name: Ingest API-FOOTBALL
+      # 4) INGEST FUTURE MATCHES & ODDS — sem aliases, usando normalização PT↔EN e whitelist
+      - name: Ingest API-Football (opcional)
         shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -172,7 +190,7 @@ jobs:
           done
           [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::warning::odds_apifootball.csv not generated"
 
-      - name: Ingest TheOddsAPI
+      - name: Ingest TheOddsAPI (recomendado)
         shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -195,7 +213,7 @@ jobs:
           done
           [ -s "${OUT_DIR}/odds_theoddsapi.csv" ] || echo "::warning::odds_theoddsapi.csv not generated"
 
-      # 5) CONSENSUS STRICT (não passa jogo sem odds!)
+      # 5) CONSENSUS (strict exige odds para todos os jogos da whitelist)
       - name: Consensus Odds (strict)
         shell: bash
         env:
@@ -215,8 +233,6 @@ jobs:
       - name: Train Calibrator (optional)
         if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
         shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/train_calibrator.py ] || { echo "::error::scripts/train_calibrator.py not found"; exit 12; }
@@ -226,7 +242,7 @@ jobs:
             --out_dir "data/history/calibration"
           test -s "data/history/calibration/calibrator_home.pkl" || { echo "::error::calibrator files not generated"; exit 12; }
 
-      # 7) PREVISÃO ÚNICA (núcleo unificado)
+      # 7) PREVISÃO ÚNICA
       - name: Predict (Dynamic Bivariate Poisson)
         shell: bash
         env:
@@ -255,6 +271,11 @@ jobs:
         shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
+          BANKROLL: ${{ env.BANKROLL }}
+          KELLY_FRACTION: ${{ env.KELLY_FRACTION }}
+          KELLY_CAP: ${{ env.KELLY_CAP }}
+          KELLY_TOP_N: ${{ env.KELLY_TOP_N }}
+          ROUND_TO: ${{ env.ROUND_TO }}
         run: |
           set -euo pipefail
           [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 10; }
@@ -283,7 +304,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rodada-${{ env.OUT_DIR }}
+          name: rodada-${{ env.RUN_ID }}
           path: |
             ${{ env.OUT_DIR }}/*.csv
             ${{ env.OUT_DIR }}/*.json
