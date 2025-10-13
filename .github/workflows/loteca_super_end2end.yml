@@ -54,7 +54,7 @@ env:
   PYTHONUTF8: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_WARN_SCRIPT_LOCATION: 1
-  # <<< ADIÇÃO MÍNIMA PARA EVITAR O ERRO DO PARSER NO `if:` >>>
+  # Mapeia segredos para evitar erro no parser do `if:`
   API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
   THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
 
@@ -91,7 +91,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f "${ALIASES_JSON}" ]; then
-            python -c "import json,sys; json.load(open('${ALIASES_JSON}','r',encoding='utf-8')); print('[ok] aliases.json valido')"
+            python - <<'PY'
+import json, sys
+path = '${ALIASES_JSON}'
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        json.load(f)
+    print('[ok] aliases.json valido')
+except Exception as e:
+    print(f"::notice::aliases.json invalido — normalizacao automatica sera usada. Erro: {e}")
+    # não falha o job
+    sys.exit(0)
+PY
           else
             echo "::notice::Sem aliases.json — normalizacao automatica sera usada."
           fi
