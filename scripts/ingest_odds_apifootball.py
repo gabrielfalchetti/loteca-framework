@@ -72,8 +72,10 @@ def main():
         try:
             fixture_id = fixture['fixture']['id']
             # Filtra apenas jogos que ainda não começaram
-            fixture_date = datetime.fromisoformat(fixture['fixture']['date'].replace('Z', '+00:00')).timestamp()
-            if fixture_date < datetime.utcnow().timestamp():
+            fixture_date_str = fixture['fixture']['date']
+            fixture_timestamp = datetime.fromisoformat(fixture_date_str.replace('Z', '+00:00')).timestamp()
+            
+            if fixture_timestamp < datetime.utcnow().timestamp():
                 continue
 
             home_team = fixture['teams']['home']['name']
