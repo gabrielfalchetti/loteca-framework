@@ -63,7 +63,6 @@ jobs:
   loteca-e2e:
     runs-on: ubuntu-latest
     env:
-      # exponha as keys como variáveis de ambiente (sem usá-las em expressões if:)
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
@@ -108,28 +107,23 @@ jobs:
           done
           cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
 
-      # 1) UPDATE HISTORICAL DATA (feedback loop) — com fallback para stub
       - name: Update Historical Data (mandatory)
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-
           # tenta atualizar; se falhar, seguimos para checar/gerar stub
           if ! python -m scripts.update_history --since_days 14 --out "data/history/results.csv"; then
             echo "::notice::update_history falhou; verificando/gerando stub..."
           fi
-
-          # se não existe, vazio ou só cabeçalho, gera um stub com 1 partida neutra
+          # stub se vazio/só cabeçalho
           if [ ! -s "data/history/results.csv" ] || [ "$(wc -l < data/history/results.csv)" -le 1 ]; then
             mkdir -p data/history
             printf "date,home,away,home_goals,away_goals\n1970-01-01,BOOT,BOOT,0,0\n" > data/history/results.csv
             echo "::notice::Sem histórico recente; criado stub (BOOT vs BOOT 0-0) para destravar as features."
           fi
-
           test -s "data/history/results.csv" || { echo "::error::history results.csv not generated"; exit 1; }
 
-      # 1.1) SHIM DE NORMALIZAÇÃO DOS CABEÇALHOS DO HISTÓRICO
       - name: Normalize history headers (shim)
         shell: bash
         run: |
@@ -140,7 +134,6 @@ path = "data/history/results.csv"
 if not os.path.exists(path) or os.path.getsize(path) == 0:
     print("::error::history results.csv ausente ou vazio"); sys.exit(1)
 df = pd.read_csv(path)
-
 CANDS = {
   "date":       ["date","match_date","utc_date","fixture_date","game_date","dt","datetime"],
   "home":       ["home","home_team","team_home","home_name","homeTeam","home_team_name"],
@@ -148,43 +141,34 @@ CANDS = {
   "home_goals": ["home_goals","home_score","goals_home","gf","home_ft_goals","home_goals_ft","score_home","goalsHome"],
   "away_goals": ["away_goals","away_score","goals_away","ga","away_ft_goals","away_goals_ft","score_away","goalsAway"],
 }
-
 cols_lower = {c.lower(): c for c in df.columns}
-sel = {}
-def pick(key):
-    for cand in CANDS[key]:
-        c = cols_lower.get(cand.lower())
+def pick(keys):
+    for k in keys:
+        c = cols_lower.get(k.lower())
         if c in df.columns:
             return c
     return None
-
-for k in ["date","home","away","home_goals","away_goals"]:
-    got = pick(k)
-    if got is None:
-        print(f"::error::history sem coluna para '{k}' (candidatos: {CANDS[k]})"); sys.exit(1)
-    sel[k] = got
-
+sel = {}
+for key in CANDS:
+    col = pick(CANDS[key])
+    if col is None:
+        print(f"::error::history sem coluna para '{key}' (candidatos: {CANDS[key]})"); sys.exit(1)
+    sel[key] = col
 out = pd.DataFrame({
     "date": df[sel["date"]],
     "home": df[sel["home"]],
     "away": df[sel["away"]],
-    "home_goals": df[sel["home_goals"]],
-    "away_goals": df[sel["away_goals"]],
+    "home_goals": pd.to_numeric(df[sel["home_goals"]], errors="coerce").fillna(0).astype(int),
+    "away_goals": pd.to_numeric(df[sel["away_goals"]], errors="coerce").fillna(0).astype(int),
 })
-
-for g in ("home_goals","away_goals"):
-    out[g] = pd.to_numeric(out[g], errors="coerce").fillna(0).astype(int)
-
 out.to_csv(path, index=False)
 print(f"[normalize] OK — columns normalized to: {list(out.columns)} (rows={len(out)})")
 PY
-
           header="$(head -n1 data/history/results.csv | tr -d '\r')"
           for c in date home away home_goals away_goals; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c' após normalização"; exit 1; }
           done
 
-      # 2) FEATURE ENGINEERING
       - name: Build Features (mandatory)
         shell: bash
         run: |
@@ -196,7 +180,6 @@ PY
             --ewma 0.20
           test -s "data/history/features.parquet" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      # 3) TRAIN DYNAMIC MODEL (núcleo unificado α/β)
       - name: Train Dynamic Poisson Model
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -211,7 +194,6 @@ PY
             --ewma 0.20
           test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 7; }
 
-      # 4) INGEST FUTURE MATCHES & ODDS (com SOURCE_CSV)
       - name: Ingest API-FOOTBALL
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -253,7 +235,6 @@ PY
           done
           [ -s "${OUT_DIR}/odds_theoddsapi.csv" ] || echo "::warning::odds_theoddsapi.csv not generated"
 
-      # 5) CONSENSUS STRICT (não passa jogo sem odds!)
       - name: Consensus Odds (strict)
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -269,12 +250,14 @@ PY
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
-      # 6) (opcional) TREINAR CALIBRADOR
       - name: Train Calibrator (optional)
-        if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ "${TRAIN_CALIBRATOR}" != "true" ]; then
+            echo "::notice::TRAIN_CALIBRATOR != true; pulando."
+            exit 0
+          fi
           [ -f scripts/train_calibrator.py ] || { echo "::error::scripts/train_calibrator.py not found"; exit 12; }
           python -m scripts.train_calibrator \
             --history "data/history/results.csv" \
@@ -282,7 +265,6 @@ PY
             --out_dir "data/history/calibration"
           test -s "data/history/calibration/calibrator_home.pkl" || { echo "::error::calibrator files not generated"; exit 12; }
 
-      # 7) PREVISÃO ÚNICA (núcleo unificado)
       - name: Predict (Dynamic Bivariate Poisson)
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -294,7 +276,6 @@ PY
           OUT="${OUT_DIR}/xg_bivariate.csv"
           test -s "$OUT" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
-      # 8) CALIBRAÇÃO (aplica calibrador treinado)
       - name: Calibrate probabilities
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -306,7 +287,6 @@ PY
           OUT="${OUT_DIR}/probs_calibrated.csv"
           test -s "$OUT" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
 
-      # 9) KELLY
       - name: Kelly bets
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -324,7 +304,6 @@ PY
           OUT="${OUT_DIR}/kelly_stakes.csv"
           test -s "$OUT" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
 
-      # 10) TICKET LOTECA
       - name: Build Loteca ticket
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
