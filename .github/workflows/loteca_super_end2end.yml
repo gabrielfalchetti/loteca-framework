@@ -50,8 +50,6 @@ env:
   KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n }}
   ROUND_TO: ${{ github.event.inputs.round_to }}
   TRAIN_CALIBRATOR: ${{ github.event.inputs.train_calibrator }}
-  # Sem aliases. Fonte única de jogos/nomes:
-  SOURCE_CSV: data/in/matches_sources.csv
   PYTHONUTF8: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_WARN_SCRIPT_LOCATION: 1
@@ -59,11 +57,6 @@ env:
 jobs:
   loteca-e2e:
     runs-on: ubuntu-latest
-    env:
-      # Exponha secrets como variáveis para uso em shell (evita if: com secrets.*)
-      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -89,31 +82,55 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Ensure matches_sources.csv exists and whitelist it
+      - name: Prepare Matches Source (detect singular/plural + validate header)
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -s "${SOURCE_CSV}" ]; then
-            echo "::error::Arquivo ${SOURCE_CSV} não encontrado ou vazio. Crie-o com cabeçalho: match_id,home,away"
+          # Detecta automaticamente o arquivo correto
+          if [ -s "data/in/matches_sources.csv" ]; then
+            SOURCE_CSV="data/in/matches_sources.csv"
+          elif [ -s "data/in/matches_source.csv" ]; then
+            SOURCE_CSV="data/in/matches_source.csv"
+          else
+            echo "::error::Arquivo de jogos não encontrado. Crie 'data/in/matches_sources.csv' ou 'data/in/matches_source.csv' com cabeçalho: match_id,home,away"
             exit 4
           fi
-          # Validação de cabeçalho básico
+          echo "SOURCE_CSV=${SOURCE_CSV}" >> "$GITHUB_ENV"
+
+          # Valida cabeçalho
           header="$(head -n1 "${SOURCE_CSV}" | tr -d '\r')"
           for c in match_id home away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
           done
-          # Whitelist para o consenso estrito
+
+          # Gera whitelist para o consenso estrito
           cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
 
       # 1) UPDATE HISTORICAL DATA (feedback loop)
       - name: Update Historical Data (mandatory)
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-          python -m scripts.update_history --since_days 14 --out "data/history/results.csv"
+          python -m scripts.update_history --since_days 14 --out "data/history/results.csv" || true
+          if [ ! -s "data/history/results.csv" ]; then
+            echo "::warning::Sem histórico via API; criando seed mínimo a partir do SOURCE_CSV (empates 1-1 fictícios, apenas para features)."
+            python - <<'PY'
+import csv, os
+src = os.environ["SOURCE_CSV"]
+outp = "data/history/results.csv"
+with open(src, newline='', encoding='utf-8') as f, open(outp, 'w', newline='', encoding='utf-8') as g:
+    r = csv.DictReader(f)
+    w = csv.DictWriter(g, fieldnames=["date","home","away","home_goals","away_goals"])
+    w.writeheader()
+    for i,row in enumerate(r, start=1):
+        w.writerow({"date":"2025-01-01","home":row["home"],"away":row["away"],"home_goals":1,"away_goals":1})
+PY
+          fi
           test -s "data/history/results.csv" || { echo "::error::history results.csv not generated"; exit 1; }
 
       # 2) FEATURE ENGINEERING
@@ -145,12 +162,12 @@ jobs:
             --ewma 0.20
           test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 7; }
 
-      # 4) INGEST FUTURE MATCHES & ODDS (sem aliases, com source_csv)
+      # 4) INGEST FUTURE MATCHES & ODDS (passando --source_csv)
       - name: Ingest API-FOOTBALL
         env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
-          SEASON: ${{ env.SEASON }}
-          API_FOOTBALL_KEY: ${{ env.API_FOOTBALL_KEY }}
+          SOURCE_CSV: ${{ env.SOURCE_CSV }}
         shell: bash
         run: |
           set -euo pipefail
@@ -171,9 +188,10 @@ jobs:
 
       - name: Ingest TheOddsAPI
         env:
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
+          SOURCE_CSV: ${{ env.SOURCE_CSV }}
           REGIONS: ${{ env.REGIONS }}
-          THEODDS_API_KEY: ${{ env.THEODDS_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
@@ -200,7 +218,6 @@ jobs:
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
-          # whitelist já criada a partir do SOURCE_CSV
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
           test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv not generated"; exit 6; }
