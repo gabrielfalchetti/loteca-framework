@@ -1,118 +1,106 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-ingest_odds_theoddsapi: Busca odds da TheOddsAPI e filtra pelos jogos
-de um arquivo CSV de origem (ex: matches_sources.csv).
-"""
+import argparse
 import os
 import sys
-import argparse
-import requests
-import pandas as pd
-import hashlib
+from typing import Dict, List
 
-def log(level, msg):
-    tag = "" if level == "INFO" else f"[{level}] "
-    print(f"[theoddsapi]{tag}{msg}", flush=True)
+import pandas as pd
+import requests
+from unidecode import unidecode
+
+THEODDS_API_KEY = os.getenv("THEODDS_API_KEY", "")
+
+def _norm(s: str) -> str:
+    return " ".join(unidecode(str(s or "")).lower().split())
+
+def fetch_all_odds(regions: str) -> List[Dict]:
+    base = "https://api.the-odds-api.com/v4/sports/soccer/odds"
+    params = {
+        "apiKey": THEODDS_API_KEY,
+        "regions": regions,
+        "markets": "h2h",
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
+    }
+    r = requests.get(base, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    rows = []
+    for g in data:
+        home = g.get("home_team","")
+        away = g.get("away_team","")
+        ct = g.get("commence_time","")
+        for bk in g.get("bookmakers", []):
+            for m in bk.get("markets", []):
+                if m.get("key") != "h2h":
+                    continue
+                prices = m.get("outcomes", [])
+                odds_home = odds_draw = odds_away = None
+                for p in prices:
+                    nm = p.get("name","").lower()
+                    price = p.get("price", None)
+                    if price is None:
+                        continue
+                    try:
+                        price = float(price)
+                    except Exception:
+                        continue
+                    if nm in ("home","home team", _norm(home)):
+                        odds_home = price
+                    elif nm in ("draw","empate"):
+                        odds_draw = price
+                    elif nm in ("away","away team", _norm(away)):
+                        odds_away = price
+                rows.append({
+                    "home": home, "away": away, "commence_time": ct,
+                    "odds_home": odds_home, "odds_draw": odds_draw, "odds_away": odds_away
+                })
+    return rows
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--regions", default="us,eu,uk,au")
-    # CORREÇÃO: Adiciona o argumento --source_csv que estava faltando
-    ap.add_argument("--source_csv", required=True, help="Caminho para o CSV com a lista de jogos")
+    ap.add_argument("--rodada", required=True, help="Diretório OUT da rodada")
+    ap.add_argument("--regions", default="eu,uk,us,au")
+    ap.add_argument("--source_csv", required=True, help="matches_norm.csv (com nomes já normalizados)")
     args = ap.parse_args()
 
-    API_KEY = os.environ.get("THEODDS_API_KEY")
-    if not API_KEY:
-        log("CRITICAL", "Variável de ambiente THEODDS_API_KEY não definida.")
-        sys.exit(5)
-        
-    try:
-        source_df = pd.read_csv(args.source_csv)
-        # Cria um set de tuplas para busca rápida: {('timea', 'timeb'), ...}
-        target_games = { (str(row['home']).lower(), str(row['away']).lower()) for _, row in source_df.iterrows() }
-    except FileNotFoundError:
-        log("CRITICAL", f"Arquivo de origem {args.source_csv} não encontrado.")
+    if not THEODDS_API_KEY:
+        print("[theoddsapi][WARN] THEODDS_API_KEY não configurada.", file=sys.stderr)
+        sys.exit(0)
+
+    if not os.path.exists(args.source_csv):
+        print(f"[theoddsapi][CRITICAL] source_csv não encontrado: {args.source_csv}", file=sys.stderr)
         sys.exit(5)
 
-    SPORTS = [
-        'soccer_brazil_campeonato', 'soccer_epl', 'soccer_spain_la_liga', 'soccer_italy_serie_a',
-        'soccer_germany_bundesliga', 'soccer_france_ligue_one', 'soccer_uefa_champs_league',
-        'soccer_uefa_europa_league', 'soccer_usa_mls', 'soccer_argentina_primera_division'
-    ]
+    src = pd.read_csv(args.source_csv)
+    src["home_norm"] = src["home"].map(_norm)
+    src["away_norm"] = src["away"].map(_norm)
 
-    all_games_from_api = []
-    for sport_key in SPORTS:
-        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
-        params = {'apiKey': API_KEY, 'regions': args.regions, 'markets': 'h2h', 'oddsFormat': 'decimal'}
-        try:
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-            all_games_from_api.extend(response.json())
-        except requests.exceptions.RequestException:
-            continue
-    
-    if not all_games_from_api:
-        log("WARN", "Nenhum jogo encontrado na TheOddsAPI.")
-        pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_theoddsapi.csv"), index=False)
-        return 0
+    rows = fetch_all_odds(args.regions)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        print("[theoddsapi][WARN] Nenhuma odd retornada.")
+        out_path = os.path.join(args.rodada, "odds_theoddsapi.csv")
+        pd.DataFrame([], columns=["match_id","team_home","team_away","odds_home","odds_draw","odds_away"]).to_csv(out_path, index=False)
+        return
 
-    log("INFO", f"Total de {len(all_games_from_api)} jogos encontrados na API. Filtrando pela lista de {len(target_games)} jogos...")
-    
-    rows = []
-    for game in all_games_from_api:
-        try:
-            home_team_api = game['home_team']
-            away_team_api = game['away_team']
+    df["home_norm"] = df["home"].map(_norm)
+    df["away_norm"] = df["away"].map(_norm)
 
-            # Verifica se o jogo da API está na nossa lista de alvos
-            # A busca é flexível, verificando se os nomes estão contidos um no outro
-            found = False
-            matched_home, matched_away = None, None
-            for target_home, target_away in target_games:
-                if (target_home in home_team_api.lower() and target_away in away_team_api.lower()):
-                    found = True
-                    # Recupera os nomes originais do nosso arquivo fonte para consistência
-                    matched_home = source_df.loc[(source_df['home'].str.lower() == target_home) & (source_df['away'].str.lower() == target_away), 'home'].iloc[0]
-                    matched_away = source_df.loc[(source_df['home'].str.lower() == target_home) & (source_df['away'].str.lower() == target_away), 'away'].iloc[0]
-                    break
-            
-            if not found:
-                continue
-            
-            log("INFO", f"Jogo da lista encontrado na API: {matched_home} vs {matched_away}")
-            
-            identifier = f"{matched_home}-{matched_away}-{game['commence_time']}"
-            match_id = int(hashlib.md5(identifier.encode()).hexdigest(), 16) % (10**8)
+    # join por nomes normalizados (já canônicos) + (opcional) commence_time quando existir nos dois lados
+    merged = src.merge(df, how="left", left_on=["home_norm","away_norm"], right_on=["home_norm","away_norm"])
 
-            bookmaker = next(b for b in game['bookmakers'] if any(m['key'] == 'h2h' for m in b.get('markets', [])))
-            h2h_market = next(m for m in bookmaker['markets'] if m['key'] == 'h2h')
-            
-            outcomes = {o['name']: o['price'] for o in h2h_market['outcomes']}
-            
-            odds_home = outcomes.get(home_team_api)
-            odds_away = outcomes.get(away_team_api)
-            odds_draw = outcomes.get('Draw')
+    # manter somente linhas com odds completas
+    merged = merged.dropna(subset=["odds_home","odds_draw","odds_away"], how="any")
 
-            if not all([odds_home, odds_draw, odds_away]):
-                continue
+    out = merged[["match_id","home","away","odds_home","odds_draw","odds_away"]].rename(
+        columns={"home":"team_home","away":"team_away"}
+    )
 
-            rows.append({
-                'match_id': match_id, 'home': matched_home, 'away': matched_away,
-                'odds_home': float(odds_home),
-                'odds_draw': float(odds_draw),
-                'odds_away': float(odds_away)
-            })
-        except (KeyError, IndexError, StopIteration):
-            continue
-
-    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away'])
+    os.makedirs(args.rodada, exist_ok=True)
     out_path = os.path.join(args.rodada, "odds_theoddsapi.csv")
-    df.to_csv(out_path, index=False)
-    log("INFO", f"Arquivo odds_theoddsapi.csv gerado com {len(df)} jogos da sua lista.")
-    return 0
+    out.to_csv(out_path, index=False)
+    print(f"[theoddsapi]Arquivo odds_theoddsapi.csv gerado com {len(out)} jogos da sua lista.")
 
 if __name__ == "__main__":
     sys.exit(main())
