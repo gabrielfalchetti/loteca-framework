@@ -54,7 +54,6 @@ env:
   PYTHONUTF8: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_WARN_SCRIPT_LOCATION: 1
-  # Mapeia segredos para evitar erro no parser do `if:`
   API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
   THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
 
@@ -92,8 +91,8 @@ jobs:
           set -euo pipefail
           if [ -f "${ALIASES_JSON}" ]; then
             python - <<'PY'
-import json, sys
-path = '${ALIASES_JSON}'
+import json, sys, os
+path = os.environ.get('ALIASES_JSON')
 try:
     with open(path, 'r', encoding='utf-8') as f:
         json.load(f)
@@ -151,7 +150,6 @@ PY
       - name: Ingest API-FOOTBALL
         if: ${{ env.API_FOOTBALL_KEY != '' }}
         env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
         shell: bash
         run: |
@@ -170,7 +168,6 @@ PY
       - name: Ingest TheOddsAPI
         if: ${{ env.THEODDS_API_KEY != '' }}
         env:
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
         shell: bash
         run: |
