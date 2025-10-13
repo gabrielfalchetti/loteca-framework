@@ -88,21 +88,27 @@ def main():
 
     # 1. Ler os times da rodada atual
     try:
+        # Verifica se o arquivo de consenso existe e não está vazio
+        if not os.path.exists(consensus_path) or os.path.getsize(consensus_path) < 50:
+             log("WARN", f"Arquivo {os.path.basename(consensus_path)} não encontrado ou vazio. O treinamento não será executado.")
+             # Cria um arquivo JSON vazio para o pipeline não quebrar
+             with open(out_path, 'w', encoding='utf-8') as f:
+                json.dump({}, f)
+             return 0
+
         df_consensus = pd.read_csv(consensus_path)
+        if df_consensus.empty:
+            raise ValueError("O arquivo de consenso está vazio.")
+
         home_teams = df_consensus['team_home'].unique()
         away_teams = df_consensus['team_away'].unique()
         all_teams = set(home_teams) | set(away_teams)
-    except FileNotFoundError:
-        log("CRITICAL", f"Arquivo {os.path.basename(consensus_path)} não encontrado. Não é possível treinar.")
-        # Cria um arquivo JSON vazio para não quebrar o workflow
+
+    except (FileNotFoundError, ValueError, pd.errors.EmptyDataError) as e:
+        log("WARN", f"Não foi possível ler times do arquivo de consenso ({e}). O treinamento não será executado.")
         with open(out_path, 'w', encoding='utf-8') as f:
             json.dump({}, f)
-        sys.exit(12)
-    except Exception as e:
-        log("CRITICAL", f"Falha ao ler times do consenso: {e}")
-        with open(out_path, 'w', encoding='utf-8') as f:
-            json.dump({}, f)
-        sys.exit(12)
+        return 0
 
     if not all_teams:
         log("WARN", "Nenhum time encontrado no arquivo de consenso. O treinamento não será executado.")
