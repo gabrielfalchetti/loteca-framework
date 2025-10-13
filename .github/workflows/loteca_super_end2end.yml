@@ -54,6 +54,9 @@ env:
   PYTHONUTF8: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_WARN_SCRIPT_LOCATION: 1
+  # <<< ADIÇÃO MÍNIMA PARA EVITAR O ERRO DO PARSER NO `if:` >>>
+  API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+  THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
 
 jobs:
   loteca-e2e:
@@ -135,7 +138,7 @@ jobs:
 
       # 4) INGEST FUTURE MATCHES & ODDS
       - name: Ingest API-FOOTBALL
-        if: ${{ secrets.API_FOOTBALL_KEY != '' }}
+        if: ${{ env.API_FOOTBALL_KEY != '' }}
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -154,7 +157,7 @@ jobs:
           [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::warning::odds_apifootball.csv not generated"
 
       - name: Ingest TheOddsAPI
-        if: ${{ secrets.THEODDS_API_KEY != '' }}
+        if: ${{ env.THEODDS_API_KEY != '' }}
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
