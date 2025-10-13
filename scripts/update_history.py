@@ -1,9 +1,8 @@
 # scripts/update_history.py
 # Atualiza histórico com resultados FINALIZADOS via API-FOOTBALL.
 # Estratégia robusta:
-#   1) Tenta /fixtures?from=YYYY-MM-DD&to=YYYY-MM-DD&timezone=UTC (com paginação).
-#   2) Se não houver linhas, faz fallback em /fixtures?last=200&status=FT&timezone=UTC,
-#      e filtra as partidas para ficar apenas no intervalo pedido.
+#   1) Loop dia-a-dia: /fixtures?date=YYYY-MM-DD&status=FT&timezone=UTC (+ paginação)
+#   2) Se ainda vier 0, fallback: /fixtures?last=400&timezone=UTC e filtra pela janela
 #
 # Uso no workflow:
 #   python -m scripts.update_history --since_days 14 --out data/history/results.csv
@@ -68,11 +67,11 @@ def extract_finished_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             goals = item.get("goals", {}) or {}
 
             status_short = (fixture.get("status", {}) or {}).get("short")
-            # Considera finalizados: FT (tempo normal), AET (prorrogação), PEN (pênaltis)
+            # Finalizados (tempo normal, prorrogação, pênaltis)
             if status_short not in {"FT", "AET", "PEN"}:
                 continue
 
-            # Data UTC em ISO
+            # Data UTC ISO
             date_iso = fixture.get("date")
             if not date_iso:
                 ts = fixture.get("timestamp")
@@ -104,12 +103,13 @@ def extract_finished_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
-def fetch_range(from_date: str, to_date: str, api_key: str) -> List[Dict[str, Any]]:
+def fetch_by_day(day_iso: str, api_key: str) -> List[Dict[str, Any]]:
+    """Busca fixtures finalizados em um único dia (UTC), com paginação."""
     headers = {HEADERS_NAME: api_key}
     all_rows: List[Dict[str, Any]] = []
     page = 1
     while True:
-        params = {"from": from_date, "to": to_date, "timezone": "UTC", "page": page}
+        params = {"date": day_iso, "status": "FT", "timezone": "UTC", "page": page}
         payload = api_get(f"{API_BASE}/fixtures", headers, params)
         if not payload:
             break
@@ -122,6 +122,8 @@ def fetch_range(from_date: str, to_date: str, api_key: str) -> List[Dict[str, An
         if current >= total:
             break
         page += 1
+        # pequeno respiro para evitar 429
+        time.sleep(0.25)
 
     # Dedup por (date_utc, home, away, home_goals, away_goals)
     uniq = {(r["date_utc"], r["home"], r["away"], r["home_goals"], r["away_goals"]) for r in all_rows}
@@ -137,10 +139,36 @@ def fetch_range(from_date: str, to_date: str, api_key: str) -> List[Dict[str, An
     ]
 
 
+def fetch_window_day_by_day(start_dt: datetime, end_dt: datetime, api_key: str) -> List[Dict[str, Any]]:
+    """Varre dia a dia para contornar limitações de from/to em planos gratuitos."""
+    all_rows: List[Dict[str, Any]] = []
+    cur = start_dt
+    while cur.date() <= end_dt.date():
+        day_iso = iso_date(cur)
+        print(f"[update_history] fetching by day {day_iso}...")
+        rows = fetch_by_day(day_iso, api_key)
+        if rows:
+            all_rows.extend(rows)
+        cur = cur + timedelta(days=1)
+
+    # Dedup global
+    uniq = {(r["date_utc"], r["home"], r["away"], r["home_goals"], r["away_goals"]) for r in all_rows}
+    return [
+        {
+            "date_utc": t[0],
+            "home": t[1],
+            "away": t[2],
+            "home_goals": t[3],
+            "away_goals": t[4],
+        }
+        for t in sorted(uniq, key=lambda x: x[0])
+    ]
+
+
 def fetch_fallback_last(last: int, api_key: str) -> List[Dict[str, Any]]:
-    """Busca os 'last' fixtures finalizados mais recentes."""
+    """Busca os 'last' fixtures mais recentes e deixa o filtro por janela para fora."""
     headers = {HEADERS_NAME: api_key}
-    params = {"last": last, "status": "FT", "timezone": "UTC"}
+    params = {"last": last, "timezone": "UTC"}
     payload = api_get(f"{API_BASE}/fixtures", headers, params)
     return extract_finished_rows(payload) if payload else []
 
@@ -149,7 +177,6 @@ def filter_by_window(rows: List[Dict[str, Any]], start_dt: datetime, end_dt: dat
     out: List[Dict[str, Any]] = []
     for r in rows:
         try:
-            # date_utc vem ISO; garantir timezone UTC
             dt = datetime.fromisoformat(r["date_utc"].replace("Z", "+00:00"))
             if start_dt <= dt <= end_dt:
                 out.append(r)
@@ -191,16 +218,14 @@ def main() -> int:
 
     end_dt = utc_today().replace(hour=23, minute=59, second=59, microsecond=0)
     start_dt = (end_dt - timedelta(days=args.since_days)).replace(hour=0, minute=0, second=0, microsecond=0)
-    from_date = iso_date(start_dt)
-    to_date = iso_date(end_dt)
 
     try:
-        print(f"[update_history] fetching finished fixtures in range {from_date} -> {to_date} (UTC)...")
-        rows = fetch_range(from_date, to_date, api_key)
+        print(f"[update_history] fetching finished fixtures day-by-day for {iso_date(start_dt)} -> {iso_date(end_dt)} (UTC)...")
+        rows = fetch_window_day_by_day(start_dt, end_dt, api_key)
 
         if not rows:
-            print("[update_history][WARN] Intervalo retornou 0 jogos. Ativando fallback last=200...")
-            fallback = fetch_fallback_last(last=200, api_key=api_key)
+            print("[update_history][WARN] Janela retornou 0 jogos. Ativando fallback last=400...")
+            fallback = fetch_fallback_last(last=400, api_key=api_key)
             rows = filter_by_window(fallback, start_dt, end_dt)
 
         if not rows:
