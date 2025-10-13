@@ -1,317 +1,221 @@
-# scripts/calibrate_probs.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-calibrate_probs: gera probs_calibrated.csv
+calibrate_probs.py
+------------------
+Aplica calibração estatística (ex.: Regressão Isotônica) nas probabilidades 1X2
+produzidas por <OUT_DIR>/xg_bivariate.csv e grava <OUT_DIR>/probs_calibrated.csv.
 
-OBJETIVO: Aplicar Isotonic Regression (Regressão Isotônica) para corrigir
-vieses no P_Model (do xg_bivariate.csv) e gerar o P_True.
+Uso (no workflow):
+  python -m scripts.calibrate_probs --rodada <OUT_DIR> [--calibration_dir data/history/calibration]
 
-Prioridade de fonte:
-  1) xg_bivariate.csv (Contém P_Model)
+Entradas esperadas:
+  - <OUT_DIR>/xg_bivariate.csv   (colunas: match_id, team_home, team_away, p_home, p_draw, p_away)
+  - (opcional) calibradores em <calibration_dir>/calibrator_home.pkl, calibrator_draw.pkl, calibrator_away.pkl
 
-Saída garantida:
-  probs_calibrated.csv com colunas:
-    [match_id, team_home, team_away,
-     odds_home, odds_draw, odds_away,
-     p_home_cal, p_draw_cal, p_away_cal]
+Saída:
+  - <OUT_DIR>/probs_calibrated.csv  com colunas:
+      match_id, team_home, team_away,
+      p_home_raw, p_draw_raw, p_away_raw,
+      p_home,     p_draw,     p_away,
+      cal_home, cal_draw, cal_away  (flags se foi aplicado calibrador)
+Regras:
+  - Se um ou mais calibradores não existirem, aplica identidade para o respectivo alvo.
+  - As três probabilidades calibradas são renormalizadas para somarem 1.
+  - Valores são "clampados" para [1e-9, 1-1e-9] antes da renormalização.
+Saída de erro (exit 9) se:
+  - xg_bivariate.csv não existir ou não tiver colunas obrigatórias
+  - falha ao salvar o arquivo final
 """
 
-import os
-import re
-import sys
+from __future__ import annotations
+
 import argparse
-from unicodedata import normalize as _ucnorm
-import pandas as pd
+import os
+import sys
+import json
+from typing import Optional, Tuple
+
 import numpy as np
+import pandas as pd
 
-# NOVAS DEPENDÊNCIAS CIENTÍFICAS
-from sklearn.isotonic import IsotonicRegression
-import joblib # Para carregar modelos treinados
+# joblib é dependência do scikit-learn (instalado no workflow)
+try:
+    import joblib
+except Exception:  # fallback em raros ambientes
+    joblib = None
 
-# --- CONSTANTES ---
-REQ_WL = {"match_id", "home", "away"}
-REQ_OC = {"team_home", "team_away", "odds_home", "odds_draw", "odds_away"}
-REQ_XG = {"match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away", "p_home", "p_draw", "p_away"}
 
-# Diretório onde os modelos de calibração treinados estão salvos
-CALIBRATION_MODEL_DIR = "models/calibration"
+# ---------------------------- Utilidades ----------------------------- #
 
-STOPWORD_TOKENS = {
-    "aa","ec","ac","sc","fc","afc","cf","ca","cd","ud",
-    "sp","pr","rj","rs","mg","go","mt","ms","pa","pe","pb","rn","ce","ba","al","se","pi","ma","df","es","sc",
-}
+def _clamp01(x: np.ndarray, lo: float = 1e-9, hi: float = 1.0 - 1e-9) -> np.ndarray:
+    return np.clip(x, lo, hi)
 
-def log(level, msg):
-    prefix = f"[{level}]" if level != "INFO" else ""
-    print(f"[calibrate]{prefix} {msg}", flush=True)
 
-# Funções de utilidade (mantidas)
-def _deaccent(s: str) -> str:
-    return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
+class _IdentityCalibrator:
+    """Aplica identidade (sem calibração)."""
+    def predict(self, x):
+        x = np.asarray(x, dtype=float)
+        return x
 
-def norm_key(name: str) -> str:
-    s = _deaccent(name).lower()
-    s = s.replace("&", " e ")
-    s = re.sub(r"[/()\-_.]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
 
-def norm_key_tokens(name: str) -> str:
-    toks = [t for t in re.split(r"\s+", norm_key(name)) if t and t not in STOPWORD_TOKENS]
-    return " ".join(toks)
-
-def secure_float(x):
+def _load_calibrator(path: str) -> Optional[object]:
+    if joblib is None:
+        return None
+    if not os.path.exists(path):
+        return None
     try:
-        return float(str(x).replace(",", "."))
-    except Exception:
+        return joblib.load(path)
+    except Exception as e:
+        print(f"[calibrate][WARN] Falha carregando calibrador {path}: {e}")
         return None
 
-def implied_probs(oh, od, oa):
-    ih = (1.0 / oh) if oh and oh > 0 else None
-    idr = (1.0 / od) if od and od > 0 else None
-    ia = (1.0 / oa) if oa and oa > 0 else None
-    if None in (ih, idr, ia):
-        return None, None, None
-    s = ih + idr + ia
-    if s <= 0:
-        return None, None, None
-    return ih / s, idr / s, ia / s
 
-def read_csv_safe(path: str, required=None) -> pd.DataFrame:
-    if not os.path.isfile(path):
-        raise FileNotFoundError(path)
-    df = pd.read_csv(path)
-    if required and not set(required).issubset(df.columns):
-        raise ValueError(f"{os.path.basename(path)} sem colunas {sorted(set(required) - set(df.columns))}")
-    return df
-
-def build_from_odds_consensus(rodada: str) -> pd.DataFrame:
-    # (Lógica de fallback mantida)
-    wl_path = os.path.join(rodada, "matches_whitelist.csv")
-    oc_path = os.path.join(rodada, "odds_consensus.csv")
-
-    try:
-        wl = read_csv_safe(wl_path, REQ_WL).rename(columns={"home":"team_home","away":"team_away"})[
-            ["match_id","team_home","team_away"]
-        ].copy()
-        oc = read_csv_safe(oc_path, REQ_OC)[["team_home","team_away","odds_home","odds_draw","odds_away"]].copy()
-    except FileNotFoundError as e:
-        raise RuntimeError(f"Arquivos base para fallback ausentes: {e}")
-
-    wl["key"] = wl["team_home"].apply(norm_key_tokens) + "|" + wl["team_away"].apply(norm_key_tokens)
-    oc["key"] = oc["team_home"].apply(norm_key_tokens) + "|" + oc["team_away"].apply(norm_key_tokens)
-
-    wl_idx = wl.drop_duplicates(subset=["key"]).set_index("key")
-    oc_idx = oc.drop_duplicates(subset=["key"]).set_index("key")
-
-    rows = []
-    matched = 0
-
-    for k in oc_idx.index:
-        if k not in wl_idx.index:
-            continue
-        wlr = wl_idx.loc[k]
-        ocr = oc_idx.loc[k]
-        oh = secure_float(ocr["odds_home"])
-        od = secure_float(ocr["odds_draw"])
-        oa = secure_float(ocr["odds_away"])
-        ph, pdr, pa = implied_probs(oh, od, oa)
-        if None in (oh, od, oa, ph, pdr, pa):
-            continue
-        matched += 1
-        rows.append({
-            "match_id": wlr["match_id"],
-            "team_home": wlr["team_home"],
-            "team_away": wlr["team_away"],
-            "odds_home": oh,
-            "odds_draw": od,
-            "odds_away": oa,
-            "p_home": round(ph, 6),
-            "p_draw": round(pdr, 6),
-            "p_away": round(pa, 6),
-        })
-
-    if matched == 0:
-        # Fallback por join crua
-        merged = wl.merge(oc, on=["team_home","team_away"], how="inner")
-        for _, r in merged.iterrows():
-            oh = secure_float(r["odds_home"])
-            od = secure_float(r["odds_draw"])
-            oa = secure_float(r["odds_away"])
-            ph, pdr, pa = implied_probs(oh, od, oa)
-            if None in (oh, od, oa, ph, pdr, pa):
-                continue
-            rows.append({
-                "match_id": r["match_id"],
-                "team_home": r["team_home"],
-                "team_away": r["team_away"],
-                "odds_home": oh,
-                "odds_draw": od,
-                "odds_away": oa,
-                "p_home": round(ph, 6),
-                "p_draw": round(pdr, 6),
-                "p_away": round(pa, 6),
-            })
-
-    if not rows:
-        raise RuntimeError("Nenhuma linha gerada a partir de odds_consensus + whitelist")
-
-    return pd.DataFrame(rows, columns=[
-        "match_id","team_home","team_away","odds_home","odds_draw","odds_away","p_home","p_draw","p_away"
-    ])
-
-def coerce_and_clip(df: pd.DataFrame) -> pd.DataFrame:
-    # Tipos
-    for c in ["odds_home","odds_draw","odds_away","p_home","p_draw","p_away"]:
-        if c in df.columns:
-            df[c] = df[c].apply(secure_float)
-
-    # Normaliza e clipa probabilidades
-    def _fix_row(r):
-        ph, pd, pa = r["p_home"], r["p_draw"], r["p_away"]
-        vals = [ph, pd, pa]
-        if any(v is None or v < 0 for v in vals):
-            return None, None, None
-        s = sum(vals)
-        if s <= 0:
-            return None, None, None
-        ph, pd, pa = ph/s, pd/s, pa/s
-        # clipping leve pra evitar zeros exatos
-        eps = 1e-9
-        ph = min(max(ph, eps), 1.0 - 2*eps)
-        pd = min(max(pd, eps), 1.0 - 2*eps)
-        pa = min(max(pa, eps), 1.0 - 2*eps)
-        s2 = ph + pd + pa
-        return ph/s2, pd/s2, pa/s2
-
-    out = df.copy()
-    trip = out.apply(lambda r: _fix_row(r), axis=1, result_type="expand")
-    out[["p_home","p_draw","p_away"]] = trip
-    out = out.dropna(subset=["p_home","p_draw","p_away"])
-    return out
+def _require_columns(df: pd.DataFrame, cols: Tuple[str, ...], tag: str):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"{tag} sem colunas obrigatórias: {missing}")
 
 
-# --- FUNÇÃO DE CALIBRAÇÃO AVANÇADA (O BOOST DE ASSERTIVIDADE) ---
-def apply_isotonic_calibration(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aplica o modelo de Regressão Isotônica treinado para corrigir os vieses
-    das probabilidades P_Model para gerar o P_True (P_Calibrado).
-    """
-    calibrated_df = df.copy()
-    
-    # Colunas de probabilidade que o modelo gerou (P_Model)
-    p_cols = ["p_home", "p_draw", "p_away"]
-    
-    for outcome, p_col in [("home", "p_home"), ("draw", "p_draw"), ("away", "p_away")]:
-        model_path = os.path.join(CALIBRATION_MODEL_DIR, f"calibrator_{outcome}.pkl")
-        p_cal_col = f"p_{outcome}_cal"
+def _renorm_triple(p1: np.ndarray, pX: np.ndarray, p2: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Renormaliza três vetores de probabilidades para somarem 1 (com clamp prévio)."""
+    p1 = _clamp01(p1)
+    pX = _clamp01(pX)
+    p2 = _clamp01(p2)
+    s = p1 + pX + p2
+    # Evita divisão por zero
+    s = np.where(s <= 0, 1.0, s)
+    return p1 / s, pX / s, p2 / s
 
-        if os.path.exists(model_path):
-            try:
-                # Carrega o modelo de calibração treinado (Isotonic Regression)
-                calibrator = joblib.load(model_path)
-                
-                # Aplica a transformação. O Isotonic Regression espera um array 1D
-                p_model = df[p_col].values
-                p_calibrated = calibrator.transform(p_model)
-                
-                calibrated_df[p_cal_col] = p_calibrated
-                log("INFO", f"Calibrador {outcome} aplicado com sucesso.")
-            except Exception as e:
-                log("WARN", f"Falha ao aplicar calibrador {outcome}: {e}. Usando P_Model não calibrado.")
-                calibrated_df[p_cal_col] = df[p_col]
-        else:
-            # Se o modelo de calibração não existe (ainda não foi treinado),
-            # usamos a probabilidade bruta do modelo.
-            log("WARN", f"Modelo de calibração {outcome} não encontrado. Usando P_Model bruto.")
-            calibrated_df[p_cal_col] = df[p_col]
 
-    # Re-normaliza as probabilidades calibradas (elas devem somar 1)
-    # Primeiro move as colunas brutas para as calibradas (se o calibrador falhou, elas serão iguais)
-    for outcome in ["home", "draw", "away"]:
-        calibrated_df[f"p_{outcome}_cal"] = calibrated_df.get(f"p_{outcome}_cal", calibrated_df[f"p_{outcome}"])
+# ------------------------------- MAIN -------------------------------- #
 
-    calibrated_df["p_sum"] = calibrated_df["p_home_cal"] + calibrated_df["p_draw_cal"] + calibrated_df["p_away_cal"]
-    
-    # Aplica a normalização (divide pela soma)
-    calibrated_df["p_home_cal"] /= calibrated_df["p_sum"]
-    calibrated_df["p_draw_cal"] /= calibrated_df["p_sum"]
-    calibrated_df["p_away_cal"] /= calibrated_df["p_sum"]
-    
-    # Renomeia as colunas finais (substituindo p_home/draw/away originais pelas calibradas)
-    calibrated_df = calibrated_df.drop(columns=["p_home", "p_draw", "p_away", "p_sum"])
-    calibrated_df = calibrated_df.rename(columns={
-        "p_home_cal": "p_home",
-        "p_draw_cal": "p_draw",
-        "p_away_cal": "p_away",
-    })
-    
-    return calibrated_df
-
-def choose_base(rodada: str) -> pd.DataFrame:
-    bi = os.path.join(rodada, "xg_bivariate.csv")
-    uni = os.path.join(rodada, "xg_univariate.csv")
-
-    if os.path.isfile(bi):
-        log("INFO", "Usando xg_bivariate.csv como base (melhor prioridade)")
-        df = read_csv_safe(bi)
-        if not REQ_XG.issubset(df.columns):
-            log("WARN", "xg_bivariate.csv incompleto; recomputando via odds_consensus …")
-            return build_from_odds_consensus(rodada)
-        return df[list(REQ_XG)].copy()
-
-    if os.path.isfile(uni):
-        log("INFO", "Usando xg_univariate.csv como base")
-        df = read_csv_safe(uni)
-        if not REQ_XG.issubset(df.columns):
-            log("WARN", "xg_univariate.csv incompleto; recomputando via odds_consensus …")
-            return build_from_odds_consensus(rodada)
-        return df[list(REQ_XG)].copy()
-
-    log("WARN", "Nenhum arquivo de previsão encontrado. Tentando odds_consensus.csv ...")
-    return build_from_odds_consensus(rodada)
-
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--rodada", required=True, help="Diretório da rodada (OUT_DIR)")
+    ap.add_argument("--calibration_dir", default="data/history/calibration",
+                    help="Diretório onde estão os calibradores *.pkl")
     args = ap.parse_args()
 
-    rodada = args.rodada
-    out_path = os.path.join(rodada, "probs_calibrated.csv")
+    out_dir = args.rodada
+    calib_dir = args.calibration_dir
 
     print("===================================================")
     print("[calibrate] INICIANDO CALIBRAÇÃO DE PROBABILIDADES")
-    print(f"[calibrate] Diretório de rodada : {rodada}")
+    print(f"[calibrate] Diretório de rodada : {out_dir}")
+    print(f"[calibrate] Diretório calibrador: {calib_dir}")
     print("===================================================")
 
+    # 1) Carrega previsões do núcleo (xg_bivariate.csv)
+    xg_path = os.path.join(out_dir, "xg_bivariate.csv")
+    if not os.path.exists(xg_path):
+        print(f"[calibrate][CRITICAL] Arquivo {xg_path} não encontrado.")
+        return 9
+
     try:
-        base = choose_base(rodada)
-    except FileNotFoundError as e:
-        log("CRITICAL", f"Arquivo não encontrado: {e}")
-        sys.exit(9)
+        df = pd.read_csv(xg_path)
     except Exception as e:
-        log("CRITICAL", f"Falha preparando base: {e}")
-        sys.exit(9)
+        print(f"[calibrate][CRITICAL] Falha lendo {xg_path}: {e}")
+        return 9
 
-    # 1. Coerção e limpeza de tipos (mantida)
-    df = base.rename(columns={"home":"team_home","away":"team_away"}).copy()
-    df = coerce_and_clip(df)
+    try:
+        _require_columns(
+            df,
+            ("match_id", "team_home", "team_away", "p_home", "p_draw", "p_away"),
+            "xg_bivariate.csv",
+        )
+    except Exception as e:
+        print(f"[calibrate][CRITICAL] {e}")
+        return 9
 
-    # 2. APLICAÇÃO DO ALGORITMO DE CALIBRAÇÃO AVANÇADA
-    df_calibrated = apply_isotonic_calibration(df)
+    n = len(df)
+    if n == 0:
+        print("[calibrate][CRITICAL] xg_bivariate.csv está vazio.")
+        return 9
 
-    if df_calibrated.empty:
-        log("CRITICAL", "Nenhuma linha calibrada gerada.")
-        pd.DataFrame(columns=["match_id","team_home","team_away","odds_home","odds_draw","odds_away","p_home","p_draw","p_away"]).to_csv(out_path, index=False)
-        sys.exit(9)
+    # 2) Carrega calibradores (se existirem); do contrário, identidade
+    cal_home_path = os.path.join(calib_dir, "calibrator_home.pkl")
+    cal_draw_path = os.path.join(calib_dir, "calibrator_draw.pkl")
+    cal_away_path = os.path.join(calib_dir, "calibrator_away.pkl")
 
-    # Garante a ordem e as colunas finais
-    FINAL_OUTPUT_COLS = ["match_id","team_home","team_away","odds_home","odds_draw","odds_away","p_home","p_draw","p_away"]
-    df_calibrated[FINAL_OUTPUT_COLS].to_csv(out_path, index=False)
-    print("[ok] Calibração concluída com sucesso.")
+    ch = _load_calibrator(cal_home_path)
+    cx = _load_calibrator(cal_draw_path)
+    ca = _load_calibrator(cal_away_path)
+
+    ch = ch if ch is not None else _IdentityCalibrator()
+    cx = cx if cx is not None else _IdentityCalibrator()
+    ca = ca if ca is not None else _IdentityCalibrator()
+
+    flag_h = 0 if isinstance(ch, _IdentityCalibrator) else 1
+    flag_x = 0 if isinstance(cx, _IdentityCalibrator) else 1
+    flag_a = 0 if isinstance(ca, _IdentityCalibrator) else 1
+
+    if flag_h + flag_x + flag_a == 0:
+        print("[calibrate][NOTICE] Calibradores não encontrados — aplicando identidade (pass-through).")
+
+    # 3) Aplica calibração
+    p_home_raw = df["p_home"].to_numpy(dtype=float)
+    p_draw_raw = df["p_draw"].to_numpy(dtype=float)
+    p_away_raw = df["p_away"].to_numpy(dtype=float)
+
+    # Garantia de faixa antes de alimentar o calibrador
+    p_home_in = _clamp01(p_home_raw)
+    p_draw_in = _clamp01(p_draw_raw)
+    p_away_in = _clamp01(p_away_raw)
+
+    try:
+        p_home_cal = np.asarray(ch.predict(p_home_in), dtype=float).reshape(-1)
+    except Exception as e:
+        print(f"[calibrate][WARN] Falha no calibrador HOME, usando identidade: {e}")
+        p_home_cal = p_home_in.copy()
+        flag_h = 0
+
+    try:
+        p_draw_cal = np.asarray(cx.predict(p_draw_in), dtype=float).reshape(-1)
+    except Exception as e:
+        print(f"[calibrate][WARN] Falha no calibrador DRAW, usando identidade: {e}")
+        p_draw_cal = p_draw_in.copy()
+        flag_x = 0
+
+    try:
+        p_away_cal = np.asarray(ca.predict(p_away_in), dtype=float).reshape(-1)
+    except Exception as e:
+        print(f"[calibrate][WARN] Falha no calibrador AWAY, usando identidade: {e}")
+        p_away_cal = p_away_in.copy()
+        flag_a = 0
+
+    # 4) Renormaliza para somar 1
+    p_home, p_draw, p_away = _renorm_triple(p_home_cal, p_draw_cal, p_away_cal)
+
+    # 5) Monta saída
+    out = df.copy()
+    out.insert(out.columns.get_loc("p_home"), "p_home_raw", p_home_raw)
+    out.insert(out.columns.get_loc("p_draw"), "p_draw_raw", p_draw_raw)
+    out.insert(out.columns.get_loc("p_away"), "p_away_raw", p_away_raw)
+
+    out["p_home"] = np.round(p_home, 6)
+    out["p_draw"] = np.round(p_draw, 6)
+    out["p_away"] = np.round(p_away, 6)
+
+    out["cal_home"] = int(flag_h)
+    out["cal_draw"] = int(flag_x)
+    out["cal_away"] = int(flag_a)
+
+    # 6) Salva
+    out_path = os.path.join(out_dir, "probs_calibrated.csv")
+    try:
+        out.to_csv(out_path, index=False)
+    except Exception as e:
+        print(f"[calibrate][CRITICAL] Falha salvando {out_path}: {e}")
+        return 9
+
+    # 7) (Opcional) Log de sanidade
+    s_ok = np.allclose(out["p_home"] + out["p_draw"] + out["p_away"], 1.0, atol=1e-6)
+    print(f"[ok] Calibração concluída. Registros={len(out)}  Renormalizado={bool(s_ok)}")
+    print(f"[ok] Arquivo gerado: {out_path}")
+
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
