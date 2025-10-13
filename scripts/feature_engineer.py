@@ -1,277 +1,214 @@
-# scripts/feature_engineer.py
-# Gera features a partir de resultados históricos.
-# Uso:
-#   python -m scripts.feature_engineer \
-#       --history data/history/results.csv \
-#       --out data/history/features.parquet \
-#       --ewma 0.20
-#
-# Saída (parquet):
-#   colunas principais:
-#     date_utc (datetime64[ns, UTC])  - data/hora da partida
-#     team, opponent (str)            - time e adversário
-#     is_home (int: 1 casa / 0 fora)
-#     gf, ga (int)                    - gols a favor / contra
-#     xg_for, xg_against (float, opcional)
-#     ewma_gf, ewma_ga, ewma_xg_for, ewma_xg_against, ewma_pts (float)  - suavizações sem vazamento
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Gera features históricas para modelagem dinâmica.
+
+Entrada (--history):
+  CSV com pelo menos: data do jogo, times (home/away) e gols (home/away).
+  O script aceita automaticamente vários nomes de colunas:
+    - data:   date | match_date | fixture_date
+    - mandante: home | home_team | hometeam | team_home
+    - visitante: away | away_team | awayteam | team_away
+    - gols mandante: gf | home_goals | home_score | goals_home | score_home | fthg
+    - gols visitante: ga | away_goals | away_score | goals_away | score_away | ftag
+    - xG (opcional):  xg_home/xg_away | home_xg/away_xg | xg_for/xg_against
+
+Saída (--out):
+  Parquet com linhas no formato “longo” (um registro por time por jogo), contendo:
+    date, team, is_home, gf, ga, gd, xg_for?, xg_against?,
+    ewma_gf, ewma_ga, ewma_gd, ewma_xg_for?, ewma_xg_against?, matches_cnt
+
+Uso:
+  python -m scripts.feature_engineer \
+    --history data/history/results.csv \
+    --out data/history/features.parquet \
+    --ewma 0.20
+"""
 
 from __future__ import annotations
-
-import argparse
-import os
 import sys
-from typing import Optional, List, Dict
-
-import numpy as np
+import argparse
 import pandas as pd
+from typing import Dict, Optional, Tuple
 
+def log(level: str, msg: str) -> None:
+    print(f"[features][{level}] {msg}")
 
-def _lower_map(cols: List[str]) -> Dict[str, str]:
-    """mapa 'nome_em_minusculo' -> 'NomeOriginal' (para acesso case-insensitive)."""
-    return {c.strip().lower(): c for c in cols}
+# --------- Utilidades de normalização de colunas --------- #
+def _norm(s: str) -> str:
+    return s.strip().lower().replace(" ", "_").replace("-", "_")
 
-
-def _pick(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """Retorna o primeiro nome de coluna existente dentre candidates (case-insensitive)."""
-    cmap = _lower_map(list(df.columns))
+def find_col(df: pd.DataFrame, candidates) -> Optional[str]:
+    cmap = { _norm(c): c for c in df.columns }
     for cand in candidates:
-        key = cand.strip().lower()
-        if key in cmap:
-            return cmap[key]
+        cn = _norm(cand)
+        if cn in cmap:
+            return cmap[cn]
     return None
 
+def detect_schema(df: pd.DataFrame) -> Dict[str, str]:
+    """
+    Tenta mapear nomes de colunas da base para um esquema padrão.
+    Retorna dicionário com chaves: date, home, away, gf, ga, xg_home?, xg_away?
+    Lança ValueError se campos essenciais não puderem ser detectados.
+    """
+    # data
+    c_date = find_col(df, ["date", "match_date", "fixture_date"])
+    if not c_date:
+        raise ValueError("history precisa de coluna de data (ex.: 'date').")
 
-def read_history(path: str) -> pd.DataFrame:
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"history not found: {path}")
-    df = pd.read_csv(path)
-    if df.empty:
-        raise ValueError("history is empty")
+    # times
+    c_home = find_col(df, ["home", "home_team", "hometeam", "team_home"])
+    c_away = find_col(df, ["away", "away_team", "awayteam", "team_away"])
+    if not c_home or not c_away:
+        raise ValueError("history precisa das colunas de times (ex.: 'home' e 'away').")
 
-    # Detecta colunas essenciais (home, away, gols, data)
-    col_home = _pick(df, ["home", "home_team", "team_home", "mandante"])
-    col_away = _pick(df, ["away", "away_team", "team_away", "visitante"])
-
-    if not col_home or not col_away:
-        raise KeyError("history must have home/away team columns (e.g., 'home'/'away').")
-
-    # Gols (vários esquemas possíveis)
-    col_hg = _pick(df, ["hg", "home_goals", "home_score", "ft_home_goals", "gols_mandante", "placar_mandante"])
-    col_ag = _pick(df, ["ag", "away_goals", "away_score", "ft_away_goals", "gols_visitante", "placar_visitante"])
-
-    if not col_hg or not col_ag:
-        raise KeyError(
-            "history must have home/away goals columns "
-            "(e.g., 'home_goals'/'away_goals' ou 'home_score'/'away_score')."
+    # gols
+    c_gf = find_col(df, ["gf", "home_goals", "home_score", "goals_home", "score_home", "fthg"])
+    c_ga = find_col(df, ["ga", "away_goals", "away_score", "goals_away", "score_away", "ftag"])
+    if not c_gf or not c_ga:
+        raise ValueError(
+            "history must have home/away goals columns (e.g., "
+            "'home_goals'/'away_goals' ou 'home_score'/'away_score' ou 'gf'/'ga')."
         )
 
     # xG (opcional)
-    col_hxg = _pick(df, ["xg_home", "home_xg", "hxg"])
-    col_axg = _pick(df, ["xg_away", "away_xg", "axg"])
-
-    # Data/Hora - tenta vários padrões
-    col_dt = _pick(df, ["utc_kickoff", "kickoff", "datetime", "date_utc", "match_date", "date", "data"])
-    if not col_dt:
-        raise KeyError("history must have a datetime column (e.g., 'utc_kickoff', 'datetime' ou 'date').")
-
-    # Seleciona e renomeia para padrão interno
-    use_cols = [col_dt, col_home, col_away, col_hg, col_ag]
-    if col_hxg:
-        use_cols.append(col_hxg)
-    if col_axg:
-        use_cols.append(col_axg)
-
-    df = df[use_cols].copy()
-    rename_map = {
-        col_dt: "date_raw",
-        col_home: "home",
-        col_away: "away",
-        col_hg: "hg",
-        col_ag: "ag",
+    c_xg_h = find_col(df, ["xg_home", "home_xg", "xg_for"])
+    c_xg_a = find_col(df, ["xg_away", "away_xg", "xg_against"])
+    return {
+        "date": c_date,
+        "home": c_home,
+        "away": c_away,
+        "gf": c_gf,
+        "ga": c_ga,
+        "xg_home": c_xg_h or "",
+        "xg_away": c_xg_a or "",
     }
-    if col_hxg:
-        rename_map[col_hxg] = "hxg"
-    if col_axg:
-        rename_map[col_axg] = "axg"
-    df.rename(columns=rename_map, inplace=True)
 
-    # Converte data/hora para UTC
-    df["date_utc"] = pd.to_datetime(df["date_raw"], utc=True, errors="coerce")
-    df.drop(columns=["date_raw"], inplace=True)
-    df = df.dropna(subset=["date_utc", "home", "away", "hg", "ag"])
-    # Tipos
-    df["hg"] = pd.to_numeric(df["hg"], errors="coerce").astype("Int64")
-    df["ag"] = pd.to_numeric(df["ag"], errors="coerce").astype("Int64")
+# --------- Construção do formato longo e EWMA --------- #
+def long_format(df: pd.DataFrame, cols: Dict[str, str]) -> pd.DataFrame:
+    base_cols = [cols["date"], cols["home"], cols["away"], cols["gf"], cols["ga"]]
+    tmp = df[base_cols].copy()
 
-    if "hxg" in df.columns:
-        df["hxg"] = pd.to_numeric(df["hxg"], errors="coerce")
-    if "axg" in df.columns:
-        df["axg"] = pd.to_numeric(df["axg"], errors="coerce")
+    # renomeia para padrão interno
+    tmp.columns = ["date", "home", "away", "gf", "ga"]
 
-    # Remove linhas sem gols válidos
-    df = df.dropna(subset=["hg", "ag"])
-    df["hg"] = df["hg"].astype(int)
-    df["ag"] = df["ag"].astype(int)
+    # garante tipos
+    tmp["date"] = pd.to_datetime(tmp["date"], errors="coerce", utc=True)
+    tmp = tmp.dropna(subset=["date", "home", "away"])
+    tmp["gf"] = pd.to_numeric(tmp["gf"], errors="coerce")
+    tmp["ga"] = pd.to_numeric(tmp["ga"], errors="coerce")
+    tmp = tmp.dropna(subset=["gf", "ga"])
 
-    # Somente resultados passados (evita futuros com placar vazio)
-    now = pd.Timestamp.utcnow().tz_localize("UTC")
-    df = df[df["date_utc"] <= now]
+    # opcional xG
+    if cols.get("xg_home"):
+        tmp["xg_home"] = pd.to_numeric(df[cols["xg_home"]], errors="coerce")
+    else:
+        tmp["xg_home"] = pd.NA
+    if cols.get("xg_away"):
+        tmp["xg_away"] = pd.to_numeric(df[cols["xg_away"]], errors="coerce")
+    else:
+        tmp["xg_away"] = pd.NA
 
-    df.sort_values("date_utc", inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    print(f"[features] history loaded: rows={len(df)}  cols={list(df.columns)}")
-    return df
-
-
-def long_format(dfw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Converte base wide (home/away) em long por time.
-    Garante colunas: date_utc, team, opponent, is_home, gf, ga, xg_for, xg_against, points
-    """
-    rows = []
-    has_xg = ("hxg" in dfw.columns) or ("axg" in dfw.columns)
-
-    for _, r in dfw.iterrows():
-        date_utc = r["date_utc"]
-        home = str(r["home"])
-        away = str(r["away"])
-        hg = int(r["hg"])
-        ag = int(r["ag"])
-        hxg = float(r["hxg"]) if "hxg" in dfw.columns and pd.notna(r["hxg"]) else np.nan
-        axg = float(r["axg"]) if "axg" in dfw.columns and pd.notna(r["axg"]) else np.nan
-
-        # linha mandante
-        rows.append({
-            "date_utc": date_utc,
-            "team": home,
-            "opponent": away,
-            "is_home": 1,
-            "gf": hg,
-            "ga": ag,
-            "xg_for": hxg if has_xg else np.nan,
-            "xg_against": axg if has_xg else np.nan,
-            "points": (3 if hg > ag else (1 if hg == ag else 0)),
-        })
-        # linha visitante
-        rows.append({
-            "date_utc": date_utc,
-            "team": away,
-            "opponent": home,
-            "is_home": 0,
-            "gf": ag,
-            "ga": hg,
-            "xg_for": axg if has_xg else np.nan,
-            "xg_against": hxg if has_xg else np.nan,
-            "points": (3 if ag > hg else (1 if ag == hg else 0)),
-        })
-
-    out = pd.DataFrame(rows)
-    # Tipos
-    out["is_home"] = out["is_home"].astype(int)
-    out["gf"] = out["gf"].astype(int)
-    out["ga"] = out["ga"].astype(int)
-    out["points"] = out["points"].astype(int)
-    # Ordena
-    out.sort_values(["team", "date_utc"], inplace=True)
-    out.reset_index(drop=True, inplace=True)
-
-    print(f"[features] long-format built: rows={len(out)}  cols={list(out.columns)}")
+    # formato longo: uma linha por time por jogo
+    home_rows = pd.DataFrame({
+        "date": tmp["date"],
+        "team": tmp["home"].astype(str).str.strip(),
+        "is_home": 1,
+        "gf": tmp["gf"],
+        "ga": tmp["ga"],
+        "gd": tmp["gf"] - tmp["ga"],
+        "xg_for": tmp["xg_home"],
+        "xg_against": tmp["xg_away"],
+    })
+    away_rows = pd.DataFrame({
+        "date": tmp["date"],
+        "team": tmp["away"].astype(str).str.strip(),
+        "is_home": 0,
+        "gf": tmp["ga"],
+        "ga": tmp["gf"],
+        "gd": tmp["ga"] - tmp["gf"],
+        "xg_for": tmp["xg_away"],
+        "xg_against": tmp["xg_home"],
+    })
+    out = pd.concat([home_rows, away_rows], ignore_index=True)
+    out = out.sort_values(["team", "date"]).reset_index(drop=True)
     return out
 
+def add_ewm_features(df_long: pd.DataFrame, ewma_alpha: float) -> pd.DataFrame:
+    # por time, ordenado por data
+    def _ewm_grp(g: pd.DataFrame) -> pd.DataFrame:
+        g = g.sort_values("date")
+        # contador de partidas (cumulativo)
+        g["matches_cnt"] = range(1, len(g) + 1)
 
-def add_ewma_features(df_long: pd.DataFrame, alpha: float) -> pd.DataFrame:
-    """
-    Adiciona EWMA sem vazamento (shift antes do ewm).
-    """
-    alpha = float(alpha)
-    if not (0 < alpha <= 1):
-        raise ValueError("--ewma deve ser no intervalo (0,1]. Ex.: 0.20")
+        # EWM sem “vazar” o jogo atual (shift antes do ewm)
+        for col in ["gf", "ga", "gd", "xg_for", "xg_against"]:
+            if col in g.columns:
+                s = g[col].astype(float)
+                g[f"ewma_{col}"] = (
+                    s.shift(1).ewm(alpha=ewma_alpha, adjust=False, ignore_na=True).mean()
+                )
 
-    df = df_long.copy()
-    df.sort_values(["team", "date_utc"], inplace=True)
+        return g
 
-    def _by_team(group: pd.DataFrame) -> pd.DataFrame:
-        # shift para não "ver" o jogo atual
-        gf = group["gf"].shift(1)
-        ga = group["ga"].shift(1)
-        pts = group["points"].shift(1)
-        xgf = group["xg_for"].shift(1)
-        xga = group["xg_against"].shift(1)
+    out = df_long.groupby("team", group_keys=False).apply(_ewm_grp)
+    # após primeira partida do time, ainda pode haver NaN em ewma_*; substitui por médias simples até o ponto
+    for col in ["gf", "ga", "gd", "xg_for", "xg_against"]:
+        e = f"ewma_{col}"
+        if e in out.columns:
+            out[e] = out[e].fillna(method="ffill")
+    return out
 
-        ewma_gf = gf.ewm(alpha=alpha, adjust=False).mean()
-        ewma_ga = ga.ewm(alpha=alpha, adjust=False).mean()
-        ewma_pts = pts.ewm(alpha=alpha, adjust=False).mean()
-
-        # xG podem ser todos NaN — trata bem
-        if xgf.notna().any():
-            ewma_xgf = xgf.ewm(alpha=alpha, adjust=False).mean()
-        else:
-            ewma_xgf = pd.Series(index=group.index, dtype="float64")
-        if xga.notna().any():
-            ewma_xga = xga.ewm(alpha=alpha, adjust=False).mean()
-        else:
-            ewma_xga = pd.Series(index=group.index, dtype="float64")
-
-        group = group.copy()
-        group["ewma_gf"] = ewma_gf
-        group["ewma_ga"] = ewma_ga
-        group["ewma_pts"] = ewma_pts
-        group["ewma_xg_for"] = ewma_xgf
-        group["ewma_xg_against"] = ewma_xga
-        return group
-
-    df = df.groupby("team", group_keys=False).apply(_by_team)
-
-    # Substitui NaN iniciais por 0 (ou mantém NaN — escolha de projeto).
-    for c in ["ewma_gf", "ewma_ga", "ewma_pts", "ewma_xg_for", "ewma_xg_against"]:
-        if c in df.columns:
-            df[c] = df[c].fillna(0.0)
-
-    print("[features] EWMA features added.")
-    return df
-
-
-def save_parquet(df: pd.DataFrame, out_path: str) -> None:
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    # tenta pyarrow -> fastparquet -> erro
-    engine = None
-    try:
-        import pyarrow  # noqa: F401
-        engine = "pyarrow"
-    except Exception:
-        try:
-            import fastparquet  # noqa: F401
-            engine = "fastparquet"
-        except Exception:
-            engine = None
-
-    if engine is None:
-        # Último recurso: avisa e tenta mesmo assim (pandas pode lançar)
-        print("[features][WARN] Nenhum engine parquet disponível (pyarrow/fastparquet). Tentando gravar assim mesmo...", file=sys.stderr)
-
-    df.to_parquet(out_path, index=False, engine=engine)
-    print(f"[features] written: {out_path} rows={len(df)}")
-
-
-def main(argv: Optional[List[str]] = None) -> int:
-    p = argparse.ArgumentParser(description="Feature engineering com EWMA a partir de resultados históricos.")
-    p.add_argument("--history", required=True, help="CSV de resultados históricos (wide: home/away).")
-    p.add_argument("--out", required=True, help="Caminho do arquivo .parquet de saída.")
-    p.add_argument("--ewma", type=float, default=0.20, help="Alpha do EWMA (0<alpha<=1). Ex.: 0.20")
-    args = p.parse_args(argv)
+# --------- Main --------- #
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--history", required=True, help="CSV com histórico de jogos finalizados")
+    ap.add_argument("--out", required=True, help="Arquivo .parquet de saída")
+    ap.add_argument("--ewma", type=float, default=0.20, help="Alpha do EWMA (0..1), p.ex. 0.20")
+    args = ap.parse_args()
 
     try:
-        df_hist = read_history(args.history)
-        df_long = long_format(df_hist)
-        df_feat = add_ewma_features(df_long, alpha=args.ewma)
-        # Ordena e salva
-        df_feat.sort_values(["date_utc", "team"], inplace=True)
-        save_parquet(df_feat, args.out)
-        return 0
+        df = pd.read_csv(args.history)
     except Exception as e:
-        print(f"[features][CRITICAL] {e}", file=sys.stderr)
+        log("CRITICAL", f"falha lendo history: {e}")
         return 2
 
+    if df.empty:
+        log("CRITICAL", "history is empty")
+        return 2
+
+    # Detecta esquema e normaliza
+    try:
+        cols = detect_schema(df)
+        log("INFO", f"schema detectado: date={cols['date']} home={cols['home']} away={cols['away']} "
+                   f"gf={cols['gf']} ga={cols['ga']} "
+                   f"xg_home={cols.get('xg_home') or '-'} xg_away={cols.get('xg_away') or '-'}")
+    except ValueError as ve:
+        log("CRITICAL", f"\"{ve}\"")
+        return 2
+
+    # Long format + EWMA
+    df_long = long_format(df, cols)
+    if df_long.empty:
+        log("CRITICAL", "depois da normalizacao, nenhum jogo valido restou")
+        return 2
+
+    features = add_ewm_features(df_long, ewma_alpha=args.ewma)
+
+    # Ordena e salva
+    features = features.sort_values(["date", "team"]).reset_index(drop=True)
+
+    try:
+        # requer pyarrow/fastparquet no ambiente
+        features.to_parquet(args.out, index=False)
+    except Exception as e:
+        log("CRITICAL", f"falha salvando parquet: {e}")
+        return 2
+
+    log("INFO", f"features salvas em {args.out} — linhas={len(features)} times={features['team'].nunique()}")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
