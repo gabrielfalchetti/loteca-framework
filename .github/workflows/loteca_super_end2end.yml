@@ -87,11 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f "${ALIASES_JSON}" ]; then
-            python - <<'PY'
-import json,sys
-json.load(open('${ALIASES_JSON}','r',encoding='utf-8'))
-print('[ok] aliases.json valido')
-PY
+            python -c "import json,sys; json.load(open('${ALIASES_JSON}','r',encoding='utf-8')); print('[ok] aliases.json valido')"
           else
             echo "::notice::Sem aliases.json — normalizacao automatica sera usada."
           fi
