@@ -39,10 +39,6 @@ on:
         description: "Treinar calibrador isotônico nesta execução? (true/false)"
         required: true
         default: "false"
-      source_csv:
-        description: "Caminho do CSV de jogos (match_id,home,away)"
-        required: true
-        default: "data/in/matches_source.csv"
 
 env:
   SEASON: ${{ github.event.inputs.season }}
@@ -54,7 +50,7 @@ env:
   KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n }}
   ROUND_TO: ${{ github.event.inputs.round_to }}
   TRAIN_CALIBRATOR: ${{ github.event.inputs.train_calibrator }}
-  SOURCE_CSV: ${{ github.event.inputs.source_csv }}
+  SOURCE_CSV: data/in/matches_source.csv
   PYTHONUTF8: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_WARN_SCRIPT_LOCATION: 1
@@ -62,10 +58,6 @@ env:
 jobs:
   loteca-e2e:
     runs-on: ubuntu-latest
-    env:
-      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,9 +69,8 @@ jobs:
 
       - name: Install deps
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install pandas numpy scipy scikit-learn requests unidecode pyarrow
+          pip install pandas numpy scipy scikit-learn requests unidecode pyarrow fastparquet
 
       - name: Prepare RUN_ID and OUT_DIR
         shell: bash
@@ -92,10 +83,11 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Validate SOURCE_CSV & create whitelist
+      - name: Validate/prepare source CSV (whitelist)
         shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
+          SOURCE_CSV: ${{ env.SOURCE_CSV }}
         run: |
           set -euo pipefail
           if [ ! -s "${SOURCE_CSV}" ]; then
@@ -108,69 +100,32 @@ jobs:
           done
           cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
 
+      # 1) UPDATE HISTORICAL DATA (com fallback stub se a API não retornar nada)
       - name: Update Historical Data (mandatory)
         shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-          # tenta atualizar; se falhar, seguimos para checar/gerar stub
           if ! python -m scripts.update_history --since_days 14 --out "data/history/results.csv"; then
             echo "::notice::update_history falhou; verificando/gerando stub..."
           fi
-          # stub se vazio/só cabeçalho
           if [ ! -s "data/history/results.csv" ] || [ "$(wc -l < data/history/results.csv)" -le 1 ]; then
             mkdir -p data/history
             printf "date,home,away,home_goals,away_goals\n1970-01-01,BOOT,BOOT,0,0\n" > data/history/results.csv
             echo "::notice::Sem histórico recente; criado stub (BOOT vs BOOT 0-0) para destravar as features."
           fi
-          test -s "data/history/results.csv" || { echo "::error::history results.csv not generated"; exit 1; }
-
-      - name: Normalize history headers (shim)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p scripts
-          cat > scripts/_normalize_history.py <<'PY'
-import sys, pandas as pd
-p = "data/history/results.csv"
-df = pd.read_csv(p)
-cands = {
-  "date": ["date","match_date","utc_date","fixture_date","game_date","dt","datetime"],
-  "home": ["home","home_team","team_home","home_name","homeTeam","home_team_name"],
-  "away": ["away","away_team","team_away","away_name","awayTeam","away_team_name"],
-  "home_goals": ["home_goals","home_score","goals_home","gf","home_ft_goals","home_goals_ft","score_home","goalsHome"],
-  "away_goals": ["away_goals","away_score","goals_away","ga","away_ft_goals","away_goals_ft","score_away","goalsAway"],
-}
-lower = {c.lower(): c for c in df.columns}
-def pick(opts):
-    for k in opts:
-        c = lower.get(k.lower())
-        if c in df.columns:
-            return c
-    return None
-sel = {k: pick(v) for k,v in cands.items()}
-missing = [k for k,v in sel.items() if v is None]
-if missing:
-    sys.stderr.write(f"[normalize][CRITICAL] missing columns: {missing}\n")
-    sys.exit(1)
-out = pd.DataFrame({
-  "date": df[sel["date"]],
-  "home": df[sel["home"]],
-  "away": df[sel["away"]],
-  "home_goals": pd.to_numeric(df[sel["home_goals"]], errors="coerce").fillna(0).astype(int),
-  "away_goals": pd.to_numeric(df[sel["away_goals"]], errors="coerce").fillna(0).astype(int),
-})
-out.to_csv(p, index=False)
-print("[normalize] OK", len(out))
-PY
-          python scripts/_normalize_history.py
           header="$(head -n1 data/history/results.csv | tr -d '\r')"
           for c in date home away home_goals away_goals; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c' após normalização"; exit 1; }
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c'"; exit 1; }
           done
 
+      # 2) FEATURE ENGINEERING
       - name: Build Features (mandatory)
         shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           [ -f scripts/feature_engineer.py ] || { echo "::error::scripts/feature_engineer.py not found"; exit 2; }
@@ -180,10 +135,11 @@ PY
             --ewma 0.20
           test -s "data/history/features.parquet" || { echo "::error::features.parquet not generated"; exit 2; }
 
+      # 3) TRAIN DYNAMIC MODEL (único gerador de estado α/β)
       - name: Train Dynamic Poisson Model
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 7; }
@@ -194,10 +150,12 @@ PY
             --ewma 0.20
           test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 7; }
 
+      # 4) INGEST FUTURE MATCHES & ODDS (sem aliases; usa SOURCE_CSV)
       - name: Ingest API-FOOTBALL
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
+          SOURCE_CSV: ${{ env.SOURCE_CSV }}
         run: |
           set -euo pipefail
           if [ -z "${API_FOOTBALL_KEY:-}" ]; then
@@ -215,9 +173,11 @@ PY
           [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::warning::odds_apifootball.csv not generated"
 
       - name: Ingest TheOddsAPI
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
+          SOURCE_CSV: ${{ env.SOURCE_CSV }}
+          REGIONS: ${{ env.REGIONS }}
         run: |
           set -euo pipefail
           if [ -z "${THEODDS_API_KEY:-}" ]; then
@@ -235,10 +195,11 @@ PY
           done
           [ -s "${OUT_DIR}/odds_theoddsapi.csv" ] || echo "::warning::odds_theoddsapi.csv not generated"
 
+      # 5) CONSENSUS STRICT (não passa jogo sem odds!)
       - name: Consensus Odds (strict)
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -250,14 +211,14 @@ PY
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
+      # 6) (opcional) TREINAR CALIBRADOR
       - name: Train Calibrator (optional)
+        if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
         shell: bash
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
-          if [ "${TRAIN_CALIBRATOR}" != "true" ]; then
-            echo "::notice::TRAIN_CALIBRATOR != true; pulando."
-            exit 0
-          fi
           [ -f scripts/train_calibrator.py ] || { echo "::error::scripts/train_calibrator.py not found"; exit 12; }
           python -m scripts.train_calibrator \
             --history "data/history/results.csv" \
@@ -265,10 +226,11 @@ PY
             --out_dir "data/history/calibration"
           test -s "data/history/calibration/calibrator_home.pkl" || { echo "::error::calibrator files not generated"; exit 12; }
 
+      # 7) PREVISÃO ÚNICA (núcleo unificado)
       - name: Predict (Dynamic Bivariate Poisson)
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
@@ -276,10 +238,11 @@ PY
           OUT="${OUT_DIR}/xg_bivariate.csv"
           test -s "$OUT" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
+      # 8) CALIBRAÇÃO (aplica calibrador treinado)
       - name: Calibrate probabilities
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
@@ -287,10 +250,11 @@ PY
           OUT="${OUT_DIR}/probs_calibrated.csv"
           test -s "$OUT" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
 
+      # 9) KELLY
       - name: Kelly bets
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 10; }
@@ -304,10 +268,11 @@ PY
           OUT="${OUT_DIR}/kelly_stakes.csv"
           test -s "$OUT" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
 
+      # 10) TICKET LOTECA
       - name: Build Loteca ticket
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/make_loteca_ticket.py ] || { echo "::error::scripts/make_loteca_ticket.py not found"; exit 11; }
@@ -318,7 +283,7 @@ PY
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rodada-${{ github.run_id }}
+          name: rodada-${{ env.OUT_DIR }}
           path: |
             ${{ env.OUT_DIR }}/*.csv
             ${{ env.OUT_DIR }}/*.json
