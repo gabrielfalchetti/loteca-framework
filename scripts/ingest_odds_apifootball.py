@@ -4,9 +4,8 @@
 """
 ingest_odds_apifootball: Busca jogos e odds da API-Football.
 
-CORREÇÃO FINAL: Ajusta o intervalo de datas para começar a busca
-a partir do dia anterior (D-1) para compensar diferenças de fuso horário (UTC)
-e garantir que os jogos do dia atual sejam sempre capturados.
+CORREÇÃO FINAL: Corrige o SyntaxError na linha 76, completando a
+comparação de timestamp para filtrar corretamente os jogos que já começaram.
 """
 
 import os
@@ -36,7 +35,7 @@ def main():
     headers = {'x-apisports-key': API_KEY}
     url = "https://v3.football.api-sports.io/fixtures"
     
-    # CORREÇÃO DE DATA: Começa a busca do dia anterior para criar uma janela segura de fuso horário.
+    # Começa a busca do dia anterior para evitar problemas de fuso horário.
     date_from = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
     date_to = (datetime.utcnow() + timedelta(days=lookahead_days)).strftime('%Y-%m-%d')
     
@@ -54,7 +53,6 @@ def main():
         data = response.json()
     except requests.exceptions.RequestException as e:
         log("ERROR", f"Falha na requisição à API-Football: {e}")
-        # Cria um arquivo vazio para não quebrar o pipeline em caso de falha da API
         pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_apifootball.csv"), index=False)
         return 0
 
@@ -71,6 +69,54 @@ def main():
     
     for fixture in fixtures:
         try:
-            # Filtra apenas jogos que ainda não começaram, comparando timestamps
+            # CORREÇÃO: A linha abaixo foi completada para a comparação de timestamp correta.
             fixture_timestamp = fixture['fixture']['timestamp']
-            if fixture_timestamp < datetime
+            if fixture_timestamp < datetime.now(timezone.utc).timestamp():
+                continue
+
+            fixture_id = fixture['fixture']['id']
+            home_team = fixture['teams']['home']['name']
+            away_team = fixture['teams']['away']['name']
+
+            # Busca odds para o jogo (Bookmaker 8 = Bet365)
+            odds_params = {'fixture': fixture_id, 'bookmaker': 8, 'bet': 1}
+            odds_response = requests.get(odds_url, headers=headers, params=odds_params)
+            odds_response.raise_for_status()
+            odds_data = odds_response.json().get('response', [])
+            
+            if not odds_data or not odds_data[0].get('bookmakers'):
+                continue
+
+            bets = odds_data[0]['bookmakers'][0].get('bets', [])
+            match_winner_odds = next((b['values'] for b in bets if b['name'] == 'Match Winner'), None)
+            
+            if not match_winner_odds:
+                continue
+
+            odds_dict = {o['value']: o['odd'] for o in match_winner_odds}
+            
+            # Garante que todas as odds (Home, Draw, Away) estão presentes
+            if 'Home' in odds_dict and 'Draw' in odds_dict and 'Away' in odds_dict:
+                rows.append({
+                    'match_id': fixture_id, 'home': home_team, 'away': away_team,
+                    'odds_home': float(odds_dict['Home']),
+                    'odds_draw': float(odds_dict['Draw']),
+                    'odds_away': float(odds_dict['Away']),
+                })
+        except (KeyError, IndexError, requests.exceptions.RequestException):
+            continue
+
+    if not rows:
+        df = pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away'])
+    else:
+        df = pd.DataFrame(rows).dropna()
+        df = df[(df['odds_home'] > 1) & (df['odds_draw'] > 1) & (df['odds_away'] > 1)]
+
+    out_path = os.path.join(args.rodada, "odds_apifootball.csv")
+    df.to_csv(out_path, index=False)
+    log("INFO", f"Arquivo odds_apifootball.csv gerado com {len(df)} jogos válidos.")
+    
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
