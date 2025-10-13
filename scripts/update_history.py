@@ -1,14 +1,24 @@
 # scripts/update_history.py
-# Atualiza histórico com resultados FINALIZADOS via API-FOOTBALL.
-# Estratégia robusta:
-#   1) Loop dia-a-dia: /fixtures?date=YYYY-MM-DD&status=FT&timezone=UTC (+ paginação)
-#   2) Se ainda vier 0, fallback: /fixtures?last=400&timezone=UTC e filtra pela janela
+# Atualiza histórico de resultados FINALIZADOS com múltiplos fallbacks (API-Football direto e via RapidAPI).
+# Não altera o workflow. Usa as variáveis de ambiente:
+#   - API_FOOTBALL_KEY (direto em https://v3.football.api-sports.io)
+#   - X_RAPIDAPI_KEY   (fallback via https://api-football-v1.p.rapidapi.com)
 #
-# Uso no workflow:
-#   python -m scripts.update_history --since_days 14 --out data/history/results.csv
+# Prioridade:
+#   (A) API-FOOTBALL direto:
+#       A1) /fixtures?date=YYYY-MM-DD&status=FT&timezone=UTC (dia-a-dia + paginação)
+#       A2) /fixtures?from=YYYY-MM-DD&to=YYYY-MM-DD&status=FT&timezone=UTC (+ paginação)
+#       A3) /fixtures?last=400&timezone=UTC  (filtra pela janela)
+#   (B) RapidAPI:
+#       B1) /fixtures?date=...  (dia-a-dia + paginação)
+#       B2) /fixtures?from=...&to=... (+ paginação)
+#       B3) /fixtures?last=400  (filtra pela janela)
 #
-# Saída: CSV com colunas:
+# Saída CSV: data/history/results.csv com colunas:
 #   date_utc,home,away,home_goals,away_goals
+#
+# Uso:
+#   python -m scripts.update_history --since_days 14 --out data/history/results.csv
 
 from __future__ import annotations
 
@@ -18,15 +28,36 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-API_BASE = "https://v3.football.api-sports.io"
-HEADERS_NAME = "x-apisports-key"
+# --------- Config de provedores ---------
+PROVIDERS = [
+    {
+        "name": "apifootball-direct",
+        "base": "https://v3.football.api-sports.io",
+        "key_env": "API_FOOTBALL_KEY",
+        "key_header": "x-apisports-key",
+        "host_header": None,
+    },
+    {
+        "name": "apifootball-rapidapi",
+        "base": "https://api-football-v1.p.rapidapi.com/v3",
+        "key_env": "X_RAPIDAPI_KEY",
+        "key_header": "X-RapidAPI-Key",
+        "host_header": "X-RapidAPI-Host",  # exigido pela RapidAPI
+        "host_value": "api-football-v1.p.rapidapi.com",
+    },
+]
+
+FT_STATUSES = {"FT", "AET", "PEN"}
+MAX_RETRIES = 3
+BACKOFF = 1.6
 
 
-def utc_today() -> datetime:
+# --------- Utilitários ---------
+def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
@@ -34,24 +65,31 @@ def iso_date(d: datetime) -> str:
     return d.date().isoformat()
 
 
-def api_get(url: str, headers: Dict[str, str], params: Dict[str, Any], max_retries: int = 3, backoff: float = 1.6) -> Optional[Dict[str, Any]]:
-    for attempt in range(1, max_retries + 1):
+def make_headers(provider: Dict[str, Any], api_key: str) -> Dict[str, str]:
+    headers = {provider["key_header"]: api_key}
+    if provider.get("host_header"):
+        headers[provider["host_header"]] = provider["host_value"]
+    return headers
+
+
+def api_get(url: str, headers: Dict[str, str], params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             r = requests.get(url, headers=headers, params=params, timeout=30)
             if r.status_code == 200:
                 return r.json()
             if r.status_code in (429, 500, 502, 503, 504):
-                wait = backoff ** attempt
-                print(f"[update_history][WARN] status={r.status_code} retry in {wait:.1f}s (attempt {attempt}/{max_retries})")
+                wait = BACKOFF ** attempt
+                print(f"[update_history][WARN] {url} status={r.status_code} retry in {wait:.1f}s ({attempt}/{MAX_RETRIES}) params={params}")
                 time.sleep(wait)
                 continue
-            print(f"[update_history][ERROR] GET {url} params={params} status={r.status_code} body={r.text[:400]}")
+            print(f"[update_history][ERROR] GET {url} status={r.status_code} body={r.text[:400]}")
             return None
         except requests.RequestException as e:
-            wait = backoff ** attempt
-            print(f"[update_history][WARN] exception={e} retry in {wait:.1f}s (attempt {attempt}/{max_retries})")
+            wait = BACKOFF ** attempt
+            print(f"[update_history][WARN] exception={e} retry in {wait:.1f}s ({attempt}/{MAX_RETRIES})")
             time.sleep(wait)
-    print("[update_history][ERROR] max retries exceeded")
+    print(f"[update_history][ERROR] max retries exceeded for {url}")
     return None
 
 
@@ -67,11 +105,10 @@ def extract_finished_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             goals = item.get("goals", {}) or {}
 
             status_short = (fixture.get("status", {}) or {}).get("short")
-            # Finalizados (tempo normal, prorrogação, pênaltis)
-            if status_short not in {"FT", "AET", "PEN"}:
+            if status_short not in FT_STATUSES:
                 continue
 
-            # Data UTC ISO
+            # Data UTC
             date_iso = fixture.get("date")
             if not date_iso:
                 ts = fixture.get("timestamp")
@@ -103,30 +140,8 @@ def extract_finished_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
-def fetch_by_day(day_iso: str, api_key: str) -> List[Dict[str, Any]]:
-    """Busca fixtures finalizados em um único dia (UTC), com paginação."""
-    headers = {HEADERS_NAME: api_key}
-    all_rows: List[Dict[str, Any]] = []
-    page = 1
-    while True:
-        params = {"date": day_iso, "status": "FT", "timezone": "UTC", "page": page}
-        payload = api_get(f"{API_BASE}/fixtures", headers, params)
-        if not payload:
-            break
-        rows = extract_finished_rows(payload)
-        all_rows.extend(rows)
-
-        paging = payload.get("paging") or {}
-        current = paging.get("current", 1)
-        total = paging.get("total", 1)
-        if current >= total:
-            break
-        page += 1
-        # pequeno respiro para evitar 429
-        time.sleep(0.25)
-
-    # Dedup por (date_utc, home, away, home_goals, away_goals)
-    uniq = {(r["date_utc"], r["home"], r["away"], r["home_goals"], r["away_goals"]) for r in all_rows}
+def dedup_sort(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    uniq = {(r["date_utc"], r["home"], r["away"], r["home_goals"], r["away_goals"]) for r in rows}
     return [
         {
             "date_utc": t[0],
@@ -137,40 +152,6 @@ def fetch_by_day(day_iso: str, api_key: str) -> List[Dict[str, Any]]:
         }
         for t in sorted(uniq, key=lambda x: x[0])
     ]
-
-
-def fetch_window_day_by_day(start_dt: datetime, end_dt: datetime, api_key: str) -> List[Dict[str, Any]]:
-    """Varre dia a dia para contornar limitações de from/to em planos gratuitos."""
-    all_rows: List[Dict[str, Any]] = []
-    cur = start_dt
-    while cur.date() <= end_dt.date():
-        day_iso = iso_date(cur)
-        print(f"[update_history] fetching by day {day_iso}...")
-        rows = fetch_by_day(day_iso, api_key)
-        if rows:
-            all_rows.extend(rows)
-        cur = cur + timedelta(days=1)
-
-    # Dedup global
-    uniq = {(r["date_utc"], r["home"], r["away"], r["home_goals"], r["away_goals"]) for r in all_rows}
-    return [
-        {
-            "date_utc": t[0],
-            "home": t[1],
-            "away": t[2],
-            "home_goals": t[3],
-            "away_goals": t[4],
-        }
-        for t in sorted(uniq, key=lambda x: x[0])
-    ]
-
-
-def fetch_fallback_last(last: int, api_key: str) -> List[Dict[str, Any]]:
-    """Busca os 'last' fixtures mais recentes e deixa o filtro por janela para fora."""
-    headers = {HEADERS_NAME: api_key}
-    params = {"last": last, "timezone": "UTC"}
-    payload = api_get(f"{API_BASE}/fixtures", headers, params)
-    return extract_finished_rows(payload) if payload else []
 
 
 def filter_by_window(rows: List[Dict[str, Any]], start_dt: datetime, end_dt: datetime) -> List[Dict[str, Any]]:
@@ -182,20 +163,95 @@ def filter_by_window(rows: List[Dict[str, Any]], start_dt: datetime, end_dt: dat
                 out.append(r)
         except Exception:
             continue
-    # Dedup e sort
-    uniq = {(x["date_utc"], x["home"], x["away"], x["home_goals"], x["away_goals"]) for x in out}
-    return [
-        {
-            "date_utc": t[0],
-            "home": t[1],
-            "away": t[2],
-            "home_goals": t[3],
-            "away_goals": t[4],
+    return dedup_sort(out)
+
+
+# --------- Coletas por provedor ---------
+def fetch_day_by_day(provider: Dict[str, Any], api_key: str, start_dt: datetime, end_dt: datetime) -> List[Dict[str, Any]]:
+    base = provider["base"]
+    headers = make_headers(provider, api_key)
+    all_rows: List[Dict[str, Any]] = []
+    cur = start_dt
+    while cur.date() <= end_dt.date():
+        day_iso = iso_date(cur)
+        page = 1
+        while True:
+            params = {"date": day_iso, "status": "FT", "timezone": "UTC", "page": page}
+            payload = api_get(f"{base}/fixtures", headers, params)
+            if not payload:
+                break
+            rows = extract_finished_rows(payload)
+            all_rows.extend(rows)
+
+            paging = payload.get("paging") or {}
+            current = paging.get("current", 1)
+            total = paging.get("total", 1)
+            if current >= total:
+                break
+            page += 1
+            time.sleep(0.25)
+        cur += timedelta(days=1)
+    return dedup_sort(all_rows)
+
+
+def fetch_from_to(provider: Dict[str, Any], api_key: str, start_dt: datetime, end_dt: datetime) -> List[Dict[str, Any]]:
+    base = provider["base"]
+    headers = make_headers(provider, api_key)
+    all_rows: List[Dict[str, Any]] = []
+    page = 1
+    while True:
+        params = {
+            "from": iso_date(start_dt),
+            "to": iso_date(end_dt),
+            "status": "FT",
+            "timezone": "UTC",
+            "page": page,
         }
-        for t in sorted(uniq, key=lambda x: x[0])
-    ]
+        payload = api_get(f"{base}/fixtures", headers, params)
+        if not payload:
+            break
+        rows = extract_finished_rows(payload)
+        all_rows.extend(rows)
+
+        paging = payload.get("paging") or {}
+        current = paging.get("current", 1)
+        total = paging.get("total", 1)
+        if current >= total:
+            break
+        page += 1
+        time.sleep(0.25)
+    return dedup_sort(all_rows)
 
 
+def fetch_last(provider: Dict[str, Any], api_key: str, last: int) -> List[Dict[str, Any]]:
+    base = provider["base"]
+    headers = make_headers(provider, api_key)
+    payload = api_get(f"{base}/fixtures", headers, {"last": last, "timezone": "UTC"})
+    return dedup_sort(extract_finished_rows(payload) if payload else [])
+
+
+def try_provider(provider: Dict[str, Any], start_dt: datetime, end_dt: datetime) -> Tuple[str, List[Dict[str, Any]]]:
+    api_key = os.getenv(provider["key_env"], "").strip()
+    if not api_key:
+        return (provider["name"], [])
+
+    print(f"[update_history] provider={provider['name']} try day-by-day...")
+    rows = fetch_day_by_day(provider, api_key, start_dt, end_dt)
+    if rows:
+        return (provider["name"], filter_by_window(rows, start_dt, end_dt))
+
+    print(f"[update_history] provider={provider['name']} try from/to...")
+    rows = fetch_from_to(provider, api_key, start_dt, end_dt)
+    if rows:
+        return (provider["name"], filter_by_window(rows, start_dt, end_dt))
+
+    print(f"[update_history] provider={provider['name']} try last=400 + window filter...")
+    rows = fetch_last(provider, api_key, last=400)
+    rows = filter_by_window(rows, start_dt, end_dt)
+    return (provider["name"], rows)
+
+
+# --------- Escrita ---------
 def write_csv(out_path: str, rows: List[Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -205,35 +261,38 @@ def write_csv(out_path: str, rows: List[Dict[str, Any]]) -> None:
             w.writerow(r)
 
 
+# --------- Main ---------
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Atualiza histórico com resultados finalizados via API-FOOTBALL.")
+    parser = argparse.ArgumentParser(description="Atualiza histórico com resultados finalizados (API-Football / RapidAPI).")
     parser.add_argument("--since_days", type=int, default=14, help="Janela de dias para trás (inclui hoje).")
     parser.add_argument("--out", required=True, help="CSV de saída.")
     args = parser.parse_args()
 
-    api_key = os.getenv("API_FOOTBALL_KEY", "").strip()
-    if not api_key:
-        print("[update_history][CRITICAL] Variável de ambiente API_FOOTBALL_KEY ausente.", file=sys.stderr)
-        return 2
-
-    end_dt = utc_today().replace(hour=23, minute=59, second=59, microsecond=0)
+    end_dt = utc_now().replace(hour=23, minute=59, second=59, microsecond=0)
     start_dt = (end_dt - timedelta(days=args.since_days)).replace(hour=0, minute=0, second=0, microsecond=0)
 
     try:
-        print(f"[update_history] fetching finished fixtures day-by-day for {iso_date(start_dt)} -> {iso_date(end_dt)} (UTC)...")
-        rows = fetch_window_day_by_day(start_dt, end_dt, api_key)
+        print(f"[update_history] fetching finished fixtures for window {iso_date(start_dt)} -> {iso_date(end_dt)} (UTC)...")
 
-        if not rows:
-            print("[update_history][WARN] Janela retornou 0 jogos. Ativando fallback last=400...")
-            fallback = fetch_fallback_last(last=400, api_key=api_key)
-            rows = filter_by_window(fallback, start_dt, end_dt)
+        all_rows: List[Dict[str, Any]] = []
+        tried = []
 
-        if not rows:
-            print("[update_history][ERROR] Nenhum jogo finalizado encontrado no intervalo solicitado.", file=sys.stderr)
+        for prov in PROVIDERS:
+            name, rows = try_provider(prov, start_dt, end_dt)
+            tried.append(name)
+            if rows:
+                all_rows = rows
+                print(f"[update_history] provider={name} returned {len(all_rows)} rows.")
+                break
+            else:
+                print(f"[update_history] provider={name} returned 0 rows.")
+
+        if not all_rows:
+            print(f"[update_history][ERROR] Nenhum jogo finalizado encontrado. Provedores tentados: {', '.join(tried)}.", file=sys.stderr)
             return 2
 
-        write_csv(args.out, rows)
-        print(f"[update_history] written {len(rows)} rows to {args.out}")
+        write_csv(args.out, all_rows)
+        print(f"[update_history] written {len(all_rows)} rows to {args.out}")
         return 0
 
     except Exception as e:
