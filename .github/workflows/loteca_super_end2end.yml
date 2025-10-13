@@ -50,9 +50,9 @@ env:
   KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n }}
   ROUND_TO: ${{ github.event.inputs.round_to }}
   TRAIN_CALIBRATOR: ${{ github.event.inputs.train_calibrator }}
-  PYTHONUTF8: 1
-  PIP_DISABLE_PIP_VERSION_CHECK: 1
-  PIP_NO_WARN_SCRIPT_LOCATION: 1
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_WARN_SCRIPT_LOCATION: "1"
 
 jobs:
   loteca-e2e:
@@ -86,7 +86,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Detecta automaticamente o arquivo correto
           if [ -s "data/in/matches_sources.csv" ]; then
             SOURCE_CSV="data/in/matches_sources.csv"
           elif [ -s "data/in/matches_source.csv" ]; then
@@ -97,13 +96,11 @@ jobs:
           fi
           echo "SOURCE_CSV=${SOURCE_CSV}" >> "$GITHUB_ENV"
 
-          # Valida cabeçalho
           header="$(head -n1 "${SOURCE_CSV}" | tr -d '\r')"
           for c in match_id home away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
           done
 
-          # Gera whitelist para o consenso estrito
           cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
 
       # 1) UPDATE HISTORICAL DATA (feedback loop)
@@ -118,7 +115,7 @@ jobs:
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
           python -m scripts.update_history --since_days 14 --out "data/history/results.csv" || true
           if [ ! -s "data/history/results.csv" ]; then
-            echo "::warning::Sem histórico via API; criando seed mínimo a partir do SOURCE_CSV (empates 1-1 fictícios, apenas para features)."
+            echo "::warning::Sem histórico via API; criando seed mínimo a partir do SOURCE_CSV (empates 1-1 fictícios)."
             python - <<'PY'
 import csv, os
 src = os.environ["SOURCE_CSV"]
@@ -127,7 +124,7 @@ with open(src, newline='', encoding='utf-8') as f, open(outp, 'w', newline='', e
     r = csv.DictReader(f)
     w = csv.DictWriter(g, fieldnames=["date","home","away","home_goals","away_goals"])
     w.writeheader()
-    for i,row in enumerate(r, start=1):
+    for row in r:
         w.writerow({"date":"2025-01-01","home":row["home"],"away":row["away"],"home_goals":1,"away_goals":1})
 PY
           fi
@@ -168,6 +165,7 @@ PY
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
           SOURCE_CSV: ${{ env.SOURCE_CSV }}
+          SEASON: ${{ env.SEASON }}
         shell: bash
         run: |
           set -euo pipefail
