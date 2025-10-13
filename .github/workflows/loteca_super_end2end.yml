@@ -39,6 +39,10 @@ on:
         description: "Treinar calibrador isotônico nesta execução? (true/false)"
         required: true
         default: "false"
+      source_csv:
+        description: "Caminho do CSV de jogos (match_id,home,away)"
+        required: true
+        default: "data/in/matches_source.csv"
 
 env:
   SEASON: ${{ github.event.inputs.season }}
@@ -50,8 +54,7 @@ env:
   KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n }}
   ROUND_TO: ${{ github.event.inputs.round_to }}
   TRAIN_CALIBRATOR: ${{ github.event.inputs.train_calibrator }}
-  # caminho padrão do CSV de origem dos jogos (lista manual)
-  SOURCE_CSV: data/in/matches_source.csv
+  SOURCE_CSV: ${{ github.event.inputs.source_csv }}
   PYTHONUTF8: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_WARN_SCRIPT_LOCATION: 1
@@ -60,7 +63,7 @@ jobs:
   loteca-e2e:
     runs-on: ubuntu-latest
     env:
-      # Secrets injetados em variáveis de ambiente (não usar em expressões 'if:')
+      # exponha as keys como variáveis de ambiente (sem usá-las em expressões if:)
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
@@ -89,58 +92,100 @@ jobs:
           echo "RUN_ID=${RUN_ID}"
           echo "OUT_DIR=${OUT_DIR}"
 
-      - name: Validate source matches CSV & create whitelist
+      - name: Validate SOURCE_CSV & create whitelist
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-          SOURCE_CSV: ${{ env.SOURCE_CSV }}
-        shell: bash
         run: |
           set -euo pipefail
           if [ ! -s "${SOURCE_CSV}" ]; then
             echo "::error::Arquivo ${SOURCE_CSV} não encontrado ou vazio. Crie-o com cabeçalho: match_id,home,away"
             exit 4
           fi
-          # Validação de cabeçalho básico
           header="$(head -n1 "${SOURCE_CSV}" | tr -d '\r')"
           for c in match_id home away; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
           done
-          # Whitelist para o consenso estrito
           cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
 
-      # 1) UPDATE HISTORICAL DATA (feedback loop) — com stub se vazio
+      # 1) UPDATE HISTORICAL DATA (feedback loop) — com fallback para stub
       - name: Update Historical Data (mandatory)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
 
-          # Tenta atualizar; se falhar, seguimos para checar/gerar stub
+          # tenta atualizar; se falhar, seguimos para checar/gerar stub
           if ! python -m scripts.update_history --since_days 14 --out "data/history/results.csv"; then
             echo "::notice::update_history falhou; verificando/gerando stub..."
           fi
 
-          # Se não existe, vazio ou só cabeçalho, gera um stub com 1 partida fictícia neutra
+          # se não existe, vazio ou só cabeçalho, gera um stub com 1 partida neutra
           if [ ! -s "data/history/results.csv" ] || [ "$(wc -l < data/history/results.csv)" -le 1 ]; then
             mkdir -p data/history
             printf "date,home,away,home_goals,away_goals\n1970-01-01,BOOT,BOOT,0,0\n" > data/history/results.csv
             echo "::notice::Sem histórico recente; criado stub (BOOT vs BOOT 0-0) para destravar as features."
           fi
 
-          # Sanidade: garantir cabeçalhos esperados
+          test -s "data/history/results.csv" || { echo "::error::history results.csv not generated"; exit 1; }
+
+      # 1.1) SHIM DE NORMALIZAÇÃO DOS CABEÇALHOS DO HISTÓRICO
+      - name: Normalize history headers (shim)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+import sys, pandas as pd, os
+path = "data/history/results.csv"
+if not os.path.exists(path) or os.path.getsize(path) == 0:
+    print("::error::history results.csv ausente ou vazio"); sys.exit(1)
+df = pd.read_csv(path)
+
+CANDS = {
+  "date":       ["date","match_date","utc_date","fixture_date","game_date","dt","datetime"],
+  "home":       ["home","home_team","team_home","home_name","homeTeam","home_team_name"],
+  "away":       ["away","away_team","team_away","away_name","awayTeam","away_team_name"],
+  "home_goals": ["home_goals","home_score","goals_home","gf","home_ft_goals","home_goals_ft","score_home","goalsHome"],
+  "away_goals": ["away_goals","away_score","goals_away","ga","away_ft_goals","away_goals_ft","score_away","goalsAway"],
+}
+
+cols_lower = {c.lower(): c for c in df.columns}
+sel = {}
+def pick(key):
+    for cand in CANDS[key]:
+        c = cols_lower.get(cand.lower())
+        if c in df.columns:
+            return c
+    return None
+
+for k in ["date","home","away","home_goals","away_goals"]:
+    got = pick(k)
+    if got is None:
+        print(f"::error::history sem coluna para '{k}' (candidatos: {CANDS[k]})"); sys.exit(1)
+    sel[k] = got
+
+out = pd.DataFrame({
+    "date": df[sel["date"]],
+    "home": df[sel["home"]],
+    "away": df[sel["away"]],
+    "home_goals": df[sel["home_goals"]],
+    "away_goals": df[sel["away_goals"]],
+})
+
+for g in ("home_goals","away_goals"):
+    out[g] = pd.to_numeric(out[g], errors="coerce").fillna(0).astype(int)
+
+out.to_csv(path, index=False)
+print(f"[normalize] OK — columns normalized to: {list(out.columns)} (rows={len(out)})")
+PY
+
           header="$(head -n1 data/history/results.csv | tr -d '\r')"
           for c in date home away home_goals away_goals; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c'"; exit 1; }
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c' após normalização"; exit 1; }
           done
-
-          test -s "data/history/results.csv" || { echo "::error::history results.csv not generated"; exit 1; }
 
       # 2) FEATURE ENGINEERING
       - name: Build Features (mandatory)
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
@@ -151,7 +196,7 @@ jobs:
             --ewma 0.20
           test -s "data/history/features.parquet" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      # 3) TRAIN DYNAMIC MODEL (único gerador de estado α/β)
+      # 3) TRAIN DYNAMIC MODEL (núcleo unificado α/β)
       - name: Train Dynamic Poisson Model
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
@@ -166,12 +211,10 @@ jobs:
             --ewma 0.20
           test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 7; }
 
-      # 4) INGEST FUTURE MATCHES & ODDS (API-FOOTBALL)
+      # 4) INGEST FUTURE MATCHES & ODDS (com SOURCE_CSV)
       - name: Ingest API-FOOTBALL
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-          SOURCE_CSV: ${{ env.SOURCE_CSV }}
-          API_FOOTBALL_KEY: ${{ env.API_FOOTBALL_KEY }}
         shell: bash
         run: |
           set -euo pipefail
@@ -189,13 +232,9 @@ jobs:
           done
           [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::warning::odds_apifootball.csv not generated"
 
-      # 4b) INGEST FUTURE MATCHES & ODDS (TheOddsAPI)
       - name: Ingest TheOddsAPI
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-          SOURCE_CSV: ${{ env.SOURCE_CSV }}
-          REGIONS: ${{ env.REGIONS }}
-          THEODDS_API_KEY: ${{ env.THEODDS_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
@@ -233,8 +272,6 @@ jobs:
       # 6) (opcional) TREINAR CALIBRADOR
       - name: Train Calibrator (optional)
         if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
@@ -273,11 +310,6 @@ jobs:
       - name: Kelly bets
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-          BANKROLL: ${{ env.BANKROLL }}
-          KELLY_FRACTION: ${{ env.KELLY_FRACTION }}
-          KELLY_CAP: ${{ env.KELLY_CAP }}
-          KELLY_TOP_N: ${{ env.KELLY_TOP_N }}
-          ROUND_TO: ${{ env.ROUND_TO }}
         shell: bash
         run: |
           set -euo pipefail
