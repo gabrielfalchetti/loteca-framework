@@ -77,6 +77,7 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy scipy scikit-learn requests unidecode pyarrow
 
@@ -128,30 +129,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -c "import sys,pandas as pd,os; p='data/history/results.csv'; \
-df=pd.read_csv(p); C={'date':['date','match_date','utc_date','fixture_date','game_date','dt','datetime'], \
-'home':['home','home_team','team_home','home_name','homeTeam','home_team_name'], \
-'away':['away','away_team','team_away','away_name','awayTeam','away_team_name'], \
-'home_goals':['home_goals','home_score','goals_home','gf','home_ft_goals','home_goals_ft','score_home','goalsHome'], \
-'away_goals':['away_goals','away_score','goals_away','ga','away_ft_goals','away_goals_ft','score_away','goalsAway']}; \
-cl={c.lower():c for c in df.columns}; \
-def pick(keys): \
-  \n  \
-  for k in keys: \
-    \n  \
-    c=cl.get(k.lower()); \
-    \n  \
-    if c in df.columns: return c; \
-  \n  \
-  return None; \
-sel={}; \
-[sel.setdefault(k,pick(v)) for k,v in C.items()]; \
-import sys as _s; \
-[(_s.exit(1) if sel[k] is None else None) for k in C]; \
-out=pd.DataFrame({'date':df[sel['date']],'home':df[sel['home']],'away':df[sel['away']], \
-'home_goals':pd.to_numeric(df[sel['home_goals']],errors='coerce').fillna(0).astype(int), \
-'away_goals':pd.to_numeric(df[sel['away_goals']],errors='coerce').fillna(0).astype(int)}); \
-out.to_csv(p,index=False); print('[normalize] OK',len(out))"
+          python - <<'PY'
+import pandas as pd, sys
+p = "data/history/results.csv"
+df = pd.read_csv(p)
+cands = {
+  "date": ["date","match_date","utc_date","fixture_date","game_date","dt","datetime"],
+  "home": ["home","home_team","team_home","home_name","homeTeam","home_team_name"],
+  "away": ["away","away_team","team_away","away_name","awayTeam","away_team_name"],
+  "home_goals": ["home_goals","home_score","goals_home","gf","home_ft_goals","home_goals_ft","score_home","goalsHome"],
+  "away_goals": ["away_goals","away_score","goals_away","ga","away_ft_goals","away_goals_ft","score_away","goalsAway"],
+}
+lower = {c.lower(): c for c in df.columns}
+def pick(opts):
+    for k in opts:
+        c = lower.get(k.lower())
+        if c in df.columns:
+            return c
+    return None
+sel = {k: pick(v) for k,v in cands.items()}
+missing = [k for k,v in sel.items() if v is None]
+if missing:
+    sys.stderr.write(f"[normalize][CRITICAL] missing columns: {missing}\n")
+    sys.exit(1)
+out = pd.DataFrame({
+  "date": df[sel["date"]],
+  "home": df[sel["home"]],
+  "away": df[sel["away"]],
+  "home_goals": pd.to_numeric(df[sel["home_goals"]], errors="coerce").fillna(0).astype(int),
+  "away_goals": pd.to_numeric(df[sel["away_goals"]], errors="coerce").fillna(0).astype(int),
+})
+out.to_csv(p, index=False)
+print("[normalize] OK", len(out))
+PY
           header="$(head -n1 data/history/results.csv | tr -d '\r')"
           for c in date home away home_goals away_goals; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c' após normalização"; exit 1; }
