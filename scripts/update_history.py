@@ -1,25 +1,3 @@
-# scripts/update_history.py
-# Atualiza histórico de resultados FINALIZADOS com múltiplos fallbacks (API-Football direto e via RapidAPI).
-# Não altera o workflow. Usa as variáveis de ambiente:
-#   - API_FOOTBALL_KEY (direto em https://v3.football.api-sports.io)
-#   - X_RAPIDAPI_KEY   (fallback via https://api-football-v1.p.rapidapi.com)
-#
-# Prioridade:
-#   (A) API-FOOTBALL direto:
-#       A1) /fixtures?date=YYYY-MM-DD&status=FT&timezone=UTC (dia-a-dia + paginação)
-#       A2) /fixtures?from=YYYY-MM-DD&to=YYYY-MM-DD&status=FT&timezone=UTC (+ paginação)
-#       A3) /fixtures?last=400&timezone=UTC  (filtra pela janela)
-#   (B) RapidAPI:
-#       B1) /fixtures?date=...  (dia-a-dia + paginação)
-#       B2) /fixtures?from=...&to=... (+ paginação)
-#       B3) /fixtures?last=400  (filtra pela janela)
-#
-# Saída CSV: data/history/results.csv com colunas:
-#   date_utc,home,away,home_goals,away_goals
-#
-# Uso:
-#   python -m scripts.update_history --since_days 14 --out data/history/results.csv
-
 from __future__ import annotations
 
 import argparse
@@ -32,7 +10,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-# --------- Config de provedores ---------
 PROVIDERS = [
     {
         "name": "apifootball-direct",
@@ -40,13 +17,14 @@ PROVIDERS = [
         "key_env": "API_FOOTBALL_KEY",
         "key_header": "x-apisports-key",
         "host_header": None,
+        "host_value": None,
     },
     {
         "name": "apifootball-rapidapi",
         "base": "https://api-football-v1.p.rapidapi.com/v3",
         "key_env": "X_RAPIDAPI_KEY",
         "key_header": "X-RapidAPI-Key",
-        "host_header": "X-RapidAPI-Host",  # exigido pela RapidAPI
+        "host_header": "X-RapidAPI-Host",
         "host_value": "api-football-v1.p.rapidapi.com",
     },
 ]
@@ -56,7 +34,6 @@ MAX_RETRIES = 3
 BACKOFF = 1.6
 
 
-# --------- Utilitários ---------
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -67,7 +44,7 @@ def iso_date(d: datetime) -> str:
 
 def make_headers(provider: Dict[str, Any], api_key: str) -> Dict[str, str]:
     headers = {provider["key_header"]: api_key}
-    if provider.get("host_header"):
+    if provider.get("host_header") and provider.get("host_value"):
         headers[provider["host_header"]] = provider["host_value"]
     return headers
 
@@ -93,11 +70,21 @@ def api_get(url: str, headers: Dict[str, str], params: Dict[str, Any]) -> Option
     return None
 
 
+def log_payload_issues(name: str, payload: Dict[str, Any], params: Dict[str, Any]) -> None:
+    if not payload:
+        return
+    errs = payload.get("errors") or {}
+    if errs:
+        print(f"[update_history][INFO] provider={name} API errors={errs} params={params}")
+    results = payload.get("results")
+    if isinstance(results, int) and results == 0:
+        print(f"[update_history][INFO] provider={name} results=0 params={params}")
+
+
 def extract_finished_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     if not payload or "response" not in payload:
         return rows
-
     for item in payload.get("response", []):
         try:
             fixture = item.get("fixture", {}) or {}
@@ -108,13 +95,11 @@ def extract_finished_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             if status_short not in FT_STATUSES:
                 continue
 
-            # Data UTC
             date_iso = fixture.get("date")
             if not date_iso:
                 ts = fixture.get("timestamp")
                 if ts:
-                    dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
-                    date_iso = dt.isoformat().replace("+00:00", "Z")
+                    date_iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat().replace("+00:00", "Z")
             if date_iso and date_iso.endswith("+00:00"):
                 date_iso = date_iso.replace("+00:00", "Z")
 
@@ -122,7 +107,6 @@ def extract_finished_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             away_name = (teams.get("away", {}) or {}).get("name")
             hg = goals.get("home")
             ag = goals.get("away")
-
             if any(v is None for v in [date_iso, home_name, away_name, hg, ag]):
                 continue
 
@@ -143,13 +127,7 @@ def extract_finished_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 def dedup_sort(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     uniq = {(r["date_utc"], r["home"], r["away"], r["home_goals"], r["away_goals"]) for r in rows}
     return [
-        {
-            "date_utc": t[0],
-            "home": t[1],
-            "away": t[2],
-            "home_goals": t[3],
-            "away_goals": t[4],
-        }
+        {"date_utc": t[0], "home": t[1], "away": t[2], "home_goals": t[3], "away_goals": t[4]}
         for t in sorted(uniq, key=lambda x: x[0])
     ]
 
@@ -166,7 +144,6 @@ def filter_by_window(rows: List[Dict[str, Any]], start_dt: datetime, end_dt: dat
     return dedup_sort(out)
 
 
-# --------- Coletas por provedor ---------
 def fetch_day_by_day(provider: Dict[str, Any], api_key: str, start_dt: datetime, end_dt: datetime) -> List[Dict[str, Any]]:
     base = provider["base"]
     headers = make_headers(provider, api_key)
@@ -176,8 +153,9 @@ def fetch_day_by_day(provider: Dict[str, Any], api_key: str, start_dt: datetime,
         day_iso = iso_date(cur)
         page = 1
         while True:
-            params = {"date": day_iso, "status": "FT", "timezone": "UTC", "page": page}
+            params = {"date": day_iso, "timezone": "UTC", "page": page}
             payload = api_get(f"{base}/fixtures", headers, params)
+            log_payload_issues(provider["name"], payload or {}, params)
             if not payload:
                 break
             rows = extract_finished_rows(payload)
@@ -200,14 +178,9 @@ def fetch_from_to(provider: Dict[str, Any], api_key: str, start_dt: datetime, en
     all_rows: List[Dict[str, Any]] = []
     page = 1
     while True:
-        params = {
-            "from": iso_date(start_dt),
-            "to": iso_date(end_dt),
-            "status": "FT",
-            "timezone": "UTC",
-            "page": page,
-        }
+        params = {"from": iso_date(start_dt), "to": iso_date(end_dt), "timezone": "UTC", "page": page}
         payload = api_get(f"{base}/fixtures", headers, params)
+        log_payload_issues(provider["name"], payload or {}, params)
         if not payload:
             break
         rows = extract_finished_rows(payload)
@@ -226,13 +199,16 @@ def fetch_from_to(provider: Dict[str, Any], api_key: str, start_dt: datetime, en
 def fetch_last(provider: Dict[str, Any], api_key: str, last: int) -> List[Dict[str, Any]]:
     base = provider["base"]
     headers = make_headers(provider, api_key)
-    payload = api_get(f"{base}/fixtures", headers, {"last": last, "timezone": "UTC"})
+    params = {"last": last, "timezone": "UTC"}
+    payload = api_get(f"{base}/fixtures", headers, params)
+    log_payload_issues(provider["name"], payload or {}, params)
     return dedup_sort(extract_finished_rows(payload) if payload else [])
 
 
 def try_provider(provider: Dict[str, Any], start_dt: datetime, end_dt: datetime) -> Tuple[str, List[Dict[str, Any]]]:
     api_key = os.getenv(provider["key_env"], "").strip()
     if not api_key:
+        print(f"[update_history][INFO] provider={provider['name']} skipped (no {provider['key_env']})")
         return (provider["name"], [])
 
     print(f"[update_history] provider={provider['name']} try day-by-day...")
@@ -251,7 +227,6 @@ def try_provider(provider: Dict[str, Any], start_dt: datetime, end_dt: datetime)
     return (provider["name"], rows)
 
 
-# --------- Escrita ---------
 def write_csv(out_path: str, rows: List[Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -261,7 +236,6 @@ def write_csv(out_path: str, rows: List[Dict[str, Any]]) -> None:
             w.writerow(r)
 
 
-# --------- Main ---------
 def main() -> int:
     parser = argparse.ArgumentParser(description="Atualiza histórico com resultados finalizados (API-Football / RapidAPI).")
     parser.add_argument("--since_days", type=int, default=14, help="Janela de dias para trás (inclui hoje).")
