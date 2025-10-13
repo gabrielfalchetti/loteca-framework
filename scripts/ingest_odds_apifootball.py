@@ -1,121 +1,91 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-ingest_odds_apifootball: Busca odds da API-Football DIRECIONADO pelos jogos
-em um arquivo CSV de origem (ex: matches_sources.csv).
-"""
-
+import argparse
+import csv
 import os
 import sys
-import argparse
-import requests
+from typing import Dict, List
+
 import pandas as pd
-from datetime import datetime, timedelta
+import requests
 
-def log(level, msg):
-    tag = "" if level == "INFO" else f"[{level}] "
-    print(f"[apifootball]{tag}{msg}", flush=True)
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 
-def find_fixture_id(headers, home_team, away_team):
-    """Busca o ID de um jogo específico na API-Football."""
-    url = "https://v3.football.api-sports.io/fixtures"
-    # Busca em um intervalo de datas para garantir que o jogo seja encontrado
-    date_to = (datetime.utcnow() + timedelta(days=3)).strftime('%Y-%m-%d')
-
-    # A API-Football tem uma busca por 'search' que funciona bem para encontrar confrontos
-    search_query = f"{home_team}-{away_team}"
-    params = {'search': search_query, 'to': date_to, 'status': 'NS'}
-    
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        fixtures = response.json().get('response', [])
-        
-        # A busca por 'search' pode retornar múltiplos resultados, então procuramos o mais provável
-        for fixture in fixtures:
-            api_home = fixture['teams']['home']['name']
-            api_away = fixture['teams']['away']['name']
-            # Faz uma verificação flexível (in/contains) para lidar com nomes ligeiramente diferentes
-            if home_team.lower() in api_home.lower() or api_home.lower() in home_team.lower():
-                 if away_team.lower() in api_away.lower() or api_away.lower() in away_team.lower():
-                    return fixture['fixture']['id']
-    except requests.exceptions.RequestException as e:
-        log("WARN", f"Erro ao buscar fixtures para {home_team} vs {away_team}: {e}")
-    return None
+def fetch_odds_by_fixture_id(fixture_id: int) -> Dict:
+    base = "https://v3.football.api-sports.io/odds"
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    params = {"fixture": fixture_id, "bookmaker": 8}  # 8=Bet365 (ajuste se quiser)
+    r = requests.get(base, headers=headers, params=params, timeout=30)
+    r.raise_for_status()
+    js = r.json().get("response", [])
+    # Extrair 1X2 se houver
+    odds_home = odds_draw = odds_away = None
+    for item in js:
+        for b in item.get("bookmakers", []):
+            for mkt in b.get("bets", []):
+                if mkt.get("name","").lower() in ("match winner","1x2","3way result"):
+                    vals = mkt.get("values", [])
+                    for v in vals:
+                        nm = v.get("value","").lower()
+                        odd = v.get("odd", None)
+                        if odd is None:
+                            continue
+                        try:
+                            odd = float(odd)
+                        except Exception:
+                            continue
+                        if nm in ("home","1","home team"):
+                            odds_home = odd
+                        elif nm in ("draw","x"):
+                            odds_draw = odd
+                        elif nm in ("away","2","away team"):
+                            odds_away = odd
+    return {"odds_home": odds_home, "odds_draw": odds_draw, "odds_away": odds_away}
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    # CORREÇÃO: Adiciona o argumento --source_csv que estava faltando
-    ap.add_argument("--source_csv", required=True, help="Caminho para o CSV com a lista de jogos")
+    ap.add_argument("--rodada", required=True, help="Diretório OUT da rodada")
+    ap.add_argument("--source_csv", required=True, help="matches_norm.csv (com fixture_id/home/away)")
     args = ap.parse_args()
 
-    API_KEY = os.environ.get("API_FOOTBALL_KEY")
-    if not API_KEY:
-        log("CRITICAL", "Variável de ambiente API_FOOTBALL_KEY não definida.")
+    if not API_FOOTBALL_KEY:
+        print("[apifootball][WARN] API_FOOTBALL_KEY não configurada.", file=sys.stderr)
+        sys.exit(0)
+
+    if not os.path.exists(args.source_csv):
+        print(f"[apifootball][CRITICAL] source_csv não encontrado: {args.source_csv}", file=sys.stderr)
         sys.exit(5)
 
-    try:
-        source_df = pd.read_csv(args.source_csv)
-    except FileNotFoundError:
-        log("CRITICAL", f"Arquivo de origem {args.source_csv} não encontrado.")
-        sys.exit(5)
+    df = pd.read_csv(args.source_csv)
+    out_rows: List[Dict] = []
+    print(f"[apifootball]Iniciando busca direcionada para {len(df)} jogos do arquivo de origem.")
 
-    headers = {'x-apisports-key': API_KEY}
-    odds_url = "https://v3.football.api-sports.io/odds"
-    rows = []
-
-    log("INFO", f"Iniciando busca direcionada para {len(source_df)} jogos do arquivo de origem.")
-
-    for _, row in source_df.iterrows():
-        home_team = row['home']
-        away_team = row['away']
-        log("INFO", f"Procurando jogo: {home_team} vs {away_team}")
-        
-        fixture_id = find_fixture_id(headers, home_team, away_team)
-        
-        if not fixture_id:
-            log("WARN", f"Jogo não encontrado na API-Football: {home_team} vs {away_team}")
+    for _, r in df.iterrows():
+        match_id = r.get("match_id")
+        team_home = r.get("home")
+        team_away = r.get("away")
+        fixture_id = r.get("fixture_id")
+        if pd.isna(fixture_id) or str(fixture_id).strip() == "":
+            print(f"[apifootball][WARN] Sem fixture_id para: {team_home} vs {team_away}")
             continue
-
-        log("INFO", f"Jogo encontrado (Fixture ID: {fixture_id}). Buscando odds...")
-
         try:
-            odds_params = {'fixture': fixture_id, 'bookmaker': 8, 'bet': 1} # Bet 1 = Match Winner
-            odds_response = requests.get(odds_url, headers=headers, params=odds_params)
-            odds_response.raise_for_status()
-            odds_data = odds_response.json().get('response', [])
-            
-            if not odds_data or not odds_data[0].get('bookmakers'):
-                continue
-
-            bets = odds_data[0]['bookmakers'][0].get('bets', [])
-            match_winner_odds = next((b['values'] for b in bets if b['name'] == 'Match Winner'), None)
-            
-            if not match_winner_odds:
-                continue
-
-            odds_dict = {o['value']: o['odd'] for o in match_winner_odds}
-            
-            if 'Home' in odds_dict and 'Draw' in odds_dict and 'Away' in odds_dict:
-                rows.append({
-                    'match_id': fixture_id, 'home': home_team, 'away': away_team,
-                    'odds_home': float(odds_dict['Home']),
-                    'odds_draw': float(odds_dict['Draw']),
-                    'odds_away': float(odds_dict['Away']),
-                })
-        except (KeyError, IndexError, requests.exceptions.RequestException) as e:
-            log("WARN", f"Não foi possível obter odds para {home_team} vs {away_team}: {e}")
+            odds = fetch_odds_by_fixture_id(int(fixture_id))
+        except Exception as e:
+            print(f"[apifootball][WARN] Falha consultando fixture={fixture_id}: {e}")
             continue
-    
-    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away'])
-    
+        if any(v is None for v in odds.values()):
+            # odds incompletas -> ignorar
+            continue
+        out_rows.append({
+            "match_id": match_id,
+            "team_home": team_home,
+            "team_away": team_away,
+            **odds
+        })
+
+    os.makedirs(args.rodada, exist_ok=True)
     out_path = os.path.join(args.rodada, "odds_apifootball.csv")
-    df.to_csv(out_path, index=False)
-    log("INFO", f"Arquivo odds_apifootball.csv gerado com {len(df)} jogos encontrados.")
-    
-    return 0
+    pd.DataFrame(out_rows).to_csv(out_path, index=False)
+    print(f"[apifootball]Arquivo odds_apifootball.csv gerado com {len(out_rows)} jogos encontrados.")
 
 if __name__ == "__main__":
     sys.exit(main())
