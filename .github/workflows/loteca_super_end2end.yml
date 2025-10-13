@@ -128,42 +128,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-import sys, pandas as pd, os
-path = "data/history/results.csv"
-if not os.path.exists(path) or os.path.getsize(path) == 0:
-    print("::error::history results.csv ausente ou vazio"); sys.exit(1)
-df = pd.read_csv(path)
-CANDS = {
-  "date":       ["date","match_date","utc_date","fixture_date","game_date","dt","datetime"],
-  "home":       ["home","home_team","team_home","home_name","homeTeam","home_team_name"],
-  "away":       ["away","away_team","team_away","away_name","awayTeam","away_team_name"],
-  "home_goals": ["home_goals","home_score","goals_home","gf","home_ft_goals","home_goals_ft","score_home","goalsHome"],
-  "away_goals": ["away_goals","away_score","goals_away","ga","away_ft_goals","away_goals_ft","score_away","goalsAway"],
-}
-cols_lower = {c.lower(): c for c in df.columns}
-def pick(keys):
-    for k in keys:
-        c = cols_lower.get(k.lower())
-        if c in df.columns:
-            return c
-    return None
-sel = {}
-for key in CANDS:
-    col = pick(CANDS[key])
-    if col is None:
-        print(f"::error::history sem coluna para '{key}' (candidatos: {CANDS[key]})"); sys.exit(1)
-    sel[key] = col
-out = pd.DataFrame({
-    "date": df[sel["date"]],
-    "home": df[sel["home"]],
-    "away": df[sel["away"]],
-    "home_goals": pd.to_numeric(df[sel["home_goals"]], errors="coerce").fillna(0).astype(int),
-    "away_goals": pd.to_numeric(df[sel["away_goals"]], errors="coerce").fillna(0).astype(int),
-})
-out.to_csv(path, index=False)
-print(f"[normalize] OK — columns normalized to: {list(out.columns)} (rows={len(out)})")
-PY
+          python -c "import sys,pandas as pd,os; p='data/history/results.csv'; \
+df=pd.read_csv(p); C={'date':['date','match_date','utc_date','fixture_date','game_date','dt','datetime'], \
+'home':['home','home_team','team_home','home_name','homeTeam','home_team_name'], \
+'away':['away','away_team','team_away','away_name','awayTeam','away_team_name'], \
+'home_goals':['home_goals','home_score','goals_home','gf','home_ft_goals','home_goals_ft','score_home','goalsHome'], \
+'away_goals':['away_goals','away_score','goals_away','ga','away_ft_goals','away_goals_ft','score_away','goalsAway']}; \
+cl={c.lower():c for c in df.columns}; \
+def pick(keys): \
+  \n  \
+  for k in keys: \
+    \n  \
+    c=cl.get(k.lower()); \
+    \n  \
+    if c in df.columns: return c; \
+  \n  \
+  return None; \
+sel={}; \
+[sel.setdefault(k,pick(v)) for k,v in C.items()]; \
+import sys as _s; \
+[(_s.exit(1) if sel[k] is None else None) for k in C]; \
+out=pd.DataFrame({'date':df[sel['date']],'home':df[sel['home']],'away':df[sel['away']], \
+'home_goals':pd.to_numeric(df[sel['home_goals']],errors='coerce').fillna(0).astype(int), \
+'away_goals':pd.to_numeric(df[sel['away_goals']],errors='coerce').fillna(0).astype(int)}); \
+out.to_csv(p,index=False); print('[normalize] OK',len(out))"
           header="$(head -n1 data/history/results.csv | tr -d '\r')"
           for c in date home away home_goals away_goals; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c' após normalização"; exit 1; }
@@ -318,7 +306,7 @@ PY
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rodada-${{ env.OUT_DIR }}
+          name: rodada-${{ github.run_id }}
           path: |
             ${{ env.OUT_DIR }}/*.csv
             ${{ env.OUT_DIR }}/*.json
