@@ -101,18 +101,21 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
           done
 
+          # Whitelist para o consenso estrito
           cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
 
       # 1) UPDATE HISTORICAL DATA (feedback loop)
       - name: Update Historical Data (mandatory)
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
+          # Secrets injetados no ambiente de shell (sem usar expressões em 'if:' YAML)
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
+          # Tenta via API; se falhar/voltar vazio, gera seed mínimo a partir do SOURCE_CSV
           python -m scripts.update_history --since_days 14 --out "data/history/results.csv" || true
           if [ ! -s "data/history/results.csv" ]; then
             echo "::warning::Sem histórico via API; criando seed mínimo a partir do SOURCE_CSV (empates 1-1 fictícios)."
@@ -132,9 +135,9 @@ PY
 
       # 2) FEATURE ENGINEERING
       - name: Build Features (mandatory)
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/feature_engineer.py ] || { echo "::error::scripts/feature_engineer.py not found"; exit 2; }
@@ -146,9 +149,9 @@ PY
 
       # 3) TRAIN DYNAMIC MODEL (único gerador de estado α/β)
       - name: Train Dynamic Poisson Model
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 7; }
@@ -161,12 +164,12 @@ PY
 
       # 4) INGEST FUTURE MATCHES & ODDS (passando --source_csv)
       - name: Ingest API-FOOTBALL
+        shell: bash
         env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
           SOURCE_CSV: ${{ env.SOURCE_CSV }}
           SEASON: ${{ env.SEASON }}
-        shell: bash
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${API_FOOTBALL_KEY:-}" ]; then
@@ -185,12 +188,12 @@ PY
           [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::warning::odds_apifootball.csv not generated"
 
       - name: Ingest TheOddsAPI
+        shell: bash
         env:
-          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
           OUT_DIR: ${{ env.OUT_DIR }}
           SOURCE_CSV: ${{ env.SOURCE_CSV }}
           REGIONS: ${{ env.REGIONS }}
-        shell: bash
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${THEODDS_API_KEY:-}" ]; then
@@ -210,9 +213,9 @@ PY
 
       # 5) CONSENSUS STRICT (não passa jogo sem odds!)
       - name: Consensus Odds (strict)
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -227,9 +230,9 @@ PY
       # 6) (opcional) TREINAR CALIBRADOR
       - name: Train Calibrator (optional)
         if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/train_calibrator.py ] || { echo "::error::scripts/train_calibrator.py not found"; exit 12; }
@@ -241,9 +244,9 @@ PY
 
       # 7) PREVISÃO ÚNICA (núcleo unificado)
       - name: Predict (Dynamic Bivariate Poisson)
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
@@ -253,9 +256,9 @@ PY
 
       # 8) CALIBRAÇÃO (aplica calibrador treinado)
       - name: Calibrate probabilities
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
@@ -265,6 +268,7 @@ PY
 
       # 9) KELLY
       - name: Kelly bets
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
           BANKROLL: ${{ env.BANKROLL }}
@@ -272,7 +276,6 @@ PY
           KELLY_CAP: ${{ env.KELLY_CAP }}
           KELLY_TOP_N: ${{ env.KELLY_TOP_N }}
           ROUND_TO: ${{ env.ROUND_TO }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 10; }
@@ -288,9 +291,9 @@ PY
 
       # 10) TICKET LOTECA
       - name: Build Loteca ticket
+        shell: bash
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/make_loteca_ticket.py ] || { echo "::error::scripts/make_loteca_ticket.py not found"; exit 11; }
