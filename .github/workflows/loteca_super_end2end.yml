@@ -73,6 +73,7 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy scipy scikit-learn requests unidecode pyarrow fastparquet
 
@@ -135,18 +136,12 @@ jobs:
           set -euo pipefail
           if [ ! -f scripts/feature_engineer.py ]; then
             echo "::warning::scripts/feature_engineer.py não encontrado; criando features.parquet vazio."
-            python - <<'PY'
-import pandas as pd
-pd.DataFrame().to_parquet("data/history/features.parquet")
-PY
+            python -c "import pandas as pd; pd.DataFrame().to_parquet('data/history/features.parquet')"
           else
             ROWS=$(wc -l < data/history/results.csv || echo 0)
             if [ "$ROWS" -le 1 ]; then
               echo "::notice::history vazio; criando features.parquet vazio."
-              python - <<'PY'
-import pandas as pd
-pd.DataFrame().to_parquet("data/history/features.parquet")
-PY
+              python -c "import pandas as pd; pd.DataFrame().to_parquet('data/history/features.parquet')"
             else
               python -m scripts.feature_engineer \
                 --history "data/history/results.csv" \
