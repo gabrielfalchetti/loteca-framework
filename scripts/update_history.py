@@ -1,277 +1,230 @@
-from __future__ import annotations
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-import argparse
-import csv
+"""
+Atualiza base histórica de resultados em CSV unificado (date,home,away,gf,ga).
+
+Fontes suportadas (tentadas em ordem):
+  1) API-FOOTBALL (API-Sports v3) - https://v3.football.api-sports.io
+     Header: x-apisports-key: {API_FOOTBALL_KEY}
+     Estratégia: busca dia-a-dia por fixtures e filtra status finalizados (FT/AET/PEN).
+
+  2) APIFOOTBALL (apiv3.apifootball.com) - https://apiv3.apifootball.com/
+     Params: action=get_events&from=YYYY-MM-DD&to=YYYY-MM-DD&timezone=UTC&APIkey=...
+
+Uso:
+  python -m scripts.update_history --since_days 14 --out data/history/results.csv
+"""
+
+from __future__ import annotations
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+import json
+import argparse
+import datetime as dt
+from typing import List, Dict, Any, Optional
 
 import requests
-
-PROVIDERS = [
-    {
-        "name": "apifootball-direct",
-        "base": "https://v3.football.api-sports.io",
-        "key_env": "API_FOOTBALL_KEY",
-        "key_header": "x-apisports-key",
-        "host_header": None,
-        "host_value": None,
-    },
-    {
-        "name": "apifootball-rapidapi",
-        "base": "https://api-football-v1.p.rapidapi.com/v3",
-        "key_env": "X_RAPIDAPI_KEY",
-        "key_header": "X-RapidAPI-Key",
-        "host_header": "X-RapidAPI-Host",
-        "host_value": "api-football-v1.p.rapidapi.com",
-    },
-]
-
-FT_STATUSES = {"FT", "AET", "PEN"}
-MAX_RETRIES = 3
-BACKOFF = 1.6
+import pandas as pd
 
 
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+STATUS_ENDED_API_SPORTS = {"FT", "AET", "PEN"}
+UTC = "UTC"
 
 
-def iso_date(d: datetime) -> str:
-    return d.date().isoformat()
+def log(level: str, msg: str) -> None:
+    print(f"[update_history][{level}] {msg}")
 
 
-def make_headers(provider: Dict[str, Any], api_key: str) -> Dict[str, str]:
-    headers = {provider["key_header"]: api_key}
-    if provider.get("host_header") and provider.get("host_value"):
-        headers[provider["host_header"]] = provider["host_value"]
-    return headers
+def daterange_days(start_date: dt.date, end_date: dt.date) -> List[dt.date]:
+    # inclusive range [start_date, end_date]
+    days = []
+    cur = start_date
+    while cur <= end_date:
+        days.append(cur)
+        cur += dt.timedelta(days=1)
+    return days
 
 
-def api_get(url: str, headers: Dict[str, str], params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    for attempt in range(1, MAX_RETRIES + 1):
+def normalize_row(date_str: str, home: str, away: str, gf: Any, ga: Any, provider: str) -> Dict[str, Any]:
+    def to_int(x):
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=30)
-            if r.status_code == 200:
-                return r.json()
-            if r.status_code in (429, 500, 502, 503, 504):
-                wait = BACKOFF ** attempt
-                print(f"[update_history][WARN] {url} status={r.status_code} retry in {wait:.1f}s ({attempt}/{MAX_RETRIES}) params={params}")
-                time.sleep(wait)
-                continue
-            print(f"[update_history][ERROR] GET {url} status={r.status_code} body={r.text[:400]}")
+            return int(x)
+        except Exception:
             return None
-        except requests.RequestException as e:
-            wait = BACKOFF ** attempt
-            print(f"[update_history][WARN] exception={e} retry in {wait:.1f}s ({attempt}/{MAX_RETRIES})")
-            time.sleep(wait)
-    print(f"[update_history][ERROR] max retries exceeded for {url}")
-    return None
+    return {
+        "date": date_str[:10],
+        "home": str(home or "").strip(),
+        "away": str(away or "").strip(),
+        "gf": to_int(gf),
+        "ga": to_int(ga),
+        "provider": provider,
+    }
 
 
-def log_payload_issues(name: str, payload: Dict[str, Any], params: Dict[str, Any]) -> None:
-    if not payload:
-        return
-    errs = payload.get("errors") or {}
-    if errs:
-        print(f"[update_history][INFO] provider={name} API errors={errs} params={params}")
-    results = payload.get("results")
-    if isinstance(results, int) and results == 0:
-        print(f"[update_history][INFO] provider={name} results=0 params={params}")
-
-
-def extract_finished_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+def fetch_api_sports(api_key: str, start: dt.date, end: dt.date, timezone: str = UTC, sleep_s: float = 0.2) -> List[Dict[str, Any]]:
+    """
+    API-FOOTBALL (API-Sports v3):
+      GET https://v3.football.api-sports.io/fixtures?date=YYYY-MM-DD&timezone=UTC
+      Header: x-apisports-key
+    Filtra status.short em FT/AET/PEN.
+    """
+    base = "https://v3.football.api-sports.io/fixtures"
+    headers = {"x-apisports-key": api_key}
     rows: List[Dict[str, Any]] = []
-    if not payload or "response" not in payload:
-        return rows
-    for item in payload.get("response", []):
+
+    for day in daterange_days(start, end):
+        params = {"date": day.strftime("%Y-%m-%d"), "timezone": timezone}
         try:
-            fixture = item.get("fixture", {}) or {}
-            teams = item.get("teams", {}) or {}
-            goals = item.get("goals", {}) or {}
-
-            status_short = (fixture.get("status", {}) or {}).get("short")
-            if status_short not in FT_STATUSES:
+            r = requests.get(base, headers=headers, params=params, timeout=30)
+            if r.status_code != 200:
+                log("INFO", f"API-Sports HTTP {r.status_code} params={params}")
+                time.sleep(sleep_s)
                 continue
-
-            date_iso = fixture.get("date")
-            if not date_iso:
-                ts = fixture.get("timestamp")
-                if ts:
-                    date_iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat().replace("+00:00", "Z")
-            if date_iso and date_iso.endswith("+00:00"):
-                date_iso = date_iso.replace("+00:00", "Z")
-
-            home_name = (teams.get("home", {}) or {}).get("name")
-            away_name = (teams.get("away", {}) or {}).get("name")
-            hg = goals.get("home")
-            ag = goals.get("away")
-            if any(v is None for v in [date_iso, home_name, away_name, hg, ag]):
-                continue
-
-            rows.append(
-                {
-                    "date_utc": str(date_iso).strip(),
-                    "home": str(home_name).strip(),
-                    "away": str(away_name).strip(),
-                    "home_goals": int(hg),
-                    "away_goals": int(ag),
-                }
-            )
+            data = r.json()
+            resp = data.get("response", [])
+            for fx in resp:
+                fixture = fx.get("fixture", {}) or {}
+                status = (fixture.get("status", {}) or {}).get("short")
+                if status not in STATUS_ENDED_API_SPORTS:
+                    continue
+                teams = fx.get("teams", {}) or {}
+                home_t = (teams.get("home", {}) or {}).get("name")
+                away_t = (teams.get("away", {}) or {}).get("name")
+                goals = fx.get("goals", {}) or {}
+                gf = goals.get("home")
+                ga = goals.get("away")
+                date_str = (fixture.get("date") or params["date"])[:10]
+                rows.append(normalize_row(date_str, home_t, away_t, gf, ga, "api-sports"))
         except Exception as e:
-            print(f"[update_history][WARN] skipping item due to parse error: {e}")
+            log("INFO", f"API-Sports exception day={day}: {e}")
+        time.sleep(sleep_s)
     return rows
 
 
-def dedup_sort(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    uniq = {(r["date_utc"], r["home"], r["away"], r["home_goals"], r["away_goals"]) for r in rows}
-    return [
-        {"date_utc": t[0], "home": t[1], "away": t[2], "home_goals": t[3], "away_goals": t[4]}
-        for t in sorted(uniq, key=lambda x: x[0])
-    ]
+def fetch_apifootball(api_key: str, start: dt.date, end: dt.date, timezone: str = UTC) -> List[Dict[str, Any]]:
+    """
+    APIFOOTBALL clássico (apiv3.apifootball.com):
+      GET https://apiv3.apifootball.com/
+          ?action=get_events
+          &from=YYYY-MM-DD
+          &to=YYYY-MM-DD
+          &timezone=UTC
+          &APIkey=...
+    Não usar 'date' nem 'page'. Retorna partidas (inclui finalizadas).
+    Precisamos filtrar por status 'Finished' (ou similares).
+    """
+    base = "https://apiv3.apifootball.com/"
+    params = {
+        "action": "get_events",
+        "from": start.strftime("%Y-%m-%d"),
+        "to": end.strftime("%Y-%m-%d"),
+        "timezone": timezone,
+        "APIkey": api_key,
+    }
+    rows: List[Dict[str, Any]] = []
+    try:
+        r = requests.get(base, params=params, timeout=45)
+        if r.status_code != 200:
+            log("INFO", f"apifootball HTTP {r.status_code} params={params}")
+            return rows
+        # A API pode retornar lista ou dict de erro
+        data = r.json()
+        if isinstance(data, dict) and data.get("error"):
+            log("INFO", f"apifootball API errors={data.get('error')} params={params}")
+            return rows
+        if not isinstance(data, list):
+            log("INFO", f"apifootball unexpected payload type={type(data)}")
+            return rows
+
+        for ev in data:
+            status = str(ev.get("match_status", "")).strip().lower()
+            # Exemplos vistos: "Finished", "After Pen.", "After ET", etc.
+            ended = any(k in status for k in ["finish", "pen", "et", "aet"])
+            if not ended:
+                continue
+            home = ev.get("match_hometeam_name")
+            away = ev.get("match_awayteam_name")
+            gf = ev.get("match_hometeam_score")
+            ga = ev.get("match_awayteam_score")
+            # match_date pode vir como "YYYY-MM-DD" (sem hora)
+            date_raw = ev.get("match_date") or ev.get("match_time") or ""
+            date_str = str(date_raw)[:10] if date_raw else start.strftime("%Y-%m-%d")
+            rows.append(normalize_row(date_str, home, away, gf, ga, "apifootball"))
+    except Exception as e:
+        log("INFO", f"apifootball exception: {e}")
+    return rows
 
 
-def filter_by_window(rows: List[Dict[str, Any]], start_dt: datetime, end_dt: datetime) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        try:
-            dt = datetime.fromisoformat(r["date_utc"].replace("Z", "+00:00"))
-            if start_dt <= dt <= end_dt:
-                out.append(r)
-        except Exception:
-            continue
-    return dedup_sort(out)
+def unify_and_write(rows: List[Dict[str, Any]], out_csv: str) -> int:
+    if not rows:
+        return 0
+    df = pd.DataFrame(rows)
+    # Limpa linhas inválidas
+    df = df.dropna(subset=["home", "away", "gf", "ga"])
+    # Dedupe por (date, home, away)
+    df = df.sort_values(["date", "home", "away"]).drop_duplicates(["date", "home", "away"], keep="last")
+    # Ordena por data
+    df = df.sort_values("date")
+    # Garante tipos
+    df["gf"] = df["gf"].astype(int)
+    df["ga"] = df["ga"].astype(int)
+    # Apenas as colunas essenciais para o restante do pipeline
+    out_cols = ["date", "home", "away", "gf", "ga"]
+    for c in out_cols:
+        if c not in df.columns:
+            df[c] = None
+    df[out_cols].to_csv(out_csv, index=False, encoding="utf-8")
+    return len(df)
 
 
-def fetch_day_by_day(provider: Dict[str, Any], api_key: str, start_dt: datetime, end_dt: datetime) -> List[Dict[str, Any]]:
-    base = provider["base"]
-    headers = make_headers(provider, api_key)
-    all_rows: List[Dict[str, Any]] = []
-    cur = start_dt
-    while cur.date() <= end_dt.date():
-        day_iso = iso_date(cur)
-        page = 1
-        while True:
-            params = {"date": day_iso, "timezone": "UTC", "page": page}
-            payload = api_get(f"{base}/fixtures", headers, params)
-            log_payload_issues(provider["name"], payload or {}, params)
-            if not payload:
-                break
-            rows = extract_finished_rows(payload)
-            all_rows.extend(rows)
-
-            paging = payload.get("paging") or {}
-            current = paging.get("current", 1)
-            total = paging.get("total", 1)
-            if current >= total:
-                break
-            page += 1
-            time.sleep(0.25)
-        cur += timedelta(days=1)
-    return dedup_sort(all_rows)
-
-
-def fetch_from_to(provider: Dict[str, Any], api_key: str, start_dt: datetime, end_dt: datetime) -> List[Dict[str, Any]]:
-    base = provider["base"]
-    headers = make_headers(provider, api_key)
-    all_rows: List[Dict[str, Any]] = []
-    page = 1
-    while True:
-        params = {"from": iso_date(start_dt), "to": iso_date(end_dt), "timezone": "UTC", "page": page}
-        payload = api_get(f"{base}/fixtures", headers, params)
-        log_payload_issues(provider["name"], payload or {}, params)
-        if not payload:
-            break
-        rows = extract_finished_rows(payload)
-        all_rows.extend(rows)
-
-        paging = payload.get("paging") or {}
-        current = paging.get("current", 1)
-        total = paging.get("total", 1)
-        if current >= total:
-            break
-        page += 1
-        time.sleep(0.25)
-    return dedup_sort(all_rows)
-
-
-def fetch_last(provider: Dict[str, Any], api_key: str, last: int) -> List[Dict[str, Any]]:
-    base = provider["base"]
-    headers = make_headers(provider, api_key)
-    params = {"last": last, "timezone": "UTC"}
-    payload = api_get(f"{base}/fixtures", headers, params)
-    log_payload_issues(provider["name"], payload or {}, params)
-    return dedup_sort(extract_finished_rows(payload) if payload else [])
-
-
-def try_provider(provider: Dict[str, Any], start_dt: datetime, end_dt: datetime) -> Tuple[str, List[Dict[str, Any]]]:
-    api_key = os.getenv(provider["key_env"], "").strip()
+def run_once(since_days: int, out_csv: str) -> int:
+    api_key = os.getenv("API_FOOTBALL_KEY", "").strip()
     if not api_key:
-        print(f"[update_history][INFO] provider={provider['name']} skipped (no {provider['key_env']})")
-        return (provider["name"], [])
+        log("ERROR", "API_FOOTBALL_KEY vazio. Configure o secret API_FOOTBALL_KEY.")
+        return 2
 
-    print(f"[update_history] provider={provider['name']} try day-by-day...")
-    rows = fetch_day_by_day(provider, api_key, start_dt, end_dt)
+    end = dt.datetime.utcnow().date()
+    start = end - dt.timedelta(days=since_days)
+
+    # 1) Tenta API-Sports (dia a dia)
+    log("INFO", f"fetching finished fixtures for window {start} -> {end} (UTC) via API-Sports...")
+    rows = fetch_api_sports(api_key, start, end, timezone=UTC)
     if rows:
-        return (provider["name"], filter_by_window(rows, start_dt, end_dt))
+        log("INFO", f"API-Sports retornou {len(rows)} partidas finalizadas.")
+        return unify_and_write(rows, out_csv)
 
-    print(f"[update_history] provider={provider['name']} try from/to...")
-    rows = fetch_from_to(provider, api_key, start_dt, end_dt)
+    # 2) Fallback: apifootball clássico (janela toda)
+    log("INFO", f"API-Sports sem dados. Tentando apifootball classic window {start} -> {end}...")
+    rows = fetch_apifootball(api_key, start, end, timezone=UTC)
     if rows:
-        return (provider["name"], filter_by_window(rows, start_dt, end_dt))
+        log("INFO", f"apifootball retornou {len(rows)} partidas finalizadas.")
+        return unify_and_write(rows, out_csv)
 
-    print(f"[update_history] provider={provider['name']} try last=400 + window filter...")
-    rows = fetch_last(provider, api_key, last=400)
-    rows = filter_by_window(rows, start_dt, end_dt)
-    return (provider["name"], rows)
-
-
-def write_csv(out_path: str, rows: List[Dict[str, Any]]) -> None:
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["date_utc", "home", "away", "home_goals", "away_goals"])
-        w.writeheader()
-        for r in rows:
-            w.writerow(r)
+    return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Atualiza histórico com resultados finalizados (API-Football / RapidAPI).")
-    parser.add_argument("--since_days", type=int, default=14, help="Janela de dias para trás (inclui hoje).")
-    parser.add_argument("--out", required=True, help="CSV de saída.")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--since_days", type=int, default=14, help="Janela (dias) para buscar jogos finalizados.")
+    parser.add_argument("--out", type=str, required=True, help="Caminho do CSV de saída (results.csv).")
     args = parser.parse_args()
 
-    end_dt = utc_now().replace(hour=23, minute=59, second=59, microsecond=0)
-    start_dt = (end_dt - timedelta(days=args.since_days)).replace(hour=0, minute=0, second=0, microsecond=0)
-
-    try:
-        print(f"[update_history] fetching finished fixtures for window {iso_date(start_dt)} -> {iso_date(end_dt)} (UTC)...")
-
-        all_rows: List[Dict[str, Any]] = []
-        tried = []
-
-        for prov in PROVIDERS:
-            name, rows = try_provider(prov, start_dt, end_dt)
-            tried.append(name)
-            if rows:
-                all_rows = rows
-                print(f"[update_history] provider={name} returned {len(all_rows)} rows.")
-                break
-            else:
-                print(f"[update_history] provider={name} returned 0 rows.")
-
-        if not all_rows:
-            print(f"[update_history][ERROR] Nenhum jogo finalizado encontrado. Provedores tentados: {', '.join(tried)}.", file=sys.stderr)
-            return 2
-
-        write_csv(args.out, all_rows)
-        print(f"[update_history] written {len(all_rows)} rows to {args.out}")
+    # Primeira tentativa com janela solicitada
+    n = run_once(args.since_days, args.out)
+    if n > 0:
+        print(f"[update_history] OK — gravadas {n} partidas em {args.out}")
         return 0
 
-    except Exception as e:
-        print(f"[update_history][CRITICAL] {e}", file=sys.stderr)
-        return 2
+    log("WARN", f"Janela retornou 0 jogos. Ativando fallback since_days=30...")
+    n = run_once(30, args.out)
+    if n > 0:
+        print(f"[update_history] OK (fallback 30d) — gravadas {n} partidas em {args.out}")
+        return 0
+
+    log("ERROR", "Nenhum jogo finalizado encontrado. Provedores tentados: api-sports, apifootball.")
+    return 2
 
 
 if __name__ == "__main__":
