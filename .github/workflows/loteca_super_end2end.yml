@@ -129,8 +129,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-import pandas as pd, sys
+          mkdir -p scripts
+          cat > scripts/_normalize_history.py <<'PY'
+import sys, pandas as pd
 p = "data/history/results.csv"
 df = pd.read_csv(p)
 cands = {
@@ -162,6 +163,7 @@ out = pd.DataFrame({
 out.to_csv(p, index=False)
 print("[normalize] OK", len(out))
 PY
+          python scripts/_normalize_history.py
           header="$(head -n1 data/history/results.csv | tr -d '\r')"
           for c in date home away home_goals away_goals; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c' após normalização"; exit 1; }
