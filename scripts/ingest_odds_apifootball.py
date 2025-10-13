@@ -2,12 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-ingest_odds_apifootball: Busca jogos e odds da API-Football.
-
-CORREÇÃO FINAL E DEFINITIVA:
-- Itera sobre uma lista de LIGAS específicas para garantir que a API retorne dados.
-- Mantém a busca por intervalo de datas para capturar jogos futuros.
-- Remove completamente o argumento obsoleto '--season'.
+ingest_odds_apifootball: Busca odds da API-Football DIRECIONADO pelos jogos
+em um arquivo CSV de origem (ex: matches_sources.csv).
 """
 
 import os
@@ -15,91 +11,74 @@ import sys
 import argparse
 import requests
 import pandas as pd
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 def log(level, msg):
     tag = "" if level == "INFO" else f"[{level}] "
     print(f"[apifootball]{tag}{msg}", flush=True)
 
-# LISTA DE LIGAS POPULARES (IDs da API-Football v3)
-# Esta lista garante que sempre teremos jogos para buscar.
-LEAGUE_IDS = {
-    'Brasileirao A': 71,
-    'Premier League': 39,
-    'La Liga': 140,
-    'Serie A': 135,
-    'Bundesliga': 78,
-    'Ligue 1': 61,
-    'MLS': 253,
-    'Champions League': 2,
-    'Europa League': 3,
-}
+def find_fixture_id(headers, home_team, away_team):
+    """Busca o ID de um jogo específico na API-Football."""
+    url = "https://v3.football.api-sports.io/fixtures"
+    # Busca em um intervalo de datas para garantir que o jogo seja encontrado
+    date_from = (datetime.utcnow() - timedelta(days=2)).strftime('%Y-%m-%d')
+    date_to = (datetime.utcnow() + timedelta(days=3)).strftime('%Y-%m-%d')
+
+    params = {'from': date_from, 'to': date_to, 'status': 'NS'}
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        fixtures = response.json().get('response', [])
+        
+        # Procura pelo jogo exato na lista de jogos futuros
+        for fixture in fixtures:
+            api_home = fixture['teams']['home']['name']
+            api_away = fixture['teams']['away']['name']
+            if home_team.lower() in api_home.lower() and away_team.lower() in api_away.lower():
+                return fixture['fixture']['id']
+    except requests.exceptions.RequestException as e:
+        log("WARN", f"Erro ao buscar fixtures para {home_team} vs {away_team}: {e}")
+    return None
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
-    ap.add_argument("--aliases", default="")
+    ap.add_argument("--source_csv", default="data/in/matches_sources.csv") # Argumento para o arquivo de origem
     args = ap.parse_args()
 
     API_KEY = os.environ.get("API_FOOTBALL_KEY")
-    lookahead_days = int(os.environ.get("LOOKAHEAD_DAYS", 3))
-
     if not API_KEY:
         log("CRITICAL", "Variável de ambiente API_FOOTBALL_KEY não definida.")
         sys.exit(5)
 
+    try:
+        source_df = pd.read_csv(args.source_csv)
+    except FileNotFoundError:
+        log("CRITICAL", f"Arquivo de origem {args.source_csv} não encontrado.")
+        sys.exit(5)
+
     headers = {'x-apisports-key': API_KEY}
-    fixtures_url = "https://v3.football.api-sports.io/fixtures"
-    
-    date_from = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
-    date_to = (datetime.utcnow() + timedelta(days=lookahead_days)).strftime('%Y-%m-%d')
-    
-    all_fixtures = []
-    
-    # --- LÓGICA DE BUSCA CORRIGIDA ---
-    for league_name, league_id in LEAGUE_IDS.items():
-        params = {
-            "league": league_id,
-            "from": date_from,
-            "to": date_to,
-            "status": "NS" # Apenas jogos não iniciados
-        }
-        
-        log("INFO", f"Buscando jogos para a liga: {league_name} (ID: {league_id}) de {date_from} até {date_to}...")
-
-        try:
-            response = requests.get(fixtures_url, headers=headers, params=params)
-            response.raise_for_status()
-            data = response.json()
-            found_fixtures = data.get('response', [])
-            if found_fixtures:
-                log("INFO", f"Encontrados {len(found_fixtures)} jogos para {league_name}.")
-                all_fixtures.extend(found_fixtures)
-        except requests.exceptions.RequestException as e:
-            log("WARN", f"Falha na requisição para a liga {league_name}: {e}")
-            continue # Continua para a próxima liga em caso de erro
-
-    if not all_fixtures:
-        log("WARN", "Nenhum jogo encontrado em nenhuma das ligas pesquisadas na API-Football.")
-        pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_apifootball.csv"), index=False)
-        return 0
-
-    log("INFO", f"Total de {len(all_fixtures)} jogos encontrados. Filtrando e buscando odds...")
-
-    rows = []
     odds_url = "https://v3.football.api-sports.io/odds"
-    
-    for fixture in all_fixtures:
+    rows = []
+
+    log("INFO", f"Iniciando busca direcionada para {len(source_df)} jogos do arquivo de origem.")
+
+    for _, row in source_df.iterrows():
+        home_team = row['home']
+        away_team = row['away']
+        log("INFO", f"Procurando jogo: {home_team} vs {away_team}")
+        
+        fixture_id = find_fixture_id(headers, home_team, away_team)
+        
+        if not fixture_id:
+            log("WARN", f"Jogo não encontrado na API-Football: {home_team} vs {away_team}")
+            continue
+
+        log("INFO", f"Jogo encontrado (Fixture ID: {fixture_id}). Buscando odds...")
+
         try:
-            fixture_timestamp = fixture['fixture']['timestamp']
-            if fixture_timestamp < datetime.now(timezone.utc).timestamp():
-                continue
-
-            fixture_id = fixture['fixture']['id']
-            home_team = fixture['teams']['home']['name']
-            away_team = fixture['teams']['away']['name']
-
-            odds_params = {'fixture': fixture_id, 'bookmaker': 8, 'bet': 1} # Bet 1 = Match Winner
+            odds_params = {'fixture': fixture_id, 'bookmaker': 8, 'bet': 1}
             odds_response = requests.get(odds_url, headers=headers, params=odds_params)
             odds_response.raise_for_status()
             odds_data = odds_response.json().get('response', [])
@@ -122,18 +101,15 @@ def main():
                     'odds_draw': float(odds_dict['Draw']),
                     'odds_away': float(odds_dict['Away']),
                 })
-        except (KeyError, IndexError, requests.exceptions.RequestException):
+        except (KeyError, IndexError, requests.exceptions.RequestException) as e:
+            log("WARN", f"Não foi possível obter odds para {home_team} vs {away_team}: {e}")
             continue
-
-    if not rows:
-        df = pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away'])
-    else:
-        df = pd.DataFrame(rows).dropna()
-        df = df[(df['odds_home'] > 1) & (df['odds_draw'] > 1) & (df['odds_away'] > 1)]
-
+    
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away'])
+    
     out_path = os.path.join(args.rodada, "odds_apifootball.csv")
     df.to_csv(out_path, index=False)
-    log("INFO", f"Arquivo odds_apifootball.csv gerado com {len(df)} jogos válidos.")
+    log("INFO", f"Arquivo odds_apifootball.csv gerado com {len(df)} jogos encontrados.")
     
     return 0
 
