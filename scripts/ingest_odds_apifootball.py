@@ -4,8 +4,9 @@
 """
 ingest_odds_apifootball: Busca jogos e odds da API-Football.
 
-CORREÇÃO: Remove o parâmetro 'season' e usa um intervalo de datas
-baseado em 'LOOKAHEAD_DAYS' para garantir a busca por jogos agendados.
+CORREÇÃO FINAL: Ajusta o intervalo de datas para começar a busca
+a partir do dia anterior (D-1) para compensar diferenças de fuso horário (UTC)
+e garantir que os jogos do dia atual sejam sempre capturados.
 """
 
 import os
@@ -35,8 +36,8 @@ def main():
     headers = {'x-apisports-key': API_KEY}
     url = "https://v3.football.api-sports.io/fixtures"
     
-    # Lógica de data corrigida para produção
-    date_from = datetime.utcnow().strftime('%Y-%m-%d')
+    # CORREÇÃO DE DATA: Começa a busca do dia anterior para evitar problemas de fuso horário.
+    date_from = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
     date_to = (datetime.utcnow() + timedelta(days=lookahead_days)).strftime('%Y-%m-%d')
     
     params = {
@@ -54,7 +55,7 @@ def main():
     except requests.exceptions.RequestException as e:
         log("ERROR", f"Falha na requisição à API-Football: {e}")
         pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away']).to_csv(os.path.join(args.rodada, "odds_apifootball.csv"), index=False)
-        sys.exit(0)
+        return 0
 
     fixtures = data.get('response', [])
     if not fixtures:
@@ -70,10 +71,15 @@ def main():
     for fixture in fixtures:
         try:
             fixture_id = fixture['fixture']['id']
+            # Filtra apenas jogos que ainda não começaram
+            fixture_date = datetime.fromisoformat(fixture['fixture']['date'].replace('Z', '+00:00')).timestamp()
+            if fixture_date < datetime.utcnow().timestamp():
+                continue
+
             home_team = fixture['teams']['home']['name']
             away_team = fixture['teams']['away']['name']
 
-            odds_params = {'fixture': fixture_id, 'bookmaker': 8, 'bet': 1} # Bet 1 = Match Winner
+            odds_params = {'fixture': fixture_id, 'bookmaker': 8, 'bet': 1}
             odds_response = requests.get(odds_url, headers=headers, params=odds_params)
             odds_response.raise_for_status()
             odds_data = odds_response.json().get('response', [])
@@ -82,19 +88,15 @@ def main():
                 continue
 
             bets = odds_data[0]['bookmakers'][0].get('bets', [])
-            if not bets:
-                continue
-
             match_winner_odds = next((b['values'] for b in bets if b['name'] == 'Match Winner'), None)
+            
             if not match_winner_odds:
                 continue
 
             odds_dict = {o['value']: o['odd'] for o in match_winner_odds}
             
             rows.append({
-                'match_id': fixture_id,
-                'home': home_team,
-                'away': away_team,
+                'match_id': fixture_id, 'home': home_team, 'away': away_team,
                 'odds_home': float(odds_dict.get('Home', 0.0)),
                 'odds_draw': float(odds_dict.get('Draw', 0.0)),
                 'odds_away': float(odds_dict.get('Away', 0.0)),
@@ -105,13 +107,12 @@ def main():
     if not rows:
         df = pd.DataFrame(columns=['match_id', 'home', 'away', 'odds_home', 'odds_draw', 'odds_away'])
     else:
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows).dropna()
         df = df[(df['odds_home'] > 1) & (df['odds_draw'] > 1) & (df['odds_away'] > 1)]
 
     out_path = os.path.join(args.rodada, "odds_apifootball.csv")
     df.to_csv(out_path, index=False)
     log("INFO", f"Arquivo odds_apifootball.csv gerado com {len(df)} jogos.")
-
     return 0
 
 if __name__ == "__main__":
