@@ -1,241 +1,128 @@
 # scripts/xg_bivariate.py
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-xg_bivariate: MODELO CIENTÍFICO BIVARIATE POISSON DINÂMICO (V2.1)
+Gera probabilidades 1-X-2 via Poisson Bivariado (assumindo independência de gols)
+usando parâmetros dinâmicos salvos por train_dynamic_model.py.
 
-OBJETIVO:
-  Gerar P_True (Probabilidade Verdadeira) lendo as Forças Dinâmicas (alfa/beta) 
-  do dynamic_params.json e usando a fórmula log-linear do Bivariate Poisson.
+Entrada:
+- <rodada>/matches_whitelist.csv  (match_id, home, away)
+- <rodada>/state_params.json      (home_adv, teams{team:{alpha,beta}})
 
-Entradas CRÍTICAS:
-  - dynamic_params.json  [Parâmetros alfa e beta de todos os times]
+Saída:
+- <rodada>/xg_bivariate.csv  com colunas:
+  match_id,team_home,team_away,lambda_home,lambda_away,prob_home,prob_draw,prob_away
+
+Uso:
+  python -m scripts.xg_bivariate --rodada data/out/<RUN_ID> [--max_goals 10]
 """
-
-import os
-import re
-import sys
-import argparse
-from unicodedata import normalize as _ucnorm
-import pandas as pd
+from __future__ import annotations
+import argparse, json, os, sys
 import numpy as np
-from scipy.stats import poisson
-import json
-import math # Necessário para math.exp
+import pandas as pd
+from math import exp, factorial
 
-# --- CONSTANTES CIENTÍFICAS ---
-MAX_GOALS = 6
-DYNAMIC_PARAMS_FILE = "dynamic_params.json"
-# ------------------------------
-
-REQ_WL = {"match_id", "home", "away"}
-REQ_ODDS = {"team_home", "team_away", "odds_home", "odds_draw", "odds_away"}
-OUTPUT_COLS = [
-    "match_id","team_home","team_away","odds_home","odds_draw","odds_away","p_home","p_draw","p_away"
-]
-
-STOPWORD_TOKENS = {
-    "aa","ec","ac","sc","fc","afc","cf","ca","cd","ud",
-    "sp","pr","rj","rs","mg","go","mt","ms","pa","pe","pb","rn","ce","ba","al","se","pi","ma","df","es","sc",
-}
-
-def log(level, msg):
-    tag = "" if level == "INFO" else f"[{level}] "
-    print(f"[xg_bi]{tag}{msg}", flush=True)
-
-def _deaccent(s: str) -> str:
-    return _ucnorm("NFKD", str(s or "")).encode("ascii", "ignore").decode("ascii")
-
-def norm_key(name: str) -> str:
-    s = _deaccent(name).lower()
-    s = s.replace("&", " e ")
-    s = re.sub(r"[/()\-_.]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def norm_key_tokens(name: str) -> str:
-    toks = [t for t in re.split(r"\s+", norm_key(name)) if t and t not in STOPWORD_TOKENS]
-    return " ".join(toks)
-
-def secure_float(x):
+def _safe_read_csv(path: str) -> pd.DataFrame | None:
     try:
-        return float(str(x).replace(",", "."))
+        if os.path.isfile(path):
+            return pd.read_csv(path)
     except Exception:
-        return None
+        pass
+    return None
 
-def read_csv_safe(path: str) -> pd.DataFrame:
-    if not os.path.isfile(path):
-        log("CRITICAL", f"Arquivo não encontrado: {path}")
-        sys.exit(8)
-    try:
-        return pd.read_csv(path)
-    except Exception as e:
-        log("CRITICAL", f"Falha lendo {path}: {e}")
-        sys.exit(8)
+def _poisson_pmf(k: int, lam: float) -> float:
+    # pmf(k; λ) = e^{-λ} λ^k / k!
+    if lam <= 0:
+        return 1.0 if k == 0 else 0.0
+    return float(exp(-lam) * (lam ** k) / factorial(k))
 
-# --- FUNÇÕES CIENTÍFICAS ---
-
-def biv_poisson_match_probs(lambda_h: float, lambda_a: float) -> tuple[float, float, float]:
+def outcome_probs(lambda_home: float, lambda_away: float, max_goals: int = 10):
     """
-    Núcleo do Modelo Poisson (Independente para simplificação inicial).
-    Calcula P_Home, P_Draw, P_Away somando as probabilidades de placares.
+    Calcula P(home win), P(draw), P(away win) somando as probabilidades
+    de placares (i,j) ~ Poi(λh) x Poi(λa).
     """
-    p_home, p_draw, p_away = 0.0, 0.0, 0.0
-    
-    for h in range(MAX_GOALS):
-        for a in range(MAX_GOALS):
-            # P(h, a) = P(h | lambda_h) * P(a | lambda_a)
-            p_score = poisson.pmf(h, lambda_h) * poisson.pmf(a, lambda_a)
-            
-            if h > a:
-                p_home += p_score
-            elif h == a:
-                p_draw += p_score
+    ph = 0.0
+    pd = 0.0
+    pa = 0.0
+    pmf_h = [_poisson_pmf(i, lambda_home) for i in range(max_goals + 1)]
+    pmf_a = [_poisson_pmf(j, lambda_away) for j in range(max_goals + 1)]
+
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            p = pmf_h[i] * pmf_a[j]
+            if i > j:
+                ph += p
+            elif i == j:
+                pd += p
             else:
-                p_away += p_score
+                pa += p
 
-    total_final = p_home + p_draw + p_away
-    if total_final > 0:
-        p_home /= total_final
-        p_draw /= total_final
-        p_away /= total_final
-    
-    return round(p_home, 6), round(p_draw, 6), round(p_away, 6)
+    # perda de massa por truncamento: redistribui proporcionalmente
+    s = ph + pd + pa
+    if s > 0 and s < 0.999999:
+        ph /= s; pd /= s; pa /= s
+    return float(ph), float(pd), float(pa)
 
-def calculate_dynamic_bivariate_poisson_probs(
-    team_home: str, team_away: str, params: dict
-) -> tuple[float, float, float]:
-    """
-    HOOK CIENTÍFICO CHAVE: Calcula lambdas a partir dos parâmetros dinâmicos.
-    (Implementação da fórmula log-linear de Koopman/Dixon & Coles)
-    """
-    
-    home_key = norm_key_tokens(team_home)
-    away_key = norm_key_tokens(team_away)
-    
-    team_params = params.get("team_params", {})
-    fixed_effects = params.get("league_fixed_effects", {})
-    
-    home_data = team_params.get(home_key)
-    away_data = team_params.get(away_key)
-    # Pega o coeficiente de vantagem de casa (δ)
-    home_advantage = fixed_effects.get("home_advantage", 0.0) 
-    
-    if not home_data or not away_data:
-        log("WARN", f"Parâmetros dinâmicos ausentes para {team_home} ({home_key}) ou {team_away} ({away_key}). Pulando.")
-        return None, None, None
-
-    # Parâmetros de Força (em log-escala):
-    alpha_h = home_data.get("alpha", 0.0) # Ataque Home
-    beta_h = home_data.get("beta", 0.0)   # Defesa Home
-    alpha_a = away_data.get("alpha", 0.0)  # Ataque Away
-    beta_a = away_data.get("beta", 0.0)    # Defesa Away
-
-    # Fórmulas Log-Lineares:
-    # λ_home = exp( home_advantage + alpha_home - beta_away )
-    lambda_h = math.exp(home_advantage + alpha_h - beta_a)
-
-    # λ_away = exp( alpha_away - beta_home )
-    lambda_a = math.exp(alpha_a - beta_h)
-
-    if lambda_h <= 0 or lambda_a <= 0:
-        log("WARN", f"Lambda inválido (<=0) para {team_home} vs {team_away}. Pulando.")
-        return None, None, None
-
-    return biv_poisson_match_probs(lambda_h, lambda_a)
-
-
-def build_model_predictions(rodada: str) -> pd.DataFrame:
-    """
-    REVISÃO: Gera probabilidades usando o Modelo Bivariate Poisson, lendo os parâmetros dinâmicos.
-    """
-    wl_path = os.path.join(rodada, "matches_whitelist.csv")
-    oc_path = os.path.join(rodada, "odds_consensus.csv")
-    params_path = os.path.join(rodada, DYNAMIC_PARAMS_FILE)
-
-    wl = read_csv_safe(wl_path)
-    oc = read_csv_safe(oc_path)
-
-    # --- CARREGAMENTO DOS PARÂMETROS DINÂMICOS ---
-    try:
-        with open(params_path, 'r', encoding='utf-8') as f:
-            dynamic_params = json.load(f)
-    except FileNotFoundError:
-        log("CRITICAL", f"Arquivo {DYNAMIC_PARAMS_FILE} ausente. Treinamento falhou.")
-        sys.exit(8)
-    except json.JSONDecodeError as e:
-        log("CRITICAL", f"Falha lendo {DYNAMIC_PARAMS_FILE} (JSON inválido): {e}")
-        sys.exit(8)
-    
-    if not dynamic_params:
-        log("CRITICAL", "Parâmetros dinâmicos vazios. Impossível prever.")
-        sys.exit(8)
-    
-    # -----------------------------------------------
-
-    # Lógica de merge e limpeza (mantida)
-    wl = wl.rename(columns={"home":"team_home","away":"team_away"})[["match_id","team_home","team_away"]].copy()
-    wl["key"] = wl["team_home"].apply(norm_key_tokens) + "|" + wl["team_away"].apply(norm_key_tokens)
-    oc = oc[list(REQ_ODDS)].copy()
-    oc["key"] = oc["team_home"].apply(norm_key_tokens) + "|" + oc["team_away"].apply(norm_key_tokens)
-
-    wl_idx = wl.drop_duplicates(subset=["key"]).set_index("key")
-    oc_idx = oc.drop_duplicates(subset=["key"]).set_index("key")
-    inter_keys = [k for k in oc_idx.index if k in wl_idx.index]
-
-    rows = []
-    
-    for k in inter_keys:
-        wlr = wl_idx.loc[k]
-        ocr = oc_idx.loc[k]
-
-        oh = secure_float(ocr["odds_home"])
-        od = secure_float(ocr["odds_draw"])
-        oa = secure_float(ocr["odds_away"])
-        
-        # --- AQUI: O SEU EDGE PREDITIVO É GERADO ---
-        ph, pdr, pa = calculate_dynamic_bivariate_poisson_probs(
-            wlr["team_home"], wlr["team_away"], dynamic_params
-        )
-        # ------------------------------------------
-
-        if None in (oh, od, oa, ph, pdr, pa): 
-            continue
-
-        rows.append({
-            "match_id": wlr["match_id"],
-            "team_home": wlr["team_home"],
-            "team_away": wlr["team_away"],
-            "odds_home": oh,
-            "odds_draw": od,
-            "odds_away": oa,
-            "p_home": ph,
-            "p_draw": pdr,
-            "p_away": pa,
-        })
-    
-    if not rows:
-        log("CRITICAL", "Nenhuma linha gerada (sem match entre whitelist e odds_consensus).")
-        sys.exit(8)
-
-    return pd.DataFrame(rows, columns=OUTPUT_COLS)
-
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--rodada", required=True, help="Diretório da rodada (ex: data/out/<RUN_ID>)")
+    ap.add_argument("--max_goals", type=int, default=10, help="Truncamento da grade de gols (default=10)")
     args = ap.parse_args()
 
-    rodada = args.rodada
-    out_path = os.path.join(rodada, "xg_bivariate.csv")
-    
-    log("INFO", "Iniciando previsão com Modelo Científico Bivariate Poisson Dinâmico.")
-    
-    df = build_model_predictions(rodada)
+    rodada_dir = args.rodada
+    wl_path = os.path.join(rodada_dir, "matches_whitelist.csv")
+    state_path = os.path.join(rodada_dir, "state_params.json")
 
-    # Salva resultado
-    df[OUTPUT_COLS].to_csv(out_path, index=False)
-    log("INFO", f"xg_bivariate gerado: {out_path}  linhas={len(df)}")
+    wl = _safe_read_csv(wl_path)
+    if wl is None or wl.empty:
+        print(f"[xg_bivar][CRITICAL] Whitelist não encontrada ou vazia: {wl_path}", file=sys.stderr)
+        return 7
+
+    if not os.path.isfile(state_path):
+        print(f"[xg_bivar][CRITICAL] state_params.json ausente. Rode train_dynamic_model antes: {state_path}", file=sys.stderr)
+        return 7
+
+    with open(state_path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+
+    home_adv = float(state.get("home_adv", 0.25))
+    team_params = state.get("teams", {})
+
+    rows = []
+    for _, row in wl.iterrows():
+        mid = row["match_id"]
+        th = str(row["home"]).strip()
+        ta = str(row["away"]).strip()
+
+        phome = team_params.get(th, {"alpha": 1.15, "beta": 1.05})
+        paway = team_params.get(ta, {"alpha": 1.15, "beta": 1.05})
+
+        # Poisson mean: λ_home = α_home (ataque) vs β_away (defesa rival) + mando
+        #                λ_away = α_away vs β_home
+        lam_h = max(0.05, float(phome["alpha"]) * (1.0 / max(0.2, float(paway["beta"]))) + home_adv)
+        lam_a = max(0.05, float(paway["alpha"]) * (1.0 / max(0.2, float(phome["beta"]))))
+
+        win_h, draw, win_a = outcome_probs(lam_h, lam_a, args.max_goals)
+
+        rows.append({
+            "match_id": mid,
+            "team_home": th,
+            "team_away": ta,
+            "lambda_home": round(lam_h, 4),
+            "lambda_away": round(lam_a, 4),
+            "prob_home": round(win_h, 6),
+            "prob_draw": round(draw, 6),
+            "prob_away": round(win_a, 6),
+        })
+
+    out_df = pd.DataFrame(rows, columns=[
+        "match_id", "team_home", "team_away",
+        "lambda_home", "lambda_away",
+        "prob_home", "prob_draw", "prob_away"
+    ])
+
+    out_path = os.path.join(rodada_dir, "xg_bivariate.csv")
+    out_df.to_csv(out_path, index=False, encoding="utf-8")
+    print(f"[xg_bivar][OK] Arquivo gerado: {out_path}  ({len(out_df)} linhas)")
     return 0
 
 if __name__ == "__main__":
