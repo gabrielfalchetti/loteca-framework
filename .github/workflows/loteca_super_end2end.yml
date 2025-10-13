@@ -191,7 +191,6 @@ jobs:
           until [ $a -ge 3 ]; do
             python -m scripts.ingest_odds_apifootball \
               --rodada "${OUT_DIR}" \
-              --season "${SEASON}" \
               --source_csv "${SOURCE_CSV}" && break
             a=$((a+1)); echo "retry apifootball: $a/3"; sleep $((5*a))
           done
@@ -218,7 +217,7 @@ jobs:
           done
           [ -s "${OUT_DIR}/odds_theoddsapi.csv" ] || echo "::warning::odds_theoddsapi.csv not generated"
 
-      # 5) CONSENSUS STRICT
+      # 5) CONSENSUS STRICT (não passa jogo sem odds!)
       - name: Consensus Odds (strict)
         shell: bash
         run: |
@@ -232,7 +231,7 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
-      # 6) TRAIN CALIBRATOR (opcional controlado no shell)
+      # 6) TRAIN CALIBRATOR (opcional)
       - name: Train Calibrator (optional)
         shell: bash
         run: |
@@ -248,7 +247,7 @@ jobs:
             --out_dir "data/history/calibration"
           test -s "data/history/calibration/calibrator_home.pkl" || { echo "::error::calibrator files not generated"; exit 12; }
 
-      # 7) PREVISÃO
+      # 7) PREVISÃO (núcleo unificado)
       - name: Predict (Dynamic Bivariate Poisson)
         shell: bash
         run: |
