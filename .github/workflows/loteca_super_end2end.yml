@@ -12,7 +12,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SEASON: "2025"
+      # A variável SEASON não é mais usada pelos scripts de ingestão, mas pode ser mantida
+      SEASON: "2025" 
       LOOKAHEAD_DAYS: "3"
       REGIONS: "uk,eu,us,au"
       BANKROLL: "1000"
@@ -20,7 +21,10 @@ jobs:
       KELLY_CAP: "0.1"
       KELLY_TOP_N: "14"
       ROUND_TO: "1"
+      # O ALIASES_JSON não é mais usado na ingestão, mas pode ser útil no futuro
       ALIASES_JSON: "data/aliases.json"
+      # Arquivo de origem para os jogos da Loteca
+      SOURCE_CSV: "data/in/matches_sources.csv"
 
     steps:
       - name: Checkout
@@ -34,7 +38,6 @@ jobs:
       - name: Instalar dependências
         run: |
           set -euo pipefail
-          python -V
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
@@ -52,31 +55,31 @@ jobs:
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
           mkdir -p "data/in" "${OUT_DIR}"
           mkdir -p models/calibration
-          echo "RUN_ID=${RUN_ID}"
-          echo "OUT_DIR=${OUT_DIR}"
 
       # ======================
       # INGESTÃO DE ODDS — API-FOOTBALL (PASSO 1)
       # ======================
-      - name: Ingestão API-FOOTBALL
+      - name: Ingestão API-FOOTBALL (Direcionada pelo CSV)
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          # CORREÇÃO: O argumento --season foi removido, pois o script agora usa um intervalo de datas.
-          python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --aliases "${ALIASES_JSON}"
+          # CORREÇÃO: Argumento --aliases removido, pois o script não o usa mais.
+          # Adicionado --source_csv para apontar para o arquivo de jogos.
+          python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV}"
 
       # ======================
       # INGESTÃO DE ODDS — THEODDSAPI (PASSO 2)
       # ======================
-      - name: Ingestão TheOddsAPI
+      - name: Ingestão TheOddsAPI (Direcionada pelo CSV)
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --regions "${REGIONS}" --aliases "${ALIASES_JSON}"
+          # CORREÇÃO: Argumento --aliases removido.
+          python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --regions "${REGIONS}" --source_csv "${SOURCE_CSV}"
 
       # ======================
       # PREPARAR WHITELIST (PASSO 3)
@@ -87,7 +90,8 @@ jobs:
           set -euo pipefail
           python -m scripts.prepare_whitelist --rodada "${OUT_DIR}"
           WL="${OUT_DIR}/matches_whitelist.csv"
-          test -s "$WL" || echo "::warning::Whitelist não foi gerada (nenhum jogo encontrado nas APIs)."
+          # O erro aqui agora é crítico, pois se a whitelist não for gerada, nada mais funciona.
+          test -s "$WL" || { echo "::error::Whitelist não foi gerada (nenhum jogo encontrado nas APIs)."; exit 6; }
 
       # ======================
       # CONSENSO DE ODDS (PASSO 4)
@@ -98,14 +102,11 @@ jobs:
           set -euo pipefail
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
-          test -s "$OUT_FILE" || echo "::warning::odds_consensus.csv não gerado (sem jogos em comum entre as fontes)."
-          if [ -s "$OUT_FILE" ]; then
-            head -n 20 "$OUT_FILE" || true
-          fi
+          test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv não gerado (sem jogos em comum entre as fontes)."; exit 6; }
+          head -n 20 "$OUT_FILE" || true
 
-      # ======================
-      # TREINAMENTO: MODELO DINÂMICO
-      # ======================
+      # O restante do pipeline permanece inalterado...
+
       - name: Treinar Modelo Dinâmico
         shell: bash
         run: |
@@ -114,9 +115,6 @@ jobs:
           OUT="${OUT_DIR}/dynamic_params.json"
           test -s "$OUT" || { echo "::error::dynamic_params.json not generated"; exit 12; }
 
-      # ======================
-      # xG BIVARIATE (COM INTELIGÊNCIA DINÂMICA)
-      # ======================
       - name: xG Bivariate
         shell: bash
         run: |
@@ -125,9 +123,6 @@ jobs:
           OUT="${OUT_DIR}/xg_bivariate.csv"
           test -s "$OUT" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
 
-      # ======================
-      # CALIBRAÇÃO DE PROBABILIDADES
-      # ======================
       - name: Calibrar probabilidades
         shell: bash
         run: |
@@ -136,9 +131,6 @@ jobs:
           OUT="${OUT_DIR}/probs_calibrated.csv"
           test -s "$OUT" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
 
-      # ======================
-      # APOSTAS (KELLY)
-      # ======================
       - name: Gerar stakes (Kelly)
         shell: bash
         run: |
@@ -153,9 +145,6 @@ jobs:
           OUT="${OUT_DIR}/kelly_stakes.csv"
           test -s "$OUT" || echo "::warning::Nenhuma aposta gerada (kelly_stakes.csv vazio)."
 
-      # ======================
-      # GERAR TICKET LOTECA
-      # ======================
       - name: Montar ticket Loteca
         shell: bash
         run: |
