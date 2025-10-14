@@ -1,3 +1,4 @@
+
 name: loteca_super_end2end
 
 on:
@@ -16,27 +17,27 @@ on:
         default: "uk,eu,us,au"
         required: true
   schedule:
-    - cron: "15 9 * * *" # roda diariamente 09:15 UTC (ajuste se quiser)
+    - cron: "15 9 * * *" # diário 09:15 UTC
 
 jobs:
   super-e2e:
     runs-on: ubuntu-latest
 
-    # Variáveis padrão-ouro
     env:
       SEASON: ${{ github.event.inputs.season || '2025' }}
       LOOKAHEAD_DAYS: ${{ github.event.inputs.lookahead_days || '3' }}
       REGIONS: ${{ github.event.inputs.regions || 'uk,eu,us,au' }}
+
       BANKROLL: "1000"
       KELLY_FRACTION: "0.5"
       KELLY_CAP: "0.1"
       KELLY_TOP_N: "14"
       ROUND_TO: "1"
       TRAIN_CALIBRATOR: "false"
+
       SOURCE_CSV: data/in/matches_source.csv
       OUT_DIR: data/out/${{ github.run_id }}
 
-      # Mapeamento de secrets (sem usar environment do GH)
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
@@ -55,22 +56,24 @@ jobs:
           set -euo pipefail
           python -m pip install -U pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Garantimos as libs necessárias do pipeline
-          pip install requests pandas "pyarrow>=14" "fastparquet>=2024.5.0" Unidecode
 
-          # Smoke check
+          # Núcleo do pipeline + modelagem + parquet + normalização
+          pip install \
+            requests pandas numpy scipy scikit-learn statsmodels joblib \
+            "pyarrow>=14" "fastparquet>=2024.5.0" Unidecode
+
           python - <<'PY'
-          import sys, pandas, pyarrow, fastparquet
+          import pandas, pyarrow, fastparquet, numpy, scipy, sklearn, statsmodels.api as sm  # smoke
           import unidecode, requests
           print("[ok] deps prontos")
           PY
 
-      - name: Preparar pastas de trabalho
+      - name: Preparar pastas
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "${SOURCE_CSV}")" "${OUT_DIR}" data/history
 
-      # === PRE-FLIGHT: validação do arquivo de jogos (mantido do padrão-ouro) ===
+      # -------------------- PRE-FLIGHT: jogos --------------------
       - name: Validar fonte de jogos (matches_source.csv)
         run: |
           set -euo pipefail
@@ -83,22 +86,19 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
           done
 
-      # === NORMALIZAÇÃO (gera OUT_DIR/matches_norm.csv e copia whitelist) ===
       - name: Normalizar nomes (BR + acentos) e gerar whitelist
         run: |
           set -euo pipefail
           python - <<'PY'
-          import csv, os
+          import csv, os, re
           from unidecode import unidecode
 
           src = os.environ["SOURCE_CSV"]
           out_dir = os.environ["OUT_DIR"]
           norm_csv = os.path.join(out_dir, "matches_norm.csv")
           wl_csv = os.path.join(out_dir, "matches_whitelist.csv")
-
           os.makedirs(out_dir, exist_ok=True)
 
-          # aliases BR mínimos (mantidos e extensíveis)
           aliases = {
             "athletico-pr": "Athletico-PR",
             "atletico-pr": "Athletico-PR",
@@ -118,42 +118,32 @@ jobs:
 
           def canon(s: str) -> str:
             s0 = (s or "").strip()
-            # remove sufixos/uf entre parênteses e barras ex.: "Remo (PA)", "Paysandu/Remo (PA)"
             s1 = s0.replace("/", " ").split("(")[0].strip()
-            k = unidecode(s1).lower().replace("  ", " ").replace(" - ", "-")
-            k = k.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u")  # redundante, mas ok
-            k = k.replace("ã","a").replace("õ","o").replace("ç","c")
-            k = "-".join(part for part in k.replace("  ", " ").split())  # compacta espaços
-            return aliases.get(k, s0)  # se tivermos alias, usa; caso contrário, devolve original
+            k = unidecode(s1).lower()
+            k = re.sub(r"\s+", " ", k).strip().replace(" - ", "-")
+            k = k.replace("ç","c")
+            k = "-".join(k.split())
+            return aliases.get(k, s0)
 
-          # lê e valida
           with open(src, newline='', encoding='utf-8') as f:
             rd = csv.DictReader(f)
-            assert set(["match_id","home","away"]).issubset(rd.fieldnames or []), "Cabeçalho inválido em matches_source.csv"
+            assert set(["match_id","home","away"]).issubset(rd.fieldnames or []), "Cabeçalho inválido"
             rows = list(rd)
 
-          # guarda whitelist 1:1 com a fonte (para modo estrito no consenso)
           with open(wl_csv, "w", newline='', encoding='utf-8') as f:
             wr = csv.DictWriter(f, fieldnames=["match_id","home","away"])
             wr.writeheader()
-            for r in rows:
-              wr.writerow({"match_id": r["match_id"], "home": r["home"], "away": r["away"]})
+            wr.writerows(rows)
 
-          # gera normalizado (mesmos campos, porém ajustados)
           with open(norm_csv, "w", newline='', encoding='utf-8') as f:
             wr = csv.DictWriter(f, fieldnames=["match_id","home","away"])
             wr.writeheader()
             for r in rows:
-              wr.writerow({
-                "match_id": r["match_id"],
-                "home": canon(r["home"]),
-                "away": canon(r["away"]),
-              })
-
-          print(f"[normalize] OK -> {norm_csv} e whitelist -> {wl_csv}")
+              wr.writerow({"match_id": r["match_id"], "home": canon(r["home"]), "away": canon(r["away"])})
+          print(f"[normalize] OK -> {norm_csv} & {wl_csv}")
           PY
 
-      # === HISTÓRICO: tenta API; se falhar, cria stub BOOT vs BOOT (mantém etapa padrão-ouro) ===
+      # -------------------- HISTÓRICO & FEATURES --------------------
       - name: Atualizar histórico (API) com fallback
         run: |
           set -euo pipefail
@@ -172,9 +162,7 @@ jobs:
           for c in date home away home_goals away_goals; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c'"; exit 1; }
           done
-          test -s "data/history/results.csv" || { echo "::error::history results.csv not generated"; exit 1; }
 
-      # === FEATURES (parquet) ===
       - name: Feature engineering (EWMA)
         run: |
           set -euo pipefail
@@ -185,7 +173,7 @@ jobs:
             --ewma 0.20
           test -s "data/history/features.parquet" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      # === THEODDSAPI (OBRIGATÓRIO) ===
+      # -------------------- ODDS --------------------
       - name: Ingest odds — TheOddsAPI (obrigatório)
         run: |
           set -euo pipefail
@@ -202,7 +190,6 @@ jobs:
 
           test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
 
-      # === API-FOOTBALL (OPCIONAL — hoje odds não vêm por lá, mas mantemos etapa padrão-ouro) ===
       - name: Ingest odds — API-Football (opcional)
         run: |
           set -euo pipefail
@@ -219,7 +206,6 @@ jobs:
             --source_csv "${OUT_DIR}/matches_norm.csv" || true
           [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::notice::odds_apifootball.csv não gerado (ok)"
 
-      # === CONSENSO (STRICT + validação de colunas) ===
       - name: Consensus odds (strict)
         run: |
           set -euo pipefail
@@ -233,14 +219,76 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
-      # (opcional) — aqui você pode ter seu passo de picks/kelly se existir um script.
-      # - name: Picks e staking (Kelly)
-      #   run: |
-      #     set -euo pipefail
-      #     python -m scripts.make_picks --rodada "${OUT_DIR}" --bankroll "${BANKROLL}" \
-      #       --kelly_fraction "${KELLY_FRACTION}" --kelly_cap "${KELLY_CAP}" \
-      #       --kelly_top_n "${KELLY_TOP_N}" --round_to "${ROUND_TO}"
+      # -------------------- xG BIVARIADO --------------------
+      - name: xG bivariado — prever probabilidades (p_home/draw/away)
+        run: |
+          set -euo pipefail
+          # Descobre automaticamente o script de modelo
+          XG_SCRIPT=""
+          for cand in \
+            scripts/xg_bivariate.py \
+            scripts/model_xg_bivariate.py \
+            scripts/model_bivariate_xg.py \
+            scripts/xg_poisson_bivariate.py
+          do
+            if [ -f "$cand" ]; then XG_SCRIPT="$cand"; break; fi
+          done
+          if [ -z "$XG_SCRIPT" ]; then
+            echo "::error::script de xG bivariado não encontrado (procurei por xg_bivariate.py / model_xg_bivariate.py / model_bivariate_xg.py / xg_poisson_bivariate.py)"
+            exit 7
+          fi
+          MOD="${XG_SCRIPT%.py}"; MOD="${MOD//\//.}"
 
+          CAL=""
+          if [ "${TRAIN_CALIBRATOR}" = "true" ]; then CAL="--train-calibrator"; fi
+
+          python -m "$MOD" \
+            --features "data/history/features.parquet" \
+            --odds "${OUT_DIR}/odds_consensus.csv" \
+            --out   "${OUT_DIR}/predictions.csv" \
+            $CAL
+
+          PRED="${OUT_DIR}/predictions.csv"
+          test -s "$PRED" || { echo "::error::predictions.csv não gerado"; exit 7; }
+          header="$(head -n1 "$PRED" | tr -d '\r')"
+          for c in match_id team_home team_away p_home p_draw p_away; do
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em predictions.csv"; exit 7; }
+          done
+
+      # -------------------- KELLY STAKING --------------------
+      - name: Picks e staking (Kelly)
+        run: |
+          set -euo pipefail
+          # Descobre automaticamente o script de picks
+          KELLY_SCRIPT=""
+          for cand in \
+            scripts/make_picks.py \
+            scripts/picks_kelly.py \
+            scripts/kelly.py
+          do
+            if [ -f "$cand" ]; then KELLY_SCRIPT="$cand"; break; fi
+          done
+          if [ -z "$KELLY_SCRIPT" ]; then
+            echo "::error::script de Kelly não encontrado (procurei por make_picks.py / picks_kelly.py / kelly.py)"
+            exit 8
+          fi
+          MOD="${KELLY_SCRIPT%.py}"; MOD="${MOD//\//.}"
+
+          python -m "$MOD" \
+            --rodada "${OUT_DIR}" \
+            --odds   "${OUT_DIR}/odds_consensus.csv" \
+            --preds  "${OUT_DIR}/predictions.csv" \
+            --bankroll "${BANKROLL}" \
+            --kelly_fraction "${KELLY_FRACTION}" \
+            --kelly_cap "${KELLY_CAP}" \
+            --top_n "${KELLY_TOP_N}" \
+            --round_to "${ROUND_TO}"
+
+          PICKS="${OUT_DIR}/picks_kelly.csv"
+          test -s "$PICKS" || { echo "::error::picks_kelly.csv não gerado"; exit 8; }
+          head -n1 "$PICKS" | grep -qiE "(^|,)stake(,|$)" || echo "::warning::coluna 'stake' não detectada em picks_kelly.csv (ok se seu script usa outro nome)"
+
+      # -------------------- ARTEFATOS --------------------
       - name: Artefatos finais
         run: |
           set -euo pipefail
@@ -251,7 +299,9 @@ jobs:
                    "${OUT_DIR}/matches_whitelist.csv" \
                    "${OUT_DIR}/odds_theoddsapi.csv" \
                    "${OUT_DIR}/odds_apifootball.csv" \
-                   "${OUT_DIR}/odds_consensus.csv"
+                   "${OUT_DIR}/odds_consensus.csv" \
+                   "${OUT_DIR}/predictions.csv" \
+                   "${OUT_DIR}/picks_kelly.csv"
           do
             if [ -f "$f" ]; then
               echo "--- $f ---"; head -n5 "$f"; echo
