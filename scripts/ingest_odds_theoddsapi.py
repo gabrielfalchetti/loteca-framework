@@ -1,198 +1,274 @@
 # scripts/ingest_odds_theoddsapi.py
-# busca odds na TheOddsAPI, faz matching contra matches_norm(_resolved).csv
-# aprende aliases automaticamente e salva no cache
 from __future__ import annotations
+
+import argparse
+import csv
 import os
 import sys
-import json
-import time
-import argparse
+from typing import Dict, List, Tuple, Optional
+from datetime import datetime, timezone
+
+# Import tolerante: funciona se _utils_norm.py estiver na raiz OU dentro de scripts/
+try:
+    from ._utils_norm import norm_name, best_match, token_key, load_json, dump_json  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from _utils_norm import norm_name, best_match, token_key, load_json, dump_json  # type: ignore
+    except Exception as e:  # pragma: no cover
+        print(f"[theoddsapi][FATAL] não foi possível importar _utils_norm: {e}", file=sys.stderr)
+        sys.exit(1)
+
 import requests
 import pandas as pd
-from typing import Dict, Any, Tuple, Optional
-from _utils_norm import norm_name, best_match, token_key, load_json, dump_json
+import numpy as np
 
-ODDS_URL = "https://api.the-odds-api.com/v4/sports/soccer/odds"
 
-def fetch_theodds(api_key: str, regions: str, markets: str = "h2h") -> list[dict]:
+def _read_matches(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    # Aceita tanto colunas canônicas quanto variantes comuns
+    # Esperado: match_id,home,away[,league,date]
+    rename_map = {}
+    cols_lower = {c.lower(): c for c in df.columns}
+
+    # Normaliza home/away
+    for want in ("home", "away"):
+        if want not in df.columns:
+            if want in cols_lower:
+                rename_map[cols_lower[want]] = want
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    if not {"home", "away"}.issubset(df.columns):
+        raise ValueError("Arquivo de origem precisa ter colunas 'home' e 'away'")
+
+    # Garante match_id
+    if "match_id" not in df.columns:
+        df["match_id"] = np.arange(1, len(df) + 1)
+
+    # Cria colunas normalizadas (canônicas) só para matching interno
+    df["home_norm"] = df["home"].astype(str).map(norm_name)
+    df["away_norm"] = df["away"].astype(str).map(norm_name)
+    return df
+
+
+def _fetch_theodds(api_key: str, regions: str) -> List[dict]:
+    """
+    Chama TheOddsAPI para 'upcoming' (todos os esportes) e filtra soccer no matching.
+    (Observação: como os 'sport_keys' variam, usar 'upcoming' é o mais estável para um primeiro corte.)
+    """
+    url = "https://api.the-odds-api.com/v4/sports/upcoming/odds"
     params = {
         "apiKey": api_key,
         "regions": regions,
-        "markets": markets,
-        "oddsFormat": "decimal"
+        "markets": "h2h",
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
     }
-    r = requests.get(ODDS_URL, params=params, timeout=40)
-    if r.status_code == 401:
-        print(f"[theoddsapi][ERROR] Unauthorized (401) — verifique a chave/limite")
-        return []
-    if r.status_code == 429:
-        print(f"[theoddsapi][WARN] Rate limit — aguardando e repetindo...")
-        time.sleep(2.0)
-        r = requests.get(ODDS_URL, params=params, timeout=40)
+    r = requests.get(url, params=params, timeout=25)
     r.raise_for_status()
-    try:
-        data = r.json()
-        return data if isinstance(data, list) else []
-    except Exception:
+    data = r.json()
+    if not isinstance(data, list):
         return []
+    return data
 
-def extract_h2h(event: dict) -> Optional[Tuple[float,float,float,str,str]]:
+
+def _is_soccer_event(ev: dict) -> bool:
+    # Muitos retornos trazem 'sport_key' começando com 'soccer_'.
+    skey = ev.get("sport_key", "") or ""
+    return skey.startswith("soccer_") or skey == "soccer"
+
+
+def _extract_h2h_odds(ev: dict) -> Optional[Tuple[str, str, Dict[str, float]]]:
     """
-    retorna (odds_home, odds_draw, odds_away, bookmaker, commence_time) se conseguir
+    Lê odds H2H e retorna (home_team, away_team, {'home': x, 'draw': y, 'away': z}) com médias por mercado.
     """
-    commence = event.get("commence_time","")
-    for bk in event.get("bookmakers", []) or []:
-        key = bk.get("key","")
-        for mk in bk.get("markets", []) or []:
-            if mk.get("key") == "h2h":
-                prices = mk.get("outcomes", []) or []
-                # outcomes costumam vir com "name": home/away/draw
-                home = next((o for o in prices if o.get("name","").lower() in ("home","home_team", event.get("home_team","").lower())), None)
-                away = next((o for o in prices if o.get("name","").lower() in ("away","away_team", event.get("away_team","").lower())), None)
-                draw = next((o for o in prices if o.get("name","").lower() in ("draw","empate")), None)
-                # fallback: três outcomes sem nome padrão
-                if not (home and draw and away) and len(prices) == 3:
-                    # não temos ordem garantida; tenta deduzir pelo melhor/ pior preço é perigoso; mantém None
-                    pass
-                if home and draw and away:
-                    try:
-                        return (float(home["price"]), float(draw["price"]), float(away["price"]), key, commence)
-                    except Exception:
-                        continue
-    return None
+    home = ev.get("home_team") or ""
+    away = ev.get("away_team") or ""
+    if not home or not away:
+        return None
+
+    # Agregar odds (média) por outcome
+    agg = {"home": [], "draw": [], "away": []}
+    for bm in ev.get("bookmakers", []) or []:
+        for mk in bm.get("markets", []) or []:
+            if (mk.get("key") or "").lower() != "h2h":
+                continue
+            for outcome in mk.get("outcomes", []) or []:
+                name = (outcome.get("name") or "").strip().lower()
+                price = outcome.get("price")
+                if price is None:
+                    continue
+                if name in ("home", home.lower()):
+                    agg["home"].append(float(price))
+                elif name in ("away", away.lower()):
+                    agg["away"].append(float(price))
+                elif name in ("draw", "empate", "tie", "x"):
+                    agg["draw"].append(float(price))
+
+    if not any(agg.values()):
+        return None
+
+    def _mean(x: List[float]) -> Optional[float]:
+        return float(np.mean(x)) if x else None
+
+    odds = {"home": _mean(agg["home"]), "draw": _mean(agg["draw"]), "away": _mean(agg["away"])}
+    # Pelo menos dois mercados ajudam a estabilidade, mas se vier 1 já salvamos
+    if all(v is None for v in odds.values()):
+        return None
+
+    return home, away, odds
+
+
+def _pair_key(a: str, b: str) -> Tuple[str, str]:
+    """Chave de par ordenada usando nomes normalizados."""
+    na, nb = norm_name(a), norm_name(b)
+    return (na, nb) if na <= nb else (nb, na)
+
+
+def _match_events_to_source(
+    src_df: pd.DataFrame, events: List[Tuple[str, str, Dict[str, float]]], score_cutoff: int = 86
+) -> List[Dict[str, object]]:
+    """
+    Faz matching melhor-esforço entre (home, away) do source e (home, away) dos eventos TheOdds.
+    Usa best_match por lado, exige score mínimo, e garante direção (home vs away).
+    """
+    out_rows: List[Dict[str, object]] = []
+
+    # Produz lista de pares do source
+    src_pairs = []
+    for _, row in src_df.iterrows():
+        src_pairs.append(
+            dict(
+                match_id=int(row["match_id"]),
+                home=row["home"],
+                away=row["away"],
+                home_norm=row["home_norm"],
+                away_norm=row["away_norm"],
+            )
+        )
+
+    for (eh, ea, odds) in events:
+        # primeiro normalize os candidatos do evento
+        eh_n, ea_n = norm_name(eh), norm_name(ea)
+
+        # Tenta encontrar um par no source que case EH->home e EA->away
+        best_row = None
+        best_score = -1
+
+        for src in src_pairs:
+            # match lado a lado
+            h_cand, h_score = best_match(eh, [src["home"]], score_cutoff=score_cutoff)
+            a_cand, a_score = best_match(ea, [src["away"]], score_cutoff=score_cutoff)
+            if h_cand and a_cand:
+                score = min(h_score, a_score)
+                if score > best_score:
+                    best_score = score
+                    best_row = src
+
+            # também tentar o invertido (alguns feeds podem trocar lados)
+            h_cand2, h_score2 = best_match(eh, [src["away"]], score_cutoff=score_cutoff)
+            a_cand2, a_score2 = best_match(ea, [src["home"]], score_cutoff=score_cutoff)
+            if h_cand2 and a_cand2:
+                score2 = min(h_score2, a_score2)
+                if score2 > best_score:
+                    # Mas se casou invertido, vamos inverter odds depois
+                    best_score = score2
+                    best_row = dict(
+                        match_id=src["match_id"],
+                        home=src["away"],
+                        away=src["home"],
+                        home_norm=src["away_norm"],
+                        away_norm=src["home_norm"],
+                        _inverted=True,
+                    )
+
+        if best_row and best_score >= score_cutoff:
+            inv = bool(best_row.get("_inverted", False))
+            # Se o par foi invertido, precisamos inverter as odds home/away
+            o_home = odds.get("away") if inv else odds.get("home")
+            o_away = odds.get("home") if inv else odds.get("away")
+            o_draw = odds.get("draw")
+
+            out_rows.append(
+                dict(
+                    match_id=best_row["match_id"],
+                    team_home=best_row["home"],
+                    team_away=best_row["away"],
+                    odds_home=o_home,
+                    odds_draw=o_draw,
+                    odds_away=o_away,
+                    source="theoddsapi",
+                    matched_score=best_score,
+                )
+            )
+
+    return out_rows
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="diretório OUT comum")
-    ap.add_argument("--regions", required=True)
-    ap.add_argument("--source_csv", required=True, help="matches_norm.csv ou matches_norm_resolved.csv")
-    ap.add_argument("--catalog", default="data/ref/teams_catalog.parquet")
-    ap.add_argument("--aliases_json", default="data/ref/aliases.json")
+    ap.add_argument("--rodada", required=True, help="Diretório de saída desta rodada (ex.: data/out/<run_id>)")
+    ap.add_argument("--regions", required=True, help='Regiões theoddsapi (ex.: "uk,eu,us,au")')
+    ap.add_argument("--source_csv", required=True, help="CSV normalizado com as partidas (matches_norm.csv)")
     args = ap.parse_args()
+
+    api_key = os.getenv("THEODDS_API_KEY", "")
+    if not api_key:
+        print("[theoddsapi][FATAL] THEODDS_API_KEY não configurada no ambiente.", file=sys.stderr)
+        sys.exit(1)
 
     os.makedirs(args.rodada, exist_ok=True)
     out_csv = os.path.join(args.rodada, "odds_theoddsapi.csv")
 
-    api_key = os.getenv("THEODDS_API_KEY", "")
-    if not api_key:
-        print("::error::THEODDS_API_KEY não configurada")
-        sys.exit(1)
-
-    # leitura dos jogos-alvo
-    df_src = pd.read_csv(args.source_csv)
-    if "home" not in df_src.columns or "away" not in df_src.columns:
-        print("::error::source_csv precisa de colunas home,away")
-        sys.exit(2)
-
-    # catálogos / aliases (para matching)
-    cat = None
-    if os.path.exists(args.catalog):
-        cat = pd.read_parquet(args.catalog)[["team_id","name"]].copy()
-        cat["canon"] = cat["name"].astype(str)
-    aliases = load_json(args.aliases_json)
-
-    # busca odds
-    events = fetch_theodds(api_key, args.regions)
-    if not events:
-        # ainda salvamos CSV vazio caso o restante do pipeline espere o arquivo
-        pd.DataFrame(columns=["team_home","team_away","odds_home","odds_draw","odds_away","bookmaker","commence_time"]).to_csv(out_csv, index=False)
-        print(f"[theoddsapi]Eventos=0 | jogoselecionados={len(df_src)} | pareados=0 — salvo em {out_csv}")
+    # Carrega source
+    try:
+        src = _read_matches(args.source_csv)
+    except Exception as e:
+        print(f"[theoddsapi][ERROR] Falha lendo source_csv: {e}", file=sys.stderr)
+        # ainda assim escrevemos um CSV vazio com header para não quebrar downstream
+        with open(out_csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away", "source", "matched_score"])
+        print(f"[theoddsapi]Arquivo {out_csv} gerado vazio (falha no source).")
         return
 
-    # preparação de lista de jogos-alvo (preferindo IDs, se já resolvidos)
-    want = []
-    have_ids = set()
-    use_ids = "home_team_id" in df_src.columns and "away_team_id" in df_src.columns
-    for _, r in df_src.iterrows():
-        item = {
-            "home": str(r["home"]),
-            "away": str(r["away"]),
-            "home_id": int(r["home_team_id"]) if use_ids and pd.notna(r["home_team_id"]) else None,
-            "away_id": int(r["away_team_id"]) if use_ids and pd.notna(r["away_team_id"]) else None,
-        }
-        want.append(item)
-        if item["home_id"] and item["away_id"]:
-            have_ids.add((item["home_id"], item["away_id"]))
+    # Busca odds
+    events = []
+    try:
+        raw = _fetch_theodds(api_key, args.regions)
+        # Filtra futebol e extrai odds H2H
+        for ev in raw:
+            if not _is_soccer_event(ev):
+                continue
+            parsed = _extract_h2h_odds(ev)
+            if parsed:
+                events.append(parsed)
+    except requests.HTTPError as e:
+        print(f"[theoddsapi][ERROR] Falha HTTP: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"[theoddsapi][ERROR] Erro geral consultando TheOddsAPI: {e}", file=sys.stderr)
 
-    rows = []
-    learned = {}
+    # Matching
+    rows = _match_events_to_source(src, events, score_cutoff=86)
 
-    # constrói pool de candidatos do catálogo para fuzzy (se necessário)
-    candidates = []
-    if cat is not None and len(cat):
-        candidates = list(zip(cat["canon"].tolist(), cat["team_id"].tolist()))
+    # Escreve CSV (sempre com header)
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away", "source", "matched_score"])
+        for r in rows:
+            w.writerow([
+                r.get("match_id"),
+                r.get("team_home"),
+                r.get("team_away"),
+                r.get("odds_home"),
+                r.get("odds_draw"),
+                r.get("odds_away"),
+                r.get("source", "theoddsapi"),
+                r.get("matched_score", 0),
+            ])
 
-    def match_side(observed: str) -> Optional[int]:
-        # 1) cache de aliases
-        key = norm_name(observed)
-        aid = aliases.get(key, {}).get("team_id")
-        if aid:
-            return int(aid)
-        # 2) catálogo fuzzy
-        if candidates:
-            tid, sc, canon = best_match(observed, candidates, min_score=0.90)
-            if tid:
-                learned[key] = {"team_id": int(tid), "source": "theoddsapi", "confidence": round(sc,3)}
-                return int(tid)
-        return None
+    print(f"[theoddsapi]Eventos={len(events)} | jogoselecionados={len(src)} | pareados={len(rows)} — salvo em {out_csv}")
 
-    def is_target_pair(hname: str, aname: str) -> bool:
-        # se temos IDs-alvo, tenta resolver nomes para IDs e comparar
-        if have_ids:
-            hid = match_side(hname)
-            aid = match_side(aname)
-            if hid and aid and (hid, aid) in have_ids:
-                return True
-            # sem IDs confiáveis, cai para comparação de nomes normalizados contra source_csv
-        # fallback por nomes (agressivo)
-        hk, ak = token_key(hname), token_key(aname)
-        for w in want:
-            if token_key(w["home"]) == hk and token_key(w["away"]) == ak:
-                return True
-        return False
-
-    # varre eventos e guarda H2H
-    for ev in events:
-        hname = ev.get("home_team","") or ""
-        aname = ev.get("away_team","") or ""
-        if not hname or not aname:
-            continue
-        if not is_target_pair(hname, aname):
-            continue
-        h2h = extract_h2h(ev)
-        if not h2h:
-            continue
-        oH, oD, oA, bk, t0 = h2h
-        rows.append({
-            "team_home": hname,
-            "team_away": aname,
-            "odds_home": oH,
-            "odds_draw": oD,
-            "odds_away": oA,
-            "bookmaker": bk,
-            "commence_time": t0,
-        })
-
-        # aprende aliases individuais (mesmo que par não esteja nos “want” por ID)
-        for nm in (hname, aname):
-            k = norm_name(nm)
-            if k not in aliases and k not in learned:
-                tid = match_side(nm)
-                if tid:
-                    learned[k] = {"team_id": int(tid), "source": "theoddsapi", "confidence": 0.95}
-
-    # salva CSV (mesmo vazio)
-    pd.DataFrame(rows).to_csv(out_csv, index=False)
-    print(f"[theoddsapi]Eventos={len(events)} | jogoselecionados={len(df_src)} | pareados={len(rows)} — salvo em {out_csv}")
-
-    # atualiza cache de aliases se houver aprendizados
-    if learned:
-        aliases.update(learned)
-        dump_json(args.aliases_json, aliases)
-        # relatório amigável
-        aud = [{"observed": k, **v} for k, v in learned.items()]
-        pd.DataFrame(aud).to_csv(os.path.join(args.rodada, "aliases_learned_theoddsapi.csv"), index=False)
-        print(f"[theoddsapi] {len(learned)} aliases aprendidos → {args.aliases_json}")
 
 if __name__ == "__main__":
     main()
