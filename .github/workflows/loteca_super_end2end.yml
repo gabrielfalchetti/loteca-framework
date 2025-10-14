@@ -1,9 +1,9 @@
-name: Loteca Super End-to-End (Gold)
+name: Loteca Super End-to-End (Gold, Standard)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 12 * * 4"  # exemplo: quinta 12:15 UTC (ajuste se quiser)
+    - cron: "15 12 * * 4"  # quinta 12:15 UTC (ajuste se quiser)
 
 permissions:
   contents: read
@@ -17,18 +17,18 @@ env:
   KELLY_CAP: "0.1"
   KELLY_TOP_N: "14"
   ROUND_TO: "1"
-  TRAIN_CALIBRATOR: "false"  # troque para "true" quando quiser retreinar
+  TRAIN_CALIBRATOR: "false"          # troque para "true" quando quiser retreinar
   SOURCE_CSV: "data/in/matches_source.csv"
 
 jobs:
   loteca_e2e:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
+    concurrency:
+      group: loteca-e2e-${{ github.ref }}
+      cancel-in-progress: false
 
     env:
-      # mapeamento de secrets (disponíveis em TODOS os steps do job)
+      # Secrets mapeados aqui valem para TODO o job
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       THEODDS_API_KEY:  ${{ secrets.THEODDS_API_KEY }}
       X_RAPIDAPI_KEY:   ${{ secrets.X_RAPIDAPI_KEY }}
@@ -43,24 +43,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (hardening)
+      - name: Install dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-          # Garantias para nosso pipeline
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --upgrade \
             pandas numpy scipy scikit-learn statsmodels \
             pyarrow fastparquet unidecode requests python-dateutil \
             matplotlib
 
-      - name: Define OUT_DIR (por run)
+      - name: Define OUT_DIR (por execução)
         run: |
-          echo "OUT_DIR=data/out/${{ github.run_id }}" >> $GITHUB_ENV
-          echo "SOURCE_CSV_NORM=${{ env.OUT_DIR }}/matches_norm.csv" >> $GITHUB_ENV
-          mkdir -p "${{ env.OUT_DIR }}"
+          set -euo pipefail
+          OUT="data/out/${GITHUB_RUN_ID}"
+          echo "OUT_DIR=$OUT" >> "$GITHUB_ENV"
+          echo "SOURCE_CSV_NORM=$OUT/matches_norm.csv" >> "$GITHUB_ENV"
+          mkdir -p "$OUT"
 
       # -----------------------------
       # 1) HISTÓRICO & FEATURES
@@ -69,13 +68,11 @@ jobs:
         run: |
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-          # tenta buscar últimos 14 dias; se falhar, gera stub para destravar
           if ! python -m scripts.update_history --since_days 14 --out "data/history/results.csv"; then
             echo "::notice::update_history falhou; criando stub neutro..."
             mkdir -p data/history
             printf "date,home,away,home_goals,away_goals\n1970-01-01,BOOT,BOOT,0,0\n" > data/history/results.csv
           fi
-          # sanidade de cabeçalhos
           header="$(head -n1 data/history/results.csv | tr -d '\r')"
           for c in date home away home_goals away_goals; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c'"; exit 1; }
@@ -143,7 +140,6 @@ jobs:
             --in_csv  "${SOURCE_CSV}" \
             --out_csv "${SOURCE_CSV_NORM}"
           test -s "${SOURCE_CSV_NORM}" || { echo "::error::matches_norm.csv not generated"; exit 3; }
-          # whitelist para consenso estrito
           cp -f "${SOURCE_CSV_NORM}" "${OUT_DIR}/matches_whitelist.csv"
 
       - name: Ingest odds — TheOddsAPI (OBRIGATÓRIO)
@@ -157,7 +153,7 @@ jobs:
             --source_csv "${SOURCE_CSV_NORM}"
           test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
 
-      - name: Ingest fixtures/aux — API-Football (IDs e sanity)  # auxiliar
+      - name: Ingest fixtures/aux — API-Football (IDs e sanity)
         run: |
           set -euo pipefail
           [ -n "${API_FOOTBALL_KEY:-}" ] || { echo "::error::API_FOOTBALL_KEY ausente"; exit 5; }
@@ -166,7 +162,6 @@ jobs:
               --rodada "${OUT_DIR}" \
               --source_csv "${SOURCE_CSV_NORM}" || true
           fi
-          # não é crítico ter odds_apifootball.csv >0 linhas aqui
 
       - name: Consensus odds (STRICT)
         run: |
@@ -200,9 +195,7 @@ jobs:
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 7; }
           CAL="${OUT_DIR}/calibrator.pkl"
-          if [ ! -s "$CAL" ]; then
-            CAL="models/calibrator.pkl"
-          fi
+          if [ ! -s "$CAL" ]; then CAL="models/calibrator.pkl"; fi
           [ -s "$CAL" ] || { echo "::error::calibrator.pkl não encontrado (treine com TRAIN_CALIBRATOR=true ou adicione em models/)"; exit 7; }
           python -m scripts.calibrate_probs \
             --in      "${OUT_DIR}/pred_xg.csv" \
