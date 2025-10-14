@@ -48,24 +48,15 @@ jobs:
           set -euo pipefail
           OUT_DIR="data/out/${GITHUB_RUN_ID}"
           mkdir -p "${OUT_DIR}" data/history data/in data/ref models
-          echo "OUT_DIR=${OUT_DIR}" >> $GITHUB_ENV
-          echo "FEATURES_PARQUET=data/history/features.parquet" >> $GITHUB_ENV
-          echo "SOURCE_CSV_NORM=${OUT_DIR}/matches_norm.csv" >> $GITHUB_ENV
+          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
+          echo "FEATURES_PARQUET=data/history/features.parquet" >> "$GITHUB_ENV"
+          echo "SOURCE_CSV_NORM=${OUT_DIR}/matches_norm.csv" >> "$GITHUB_ENV"
 
-      - name: (Optional) W&B login
+      # Login W&B opcional (sem bloco multilinha/else para evitar erro de YAML)
+      - name: W&B login (optional)
+        if: ${{ env.WANDB_API_KEY != '' }}
         shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "${WANDB_API_KEY:-}" ]; then
-            python - <<'PY'
-import os, subprocess, sys
-key=os.getenv("WANDB_API_KEY","")
-if key:
-    subprocess.run([sys.executable,"-m","wandb","login",key], check=False)
-PY
-          else
-            echo "::notice::WANDB_API_KEY não configurada; seguindo sem W&B."
-          fi
+        run: echo "${WANDB_API_KEY}" | python -m wandb login --stdin
 
       # ====================== HISTÓRICO ======================
       - name: Update history (with stub fallback)
@@ -163,7 +154,7 @@ PY
             --out_csv "${OUT_DIR}/matches_norm_resolved.csv" \
             --country "Brazil"
           test -s "${OUT_DIR}/matches_norm_resolved.csv" || { echo "::error::matches_norm_resolved.csv not generated"; exit 3; }
-          echo "SOURCE_CSV_NORM=${OUT_DIR}/matches_norm_resolved.csv" >> $GITHUB_ENV
+          echo "SOURCE_CSV_NORM=${OUT_DIR}/matches_norm_resolved.csv" >> "$GITHUB_ENV"
 
       # ====================== ODDS ======================
       - name: Ingest TheOddsAPI (main odds) — REQUIRED
@@ -198,7 +189,6 @@ PY
           python -m scripts.ingest_odds_apifootball \
             --rodada "${OUT_DIR}" \
             --source_csv "${SOURCE_CSV_NORM}" || true
-          # opcional: não falhar se vazio
           if [ ! -s "${OUT_DIR}/odds_apifootball.csv" ]; then
             echo "::notice::odds_apifootball.csv não gerado (ok)"
           fi
