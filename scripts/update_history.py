@@ -1,37 +1,28 @@
-# scripts/update_history.py
-import os, sys, argparse, datetime as dt, requests, csv
+# -*- coding: utf-8 -*-
+import argparse, csv, sys, os, datetime as dt, requests
+from dateutil.relativedelta import relativedelta
 
-API_BASE = "https://v3.football.api-sports.io"
+API_URL = "https://v3.football.api-sports.io/fixtures"
 
-def req(endpoint: str, params: dict):
-    headers = {"x-apisports-key": os.environ.get("API_FOOTBALL_KEY", "")}
-    r = requests.get(f"{API_BASE}/{endpoint}", headers=headers, params=params, timeout=30)
+def _headers():
+    h = {}
+    key = os.getenv("API_FOOTBALL_KEY") or os.getenv("X_RAPIDAPI_KEY")
+    if key:
+        # API-Sports aceita 'x-apisports-key'; via RapidAPI use também host
+        h["x-apisports-key"] = key
+    return h
+
+def fetch_finished_since(days: int):
+    to = dt.datetime.utcnow().date()
+    frm = to - dt.timedelta(days=days)
+    params = {
+        "from": frm.isoformat(),
+        "to": to.isoformat(),
+        "status": "FT",
+    }
+    r = requests.get(API_URL, headers=_headers(), params=params, timeout=30)
     r.raise_for_status()
-    j = r.json()
-    return j.get("response", [])
-
-def fetch_finished(from_d: dt.date, to_d: dt.date):
-    rows = []
-    cur = from_d
-    while cur <= to_d:
-        resp = req("fixtures", {"date": cur.isoformat(), "timezone": "UTC"})
-        for fx in resp:
-            st = fx.get("fixture", {}).get("status", {}).get("short", "")
-            if st == "FT":
-                home = fx.get("teams", {}).get("home", {}).get("name")
-                away = fx.get("teams", {}).get("away", {}).get("name")
-                goals = fx.get("goals", {})
-                hg, ag = goals.get("home"), goals.get("away")
-                if home and away and hg is not None and ag is not None:
-                    rows.append({
-                        "date": fx.get("fixture", {}).get("date", "")[:10],
-                        "home": home,
-                        "away": away,
-                        "home_goals": hg,
-                        "away_goals": ag,
-                    })
-        cur += dt.timedelta(days=1)
-    return rows
+    return r.json().get("response", [])
 
 def main():
     ap = argparse.ArgumentParser()
@@ -39,29 +30,32 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    try_api = bool(os.environ.get("API_FOOTBALL_KEY"))
+    try:
+        resp = fetch_finished_since(args.since_days)
+    except Exception as e:
+        print(f"[update_history][ERROR] {e}", file=sys.stderr)
+        # deixamos o workflow criar stub
+        sys.exit(1)
+
     rows = []
-    if try_api:
-        today = dt.date.today()
-        from_d = today - dt.timedelta(days=args.since_days)
-        print(f"[update_history][INFO] fetching finished fixtures for window {from_d} -> {today} (UTC) via API-Sports...")
-        try:
-            rows = fetch_finished(from_d, today)
-            print(f"[update_history][INFO] API-Sports retornou {len(rows)} partidas finalizadas.")
-        except Exception as e:
-            print(f"[update_history][WARN] Falha na API: {e}", file=sys.stderr)
+    for fx in resp:
+        t = fx.get("teams", {})
+        g = fx.get("goals", {})
+        home = t.get("home", {}).get("name", "")
+        away = t.get("away", {}).get("name", "")
+        hg = g.get("home", None)
+        ag = g.get("away", None)
+        date_iso = fx.get("fixture", {}).get("date", "")
+        date = date_iso[:10] if date_iso else ""
+        if home and away and hg is not None and ag is not None and date:
+            rows.append((date, home, away, hg, ag))
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    if not rows:
-        print("[update_history][WARN] Nenhuma partida encontrada — salvando stub BOOT x BOOT 0-0.", file=sys.stderr)
-        rows = [{"date":"1970-01-01","home":"BOOT","away":"BOOT","home_goals":0,"away_goals":0}]
-
     with open(args.out, "w", newline="", encoding="utf-8") as f:
-        wr = csv.DictWriter(f, fieldnames=["date","home","away","home_goals","away_goals"])
-        wr.writeheader()
-        wr.writerows(rows)
+        w = csv.writer(f)
+        w.writerow(["date","home","away","home_goals","away_goals"])
+        w.writerows(rows)
     print(f"[update_history] OK — gravadas {len(rows)} partidas em {args.out}")
-    return 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
