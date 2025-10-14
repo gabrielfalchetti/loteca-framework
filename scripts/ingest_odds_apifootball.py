@@ -1,179 +1,216 @@
-#!/usr/bin/env python3
+# scripts/ingest_odds_apifootball.py
 # -*- coding: utf-8 -*-
-
 """
-Ingestão (placeholder) via API-Football:
-- Resolve times/fixtures a partir de nomes BR (com aliases + busca multi-termos + match por similaridade).
-- Odds reais só aparecem se seu plano/liberação incluir /odds; aqui focamos em alimentar o consenso com teams/fixtures.
-Saída: {rodada}/odds_apifootball.csv com colunas:
-  team_home,team_away,odds_home,odds_draw,odds_away
-(se odds não disponíveis, sairá apenas o cabeçalho)
+Ingesta "odds" via API-Football (na prática, usamos a API para padronizar nomes,
+encontrar teams/fixtures e tentamos ler odds se o plano permitir).
+Sempre gera `${rodada}/odds_apifootball.csv` com cabeçalho, mesmo sem linhas.
+
+Uso:
+  python -m scripts.ingest_odds_apifootball \
+      --rodada data/out/1760XXXX \
+      --source_csv data/out/1760XXXX/matches_norm.csv [--season 2025]
+
+Requer:
+  - API_FOOTBALL_KEY (API-Sports) OU X_RAPIDAPI_KEY (RapidAPI)
+Colunas esperadas no source_csv:
+  match_id,home,away
+Saída (CSV):
+  team_home,team_away,odds_home,odds_draw,odds_away,fixture_id,source
 """
 
 import argparse
 import csv
 import os
-import re
 import sys
 import time
+import re
+import json
+import unicodedata
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 
 import requests
-from unidecode import unidecode
 
-API_BASE = "https://v3.football.api-sports.io"
-API_KEY_ENV = "API_FOOTBALL_KEY"
 
-# ---- aliases/sinônimos focados no BR ----
-ALIAS_BASE = {
-    # Sufixos de estado e variações frequentes
-    "athletico-pr": ["athletico pr", "athletico paranaense", "club athletico paranaense"],
-    "atletico-pr": ["athletico pr", "athletico paranaense", "club athletico paranaense"],
-    "atlético-pr": ["athletico pr", "athletico paranaense", "club athletico paranaense"],
+# ============================== CONFIG HTTP ===============================
 
-    "atletico-go": ["atletico go", "atletico goianiense", "atletico goiania", "atletico goi"],
-    "atlético-go": ["atletico go", "atletico goianiense", "atletico goiania", "atletico goi"],
+API_BASE_DIRECT = "https://v3.football.api-sports.io"
+API_BASE_RAPID  = "https://api-football-v1.p.rapidapi.com/v3"
 
-    "botafogo-sp": ["botafogo sp", "botafogo ribeirao preto", "botafogo ribeirão preto"],
-    "chapecoense": ["chapecoense", "chapecoense sc"],
-    "chapecoense-sc": ["chapecoense", "chapecoense sc"],
-    "avai": ["avai", "avai fc", "ec avai"],
-    "avaí": ["avai", "avai fc", "ec avai"],
+def get_http_config() -> Tuple[str, Dict[str, str]]:
+    key_direct = os.getenv("API_FOOTBALL_KEY", "").strip()
+    key_rapid  = os.getenv("X_RAPIDAPI_KEY", "").strip()
 
-    "volta redonda": ["volta redonda", "volta redonda fc"],
-    "crb": ["crb", "clube de regatas brasil", "crb maceio", "crb maceió"],
+    if key_direct:
+        return API_BASE_DIRECT, {"x-apisports-key": key_direct}
+    if key_rapid:
+        return API_BASE_RAPID, {
+            "X-RapidAPI-Key": key_rapid,
+            "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
+        }
+    return "", {}
 
-    "ferroviaria": ["ferroviaria", "ferroviaria sp", "afe", "associacao ferroviaria de esportes"],
-    "ferroviária": ["ferroviaria", "ferroviaria sp", "afe", "associacao ferroviaria de esportes"],
-
-    "paysandu": ["paysandu", "paysandu sport club"],
-    "remo": ["remo", "clube do remo"],
-
-    # grafias sem acento/sinais
-    "atletico goianiense": ["atletico go", "atletico-go", "atletico goiania"],
-    "athletico paranaense": ["athletico pr", "athletico-pr", "cap", "club athletico paranaense"],
-    "botafogo ribeirao preto": ["botafogo sp", "botafogo-sp"],
-}
-
-STATE_SUFFIXES = {"-sp", " sp", "(sp)", " sp)", "(sp", "/sp",
-                  "-rj", " rj", "(rj)", "(rj", "/rj",
-                  "-pr", " pr", "(pr)", "(pr", "/pr",
-                  "-sc", " sc", "(sc)", "(sc", "/sc",
-                  "-go", " go", "(go)", "(go", "/go",
-                  "-pa", " pa", "(pa)", "(pa", "/pa"}
-
-def _clean(s: str) -> str:
-    if not s:
-        return ""
-    s = unidecode(s).lower()
-    s = s.replace(" - ", "-")
-    s = re.sub(r"[^\w\s\-/()]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def generate_search_terms(name: str) -> List[str]:
-    """Gera uma lista de termos de busca progressivamente mais frouxos."""
-    base = _clean(name)
-    terms = {base}
-
-    # troca separadores
-    terms.add(base.replace("-", " "))
-    terms.add(base.replace("/", " "))
-    terms.add(base.replace("(", " ").replace(")", " "))
-
-    # remove sufixos de estado
-    for suff in STATE_SUFFIXES:
-        if base.endswith(suff):
-            terms.add(base[: -len(suff)].strip())
-
-    # aplica aliases conhecidos
-    if base in ALIAS_BASE:
-        for alt in ALIAS_BASE[base]:
-            t = _clean(alt)
-            terms.add(t)
-            terms.add(t.replace("-", " "))
-            terms.add(t.replace("/", " "))
-
-    # fallback: primeira palavra (ex.: “botafogo-sp” → “botafogo”)
-    parts = base.replace("-", " ").split()
-    if parts:
-        terms.add(parts[0])
-
-    return [t for t in terms if t]
-
-def token_set(s: str) -> set:
-    s = _clean(s)
-    toks = set(s.replace("-", " ").split())
-    # remove tokens muito genéricos
-    return {t for t in toks if t not in {"fc", "ec", "clube", "club", "do", "de", "sc"}}
-
-def jaccard(a: str, b: str) -> float:
-    A, B = token_set(a), token_set(b)
-    if not A or not B:
-        return 0.0
-    inter = len(A & B)
-    uni = len(A | B)
-    return inter / uni if uni else 0.0
 
 def api_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    key = os.environ.get(API_KEY_ENV, "").strip()
-    if not key:
-        raise SystemExit("[apifootball][CRITICAL] API_FOOTBALL_KEY ausente no ambiente.")
-    headers = {"x-apisports-key": key, "Accept": "application/json"}
-    url = f"{API_BASE}{path}"
-    r = requests.get(url, headers=headers, params=params, timeout=25)
-    if r.status_code == 429:
-        time.sleep(2.5)
-        r = requests.get(url, headers=headers, params=params, timeout=25)
+    base, headers = get_http_config()
+    if not base:
+        raise RuntimeError("Sem chave (API_FOOTBALL_KEY ou X_RAPIDAPI_KEY).")
+    url = f"{base}{path}"
+    r = requests.get(url, headers=headers, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
 
-def find_team_id_by_name(raw_name: str) -> Optional[int]:
-    """Tenta várias queries e escolhe o melhor match por similaridade de tokens."""
-    queries = generate_search_terms(raw_name)
-    best_id, best_score, best_name = None, 0.0, None
 
-    for q in queries:
+# ============================== NORMALIZAÇÃO ==============================
+
+def strip_accents(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+def norm_cmp(s: str) -> str:
+    s = strip_accents(s).lower()
+    s = re.sub(r"[\(\)\[\]\{\}]", " ", s)
+    s = re.sub(r"[-_/\.]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+# Aliases BR frequentes -> nome canônico que costuma "bater" na API
+BR_ALIASES = {
+    # Athletico e variantes
+    "athletico-pr": "Athletico Paranaense",
+    "atletico-pr": "Athletico Paranaense",
+    "athletico paranaense": "Athletico Paranaense",
+    "atletico paranaense": "Athletico Paranaense",
+
+    # Atletico GO
+    "atletico-go": "Atletico GO",
+    "atlético-go": "Atletico GO",
+    "atletico goianiense": "Atletico GO",
+
+    # Avaí
+    "avai": "Avai",
+    "avaí": "Avai",
+    "avai sc": "Avai",
+
+    # Botafogo-SP
+    "botafogo-sp": "Botafogo SP",
+    "botafogo sp": "Botafogo SP",
+
+    # Ferroviária (SP)
+    "ferroviaria": "Ferroviaria",
+    "ferroviária": "Ferroviaria",
+    "ferroviaria sp": "Ferroviaria",
+
+    # Chapecoense
+    "chapecoense": "Chapecoense-SC",
+    "chapecoense sc": "Chapecoense-SC",
+
+    # Paysandu / Remo
+    "paysandu": "Paysandu",
+    "remo": "Remo",
+
+    # Volta Redonda
+    "volta redonda": "Volta Redonda",
+}
+
+def normalize_for_search(name: str) -> str:
+    key = norm_cmp(name)
+    if key in BR_ALIASES:
+        return BR_ALIASES[key]
+    # Remove UF entre parênteses ou sufixos " - UF"
+    cleaned = re.sub(r"\s*[\-/]?\s*\b([A-Z]{2})\b", "", name).strip()
+    cleaned = re.sub(r"\((?:[A-Z]{2})\)", "", cleaned).strip()
+    # Tira acentos (a API costuma responder sem acento)
+    return strip_accents(cleaned)
+
+
+# ============================== BUSCAS NA API =============================
+
+def token_match_score(a: str, b: str) -> float:
+    sa = set(norm_cmp(a).split())
+    sb = set(norm_cmp(b).split())
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    uni   = len(sa | sb)
+    return inter / uni
+
+def search_team_id(name: str, country_hint: Optional[str] = "Brazil") -> Optional[Dict[str, Any]]:
+    q = normalize_for_search(name)
+    params = {"search": q}
+    if country_hint:
+        params["country"] = country_hint
+
+    try:
+        data = api_get("/teams", params)
+    except Exception:
+        data = {}
+
+    choices = data.get("response", []) or []
+    best, best_score = None, 0.0
+    for item in choices:
+        t = (item.get("team") or {})
+        cname = t.get("name") or ""
+        score = token_match_score(q, cname)
+        if score > best_score:
+            best, best_score = item, score
+
+    # fallback sem country
+    if best_score < 0.5:
         try:
-            js = api_get("/teams", {"search": q})
+            data2 = api_get("/teams", {"search": q})
+            for item in (data2.get("response", []) or []):
+                t = (item.get("team") or {})
+                cname = t.get("name") or ""
+                score = token_match_score(q, cname)
+                if score > best_score:
+                    best, best_score = item, score
         except Exception:
-            continue
-        for it in js.get("response", []):
-            api_name = (it.get("team", {}) or {}).get("name") or ""
-            score = jaccard(api_name, raw_name)
-            if score > best_score:
-                best_score = score
-                best_id = (it.get("team", {}) or {}).get("id")
-                best_name = api_name
+            pass
 
-    # aceita se a similaridade for minimamente convincente
-    if best_id and best_score >= 0.45:
-        # print(f"[apifootball][DEBUG] '{raw_name}' -> '{best_name}' (score={best_score:.2f})")
-        return best_id
+    return best
+
+
+def find_fixture_by_window(home_id: int, away_id: int, start_dt: datetime, end_dt: datetime, season: Optional[int]) -> Optional[Dict[str, Any]]:
+    """Busca fixture futuro dentro de uma janela consultando por time."""
+    from_s = start_dt.strftime("%Y-%m-%d")
+    to_s   = end_dt.strftime("%Y-%m-%d")
+
+    for tid in (home_id, away_id):
+        params = {"team": tid, "from": from_s, "to": to_s}
+        if season:
+            params["season"] = season
+        try:
+            data = api_get("/fixtures", params)
+        except Exception:
+            data = {}
+        for fx in data.get("response", []) or []:
+            th = fx.get("teams", {}).get("home", {}).get("id")
+            ta = fx.get("teams", {}).get("away", {}).get("id")
+            if th == home_id and ta == away_id:
+                return fx
     return None
 
-def fixtures_next_by_team(team_id: int, season: Optional[int]) -> List[Dict[str, Any]]:
-    params = {"team": team_id, "next": 20}
-    if season:
-        params["season"] = season
-    try:
-        data = api_get("/fixtures", params)
-        return data.get("response", []) or []
-    except Exception:
-        return []
 
-def find_fixture_by_window(home_id: int, away_id: int, since: datetime, until: datetime, season: Optional[int]) -> Optional[Dict[str, Any]]:
-    params = {
-        "from": since.strftime("%Y-%m-%d"),
-        "to": until.strftime("%Y-%m-%d"),
-        "team": home_id,
-    }
+def fixtures_headtohead_next(home_id: int, away_id: int, season: Optional[int], next_n: int = 12) -> Optional[Dict[str, Any]]:
+    """Fallback forte: usa /fixtures/headtohead para próximos confrontos."""
+    params = {"h2h": f"{home_id}-{away_id}", "next": next_n}
     if season:
         params["season"] = season
     try:
-        data = api_get("/fixtures", params)
-        for fx in data.get("response", []):
+        data = api_get("/fixtures/headtohead", params)
+        for fx in data.get("response", []) or []:
+            th = fx.get("teams", {}).get("home", {}).get("id")
+            ta = fx.get("teams", {}).get("away", {}).get("id")
+            if th == home_id and ta == away_id:
+                return fx
+    except Exception:
+        pass
+
+    # tenta invertido
+    params["h2h"] = f"{away_id}-{home_id}"
+    try:
+        data = api_get("/fixtures/headtohead", params)
+        for fx in data.get("response", []) or []:
             th = fx.get("teams", {}).get("home", {}).get("id")
             ta = fx.get("teams", {}).get("away", {}).get("id")
             if th == home_id and ta == away_id:
@@ -182,87 +219,200 @@ def find_fixture_by_window(home_id: int, away_id: int, since: datetime, until: d
         pass
     return None
 
-def find_fixture_h2h(home_id: int, away_id: int, season: Optional[int]) -> Optional[Dict[str, Any]]:
-    for tid in (home_id, away_id):
-        for fx in fixtures_next_by_team(tid, season):
-            th = fx.get("teams", {}).get("home", {}).get("id")
-            ta = fx.get("teams", {}).get("away", {}).get("id")
-            if th == home_id and ta == away_id:
-                return fx
+
+def find_fixture_in_brazil_leagues(home_id: int, away_id: int, season: Optional[int], max_leagues: int = 12) -> Optional[Dict[str, Any]]:
+    """Varre ligas brasileiras na season e tenta achar o confronto."""
+    if not season:
+        return None
+    try:
+        leagues = api_get("/leagues", {"country": "Brazil", "season": season}).get("response", []) or []
+    except Exception:
+        leagues = []
+
+    leagues = leagues[:max_leagues]
+
+    for lg in leagues:
+        league_id = (lg.get("league") or {}).get("id")
+        if not league_id:
+            continue
+        for tid in (home_id, away_id):
+            try:
+                data = api_get("/fixtures", {"league": league_id, "season": season, "team": tid, "next": 20})
+            except Exception:
+                continue
+            for fx in data.get("response", []) or []:
+                th = fx.get("teams", {}).get("home", {}).get("id")
+                ta = fx.get("teams", {}).get("away", {}).get("id")
+                if th == home_id and ta == away_id:
+                    return fx
     return None
 
-def read_matches_csv(path: str) -> List[Dict[str, str]]:
+
+def fetch_odds_for_fixture(fixture_id: int) -> Optional[Tuple[float, float, float]]:
+    """Tenta pegar odds (1X2) do fixture. Nem sempre disponível no plano."""
+    try:
+        data = api_get("/odds", {"fixture": fixture_id})
+    except Exception:
+        return None
+
+    # Formato da API-Football: response -> bookmakers -> bets -> values
+    resp = data.get("response", []) or []
+    best = None  # (home, draw, away) com melhor cobertura
+    for entry in resp:
+        for bookmaker in entry.get("bookmakers", []) or []:
+            for bet in bookmaker.get("bets", []) or []:
+                if str(bet.get("name", "")).lower() in {"match winner","1x2","winner"}:
+                    vals = bet.get("values", []) or []
+                    home = draw = away = None
+                    for v in vals:
+                        label = str(v.get("value","")).strip().lower()
+                        odd   = v.get("odd")
+                        try:
+                            odd = float(odd)
+                        except Exception:
+                            odd = None
+                        if odd is None:
+                            continue
+                        if label in {"home","1","1 (home)","equipa 1"}:
+                            home = odd
+                        elif label in {"draw","x","empate"}:
+                            draw = odd
+                        elif label in {"away","2","2 (away)","equipa 2"}:
+                            away = odd
+                    if home and draw and away:
+                        # escolhe a primeira tripla completa (ou poderíamos max/min)
+                        return (home, draw, away)
+    return best
+
+
+# ============================== PIPELINE MAIN =============================
+
+def read_matches(path: str) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        hdr = [c.strip().lower() for c in (reader.fieldnames or [])]
-        col_home = "home" if "home" in hdr else "team_home" if "team_home" in hdr else None
-        col_away = "away" if "away" in hdr else "team_away" if "team_away" in hdr else None
-        col_id = "match_id" if "match_id" in hdr else None
-        if not (col_home and col_away and col_id):
-            raise SystemExit(f"[apifootball][CRITICAL] CSV {path} precisa de colunas match_id,home,away (ou team_home/team_away).")
-        for r in reader:
-            rows.append({"match_id": r.get(col_id, "").strip(),
-                         "home": r.get(col_home, "").strip(),
-                         "away": r.get(col_away, "").strip()})
+    with open(path, "r", encoding="utf-8") as f:
+        rd = csv.DictReader(f)
+        need = {"match_id","home","away"}
+        if not need.issubset({c.strip() for c in rd.fieldnames or []}):
+            raise RuntimeError(f"Arquivo {path} deve conter cabeçalho: match_id,home,away")
+        for r in rd:
+            if not r.get("home") or not r.get("away"):
+                continue
+            rows.append({"match_id": r.get("match_id","").strip(),
+                         "home": r.get("home","").strip(),
+                         "away": r.get("away","").strip()})
     return rows
+
+
+def ensure_outfile_with_header(out_path: str) -> None:
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    # sempre cria com cabeçalho (evita "No columns to parse from file")
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(["team_home","team_away","odds_home","odds_draw","odds_away","fixture_id","source"])
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Diretório de saída (ex: data/out/12345)")
-    ap.add_argument("--source_csv", required=True, help="CSV com match_id,home,away (normalizado)")
-    ap.add_argument("--season", type=int, default=int(os.environ.get("SEASON", "0")) or None)
+    ap.add_argument("--rodada", required=True, help="Diretório da rodada (onde salvar o CSV)")
+    ap.add_argument("--source_csv", required=True, help="CSV com match_id,home,away")
+    ap.add_argument("--season", type=int, default=None, help="Temporada (opcional, ex. 2025)")
+    ap.add_argument("--lookahead_days", type=int, default=int(os.getenv("LOOKAHEAD_DAYS", "30")),
+                    help="Janela curta de busca futura (dias)")
     args = ap.parse_args()
 
-    os.makedirs(args.rodada, exist_ok=True)
-    out_csv = os.path.join(args.rodada, "odds_apifootball.csv")
+    out_file = os.path.join(args.rodada, "odds_apifootball.csv")
+    ensure_outfile_with_header(out_file)
 
-    matches = read_matches_csv(args.source_csv)
-    print(f"[apifootball]Iniciando busca direcionada para {len(matches)} jogos do arquivo de origem.")
+    base, headers = get_http_config()
+    if not base:
+        print("[apifootball][WARN] Sem chave para API-Football; arquivo será apenas o cabeçalho.")
+        return 0
+
+    matches = read_matches(args.source_csv)
+    total = len(matches)
+    print(f"[apifootball]Iniciando busca direcionada para {total} jogos do arquivo de origem.")
 
     now = datetime.utcnow()
-    lookahead = int(os.environ.get("LOOKAHEAD_DAYS", "3") or 3)
+    lookahead = max(1, int(args.lookahead_days))
 
-    # acumulador (se houver odds no seu plano)
-    rows_out: List[Dict[str, Any]] = []
+    found_rows: List[List[Any]] = []
 
-    for m in matches:
-        home_raw, away_raw = m["home"], m["away"]
+    for row in matches:
+        home_raw = row["home"]
+        away_raw = row["away"]
 
-        home_id = find_team_id_by_name(home_raw)
-        away_id = find_team_id_by_name(away_raw)
+        # 1) resolve times
+        th = search_team_id(home_raw, country_hint="Brazil")
+        ta = search_team_id(away_raw, country_hint="Brazil")
+
+        if not th:
+            th = search_team_id(home_raw, country_hint=None)
+        if not ta:
+            ta = search_team_id(away_raw, country_hint=None)
+
+        if not th or not ta:
+            miss = []
+            if not th: miss.append("team_id(home)")
+            if not ta: miss.append("team_id(away)")
+            print(f"[apifootball][WARN] Sem {', '.join(miss)} para: {home_raw} vs {away_raw}")
+            continue
+
+        home_id = (th.get("team") or {}).get("id")
+        away_id = (ta.get("team") or {}).get("id")
         if not home_id or not away_id:
             print(f"[apifootball][WARN] Sem team_id para: {home_raw} vs {away_raw}")
             continue
 
-        # tenta janelas diferentes
+        # 2) encontra fixture com cascata de fallbacks
         fx = find_fixture_by_window(home_id, away_id, now, now + timedelta(days=lookahead), args.season)
         if not fx:
             fx = find_fixture_by_window(home_id, away_id, now, now + timedelta(days=14), args.season)
         if not fx:
-            fx = find_fixture_h2h(home_id, away_id, args.season)
+            fx = fixtures_headtohead_next(home_id, away_id, args.season, next_n=12)
+        if not fx:
+            fx = find_fixture_in_brazil_leagues(home_id, away_id, args.season, max_leagues=12)
 
         if not fx:
             print(f"[apifootball][WARN] Sem fixture_id para: {home_raw} vs {away_raw}")
             continue
 
-        # Odds via API-Football dependem do plano; mantemos CSV com cabeçalho.
-        # Exemplo de coleta (desativado por padrão):
-        # fixture_id = fx.get("fixture", {}).get("id")
-        # try:
-        #     o = api_get("/odds", {"fixture": fixture_id})
-        #     # parse e adicionar a rows_out aqui...
-        # except Exception:
-        #     pass
+        fixture_id = (fx.get("fixture") or {}).get("id")
+        home_name  = ((fx.get("teams") or {}).get("home") or {}).get("name") or home_raw
+        away_name  = ((fx.get("teams") or {}).get("away") or {}).get("name") or away_raw
 
-    # Sempre grava cabeçalho (mesmo com 0 linhas)
-    with open(out_csv, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["team_home", "team_away", "odds_home", "odds_draw", "odds_away"])
-        w.writeheader()
-        for r in rows_out:
-            w.writerow(r)
+        # 3) tenta odds (pode não retornar no plano)
+        odds = fetch_odds_for_fixture(fixture_id) if fixture_id else None
+        if odds:
+            oh, od, oa = odds
+            found_rows.append([home_name, away_name, oh, od, oa, fixture_id, "api-football"])
+        else:
+            # Não tem odds no plano — não vamos inventar linha; consenso trata a falta.
+            # (Se preferir registrar linha com vazios, descomente abaixo)
+            # found_rows.append([home_name, away_name, "", "", "", fixture_id, "api-football"])
+            pass
 
-    print(f"[apifootball]Arquivo odds_apifootball.csv gerado com {len(rows_out)} jogos encontrados.")
+        # proteção simples contra rate-limit
+        time.sleep(0.2)
+
+    # grava saída (cabeçalho já existe)
+    if found_rows:
+        with open(out_file, "a", encoding="utf-8", newline="") as f:
+            wr = csv.writer(f)
+            for r in found_rows:
+                wr.writerow(r)
+        print(f"[apifootball]Arquivo odds_apifootball.csv gerado com {len(found_rows)} jogos encontrados.")
+    else:
+        print("[apifootball]Arquivo odds_apifootball.csv gerado com 0 jogos encontrados.")
+
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except requests.HTTPError as e:
+        print(f"[apifootball][ERROR] HTTP {e.response.status_code} — {e}", file=sys.stderr)
+        sys.exit(0)  # não quebrar o workflow; deixamos arquivo só com cabeçalho
+    except Exception as e:
+        print(f"[apifootball][ERROR] {e}", file=sys.stderr)
+        sys.exit(0)  # idem
