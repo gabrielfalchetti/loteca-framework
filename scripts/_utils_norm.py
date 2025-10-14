@@ -1,118 +1,185 @@
-# scripts/_utils_norm.py
-# utilitários de normalização e matching de nomes de times (PT/EN)
+# _utils_norm.py
+# Utilidades compartilhadas para normalização de nomes de times / matching de aliases
 
 from __future__ import annotations
-import re
 import json
-import unicodedata
-from typing import Iterable, Tuple, Dict, Any, Optional
-from unidecode import unidecode
-from difflib import SequenceMatcher
+import re
+from typing import Iterable, Tuple, Optional, Any, Dict
 
-# tokens “ruído” que não ajudam no match
-STOP_TOKENS = {
-    "fc","acf","aec","ac","sc","ec","afc","club","clube","athletic","athletico",
-    "de","da","do","dos","as","esporte","sport","futebol","associacao","associação",
-    "football","f.c.","a.f.c.","s.c.","e.c.","cf","c.f."
+from unidecode import unidecode
+try:
+    # rapidfuzz é rápido e robusto; se não estiver disponível, caímos para uma no-op simples
+    from rapidfuzz import fuzz, process
+    _HAS_RF = True
+except Exception:  # pragma: no cover
+    _HAS_RF = False
+
+
+# Palavras pouco informativas que podem ser descartadas ao gerar a "chave" de tokens
+_STOPWORDS = {
+    "fc", "sc", "ec", "ac", "afc", "cf", "clube", "club", "futebol", "football",
+    "u23", "sub23", "u20", "b"
 }
 
-# mapeia sufixos/UFs e anotações comuns para remover
-UF_PAT = re.compile(r"\b\(?[a-z]{2}\)?\b", re.IGNORECASE)  # (SP), -PR etc (depois de higienizar)
-PARENS_PAT = re.compile(r"\([^)]*\)")
-PUNCT_PAT = re.compile(r"[^\w\s]+")
+_ws = re.compile(r"\s+")
 
-REPLACERS = [
-    (r"atl[. ]*goianiense", "atletico goianiense"),
-    (r"atl[. ]*mineiro", "atletico mineiro"),
-    (r"athletico", "atletico"),
-    (r"botafogo[- ]*sp|botafogo ribeirao", "botafogo sp"),
-    (r"rem o|remo \(pa\)", "remo"),
-    (r"paysandu/remo|paysandu vs remo", "paysandu remo"),
-    (r"chapecoense.*", "chapecoense"),
-]
+def _clean_ascii(s: str) -> str:
+    s = unidecode(str(s)).lower()
+    # troca qualquer coisa não alfanumérica por espaço
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    s = _ws.sub(" ", s).strip()
+    return s
 
-def basic_clean(s: str) -> str:
-    if not s:
+def token_key(name: str) -> str:
+    """
+    Reduz o nome a uma chave canônica baseada em tokens (ascii, minúsculo, sem stopwords).
+    Ex.: "Atlético-GO" -> "atletico go"; "Botafogo-SP" -> "botafogo sp"
+    """
+    base = _clean_ascii(name)
+    tokens = [t for t in base.split() if t and t not in _STOPWORDS]
+    return " ".join(tokens)
+
+
+# Mapas de aliases -> canônico (já em forma token_key)
+# Atenção: a chave e o valor são *sem acento* e *minúsculos*
+_ALIAS_CANON: Dict[str, str] = {
+    # BR times/state hints
+    "athletico pr": "athletico-pr",
+    "athletico paranaense": "athletico-pr",
+    "atletico pr": "athletico-pr",
+    "atletico paranaense": "athletico-pr",
+    "atletico pr paranaense": "athletico-pr",
+    "atletico-pr": "athletico-pr",
+
+    "botafogo sp": "botafogo-sp",
+    "botafogo sao paulo": "botafogo-sp",
+    "botafogo-sp": "botafogo-sp",
+
+    "ferroviaria": "ferroviaria",
+    "ferroviaria sp": "ferroviaria",
+
+    "paysandu": "paysandu",
+    "paysandu pa": "paysandu",
+
+    "remo": "remo",
+    "remo pa": "remo",
+
+    "avai": "avai",
+    "avai sc": "avai",
+
+    "chapecoense": "chapecoense",
+    "chapecoense sc": "chapecoense",
+
+    "crb": "crb",
+    "crb al": "crb",
+
+    "volta redonda": "volta redonda",
+    "volta redonda rj": "volta redonda",
+
+    "atletico go": "atletico-go",
+    "atletico goianiense": "atletico-go",
+    "atletico goiania": "atletico-go",
+    "atletico-go": "atletico-go",
+
+    # Formas comuns sem hífen que queremos padronizar com hífen
+    "botafogo sp fc": "botafogo-sp",
+    "athletico pr fc": "athletico-pr",
+}
+
+# Para facilitar, também aceitamos as chaves com hífen transformadas em token_key
+for v in list(_ALIAS_CANON.values()):
+    _ALIAS_CANON.setdefault(token_key(v), v)
+
+
+def _postformat(canon: str) -> str:
+    """
+    Aplica formatação final amigável (hífens onde esperamos).
+    Entradas e saídas são SEM acentos.
+    """
+    # já armazenamos os canônicos no formato desejado
+    return canon
+
+
+def norm_name(name: str) -> str:
+    """
+    Normaliza o nome do time para um canônico estável.
+    - remove acentos, caixa, pontuação
+    - aplica mapa de aliases
+    - devolve no formato final (ex.: 'athletico-pr', 'botafogo-sp', 'atletico-go')
+    """
+    if not name:
         return ""
-    s = unidecode(s).lower().strip()
-    s = PARENS_PAT.sub(" ", s)
-    s = s.replace("-", " ").replace("/", " ")
-    s = PUNCT_PAT.sub(" ", s)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+    key = token_key(name)
+    canon = _ALIAS_CANON.get(key, key)
+    return _postformat(canon)
 
-def strip_uf(s: str) -> str:
-    # remove UF solto: “sp”, “pr”, etc, quando sozinho como token final
-    toks = s.split()
-    if toks and len(toks[-1]) == 2 and toks[-1].isalpha():
-        toks = toks[:-1]
-    return " ".join(toks)
 
-def apply_replacers(s: str) -> str:
-    out = s
-    for pat, rep in REPLACERS:
-        out = re.sub(pat, rep, out)
-    return out
-
-def norm_name(s: str) -> str:
+def best_match(query: str, population: Iterable[str], score_cutoff: int = 86) -> Tuple[Optional[str], int]:
     """
-    Normalização agressiva: remove acentos, pontuação, UF, conectores irrelevantes.
+    Faz o melhor matching de 'query' contra uma lista de candidatos usando os nomes NORMALIZADOS.
+    Retorna (candidato_original, score). Se nada atingir score_cutoff, retorna (None, 0).
     """
-    s = basic_clean(s)
-    s = apply_replacers(s)
-    s = strip_uf(s)
-    # remove tokens de pouco valor
-    toks = [t for t in s.split() if t not in STOP_TOKENS]
-    return " ".join(toks).strip()
+    qn = norm_name(query)
+    pop = list(population)  # manter referência aos originais
+    if not pop:
+        return None, 0
 
-def token_key(s: str) -> str:
-    """chave de comparação: tokens únicos ordenados"""
-    toks = sorted(set(norm_name(s).split()))
-    return " ".join(toks)
+    # Primeiro, tente igualdades exatas após normalização
+    canon_map = {}
+    for p in pop:
+        pn = norm_name(p)
+        canon_map.setdefault(pn, []).append(p)
 
-def token_jaccard(a: str, b: str) -> float:
-    ta, tb = set(norm_name(a).split()), set(norm_name(b).split())
-    if not ta or not tb:
-        return 0.0
-    inter = len(ta & tb)
-    union = len(ta | tb)
-    return inter / union if union else 0.0
+    if qn in canon_map:
+        # empate? devolve o mais curto/limpo
+        choices = sorted(canon_map[qn], key=lambda s: (len(s), s))
+        return choices[0], 100
 
-def seq_ratio(a: str, b: str) -> float:
-    return SequenceMatcher(None, token_key(a), token_key(b)).ratio()
+    # Fallback: fuzzy
+    if _HAS_RF:
+        # Avaliamos sobre as *formas normalizadas*, mas preservamos o original
+        norm2orig = {norm_name(p): p for p in pop}
+        choices_norm = list(norm2orig.keys())
+        # token_sort_ratio é estável para nomes com ordem similar
+        res = process.extractOne(
+            qn, choices_norm,
+            scorer=fuzz.token_sort_ratio,
+            score_cutoff=score_cutoff
+        )
+        if res:
+            best_norm, score, _ = res
+            return norm2orig[best_norm], int(score)
+    else:  # fallback super simples
+        for p in pop:
+            if norm_name(p) == qn:
+                return p, 100
 
-def score_names(a: str, b: str) -> float:
-    """
-    score final [0..1] combinando jaccard + sequence ratio.
-    Dá mais peso a Jaccard (tokens corrigem inversões).
-    """
-    j = token_jaccard(a, b)
-    r = seq_ratio(a, b)
-    return 0.65 * j + 0.35 * r
+    return None, 0
 
-def best_match(observed: str, candidates: Iterable[Tuple[str,int]], min_score: float = 0.88) -> Tuple[Optional[int], float, Optional[str]]:
-    """
-    candidates: iterável de (nome_canon, team_id)
-    retorna (team_id, score, nome_canon) com melhor score acima do limiar
-    """
-    best = (None, 0.0, None)
-    for canon, tid in candidates:
-        sc = score_names(observed, canon)
-        if sc > best[1]:
-            best = (tid, sc, canon)
-    if best[1] >= min_score:
-        return best
-    return (None, best[1], best[2])
 
-def load_json(path: str) -> Dict[str, Any]:
+# Pequenos helpers para JSON
+def load_json(path: str, default: Any = None) -> Any:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {}
+        return {} if default is None else default
 
-def dump_json(path: str, obj: Dict[str, Any]) -> None:
-    import os
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+def dump_json(obj: Any, path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+# Debug rápido
+if __name__ == "__main__":  # pragma: no cover
+    samples = [
+        "Atlético-GO", "Atletico Goianiense", "Atletico-GO",
+        "Athletico-PR", "Atlético Paranaense", "Atletico PR",
+        "Botafogo-SP", "Botafogo SP FC",
+        "Ferroviária", "Ferroviaria SP",
+        "Paysandu (PA)", "Remo (PA)",
+        "Volta Redonda-RJ", "CRB-AL", "Avaí-SC", "Chapecoense-SC",
+    ]
+    for s in samples:
+        print(f"{s:25s} -> {norm_name(s)}  | key={token_key(s)}")
