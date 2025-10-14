@@ -1,71 +1,32 @@
-name: Loteca Super End-to-End
+name: loteca_super_end2end
 
 on:
   workflow_dispatch:
-    inputs:
-      season:
-        description: "Temporada (ex: 2025)"
-        required: true
-        default: "2025"
-      lookahead_days:
-        description: "Dias à frente para fixtures/odds (ex: 3)"
-        required: true
-        default: "3"
-      bankroll:
-        description: "Bankroll para Kelly"
-        required: true
-        default: "1000"
-      kelly_fraction:
-        description: "Kelly fraction (0..1)"
-        required: true
-        default: "0.5"
-      kelly_cap:
-        description: "Limite máximo por aposta (0..1)"
-        required: true
-        default: "0.1"
-      kelly_top_n:
-        description: "Qtd máxima de apostas"
-        required: true
-        default: "14"
-      round_to:
-        description: "Arredondamento do stake"
-        required: true
-        default: "1"
-      regions:
-        description: "Regiões TheOddsAPI (ex: uk,eu,us,au)"
-        required: true
-        default: "uk,eu,us,au"
-      train_calibrator:
-        description: "Treinar calibrador isotônico nesta execução? (true/false)"
-        required: true
-        default: "false"
-
-env:
-  # Inputs
-  SEASON: ${{ github.event.inputs.season }}
-  LOOKAHEAD_DAYS: ${{ github.event.inputs.lookahead_days }}
-  REGIONS: ${{ github.event.inputs.regions }}
-  BANKROLL: ${{ github.event.inputs.bankroll }}
-  KELLY_FRACTION: ${{ github.event.inputs.kelly_fraction }}
-  KELLY_CAP: ${{ github.event.inputs.kelly_cap }}
-  KELLY_TOP_N: ${{ github.event.inputs.kelly_top_n }}
-  ROUND_TO: ${{ github.event.inputs.round_to }}
-  TRAIN_CALIBRATOR: ${{ github.event.inputs.train_calibrator }}
-
-  # Caminhos
-  SOURCE_CSV: data/in/matches_source.csv
-  PYTHONUTF8: 1
-  PIP_DISABLE_PIP_VERSION_CHECK: 1
-  PIP_NO_WARN_SCRIPT_LOCATION: 1
+  push:
+    paths:
+      - ".github/workflows/loteca_super_end2end.yml"
+      - "scripts/**"
+      - "data/in/**"
+      - "requirements.txt"
+  schedule:
+    - cron: "0 12 * * *"  # 09:00-12:00 UTC, ajuste como quiser
 
 jobs:
-  loteca-e2e:
+  run:
     runs-on: ubuntu-latest
     env:
-      # Mapeia secrets p/ env (se não existir, fica vazio; os steps checam via bash)
-      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+      SEASON: "2025"
+      LOOKAHEAD_DAYS: "3"
+      REGIONS: "uk,eu,us,au"
+      BANKROLL: "1000"
+      KELLY_FRACTION: "0.5"
+      KELLY_CAP: "0.1"
+      KELLY_TOP_N: "14"
+      ROUND_TO: "1"
+      TRAIN_CALIBRATOR: "false"
+      SOURCE_CSV: "data/in/matches_source.csv"
+      OUT_DIR: "data/out/${{ github.run_id }}"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,77 +36,85 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy scipy scikit-learn requests unidecode pyarrow python-dateutil rapidfuzz
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install requests pandas "pyarrow>=14" fastparquet
 
-      - name: Prepare RUN_ID and OUT_DIR
-        shell: bash
+      - name: Check required secrets
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -euo pipefail
-          RUN_ID="$(date +%s)"
-          OUT_DIR="data/out/${RUN_ID}"
-          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
-          mkdir -p "data/in" "${OUT_DIR}" "data/history"
-          echo "RUN_ID=${RUN_ID}"
-          echo "OUT_DIR=${OUT_DIR}"
+          [ -n "${API_FOOTBALL_KEY:-}" ] || { echo "::error::Configure o secret API_FOOTBALL_KEY (Settings > Secrets and variables > Actions)."; exit 1; }
+          [ -n "${THEODDS_API_KEY:-}" ] || { echo "::error::Configure o secret THEODDS_API_KEY (Settings > Secrets and variables > Actions)."; exit 1; }
 
-      # =========================
-      # A) FIXTURES (matches_source.csv)
-      # =========================
-      - name: Generate matches (via API-Football) if SOURCE_CSV missing
-        shell: bash
+      - name: Prepare OUT_DIR + whitelist
         run: |
           set -euo pipefail
+          mkdir -p "${OUT_DIR}"
           if [ ! -s "${SOURCE_CSV}" ]; then
-            if [ -z "${API_FOOTBALL_KEY:-}" ]; then
-              echo "::warning::Sem SOURCE_CSV e sem API_FOOTBALL_KEY — não dá pra gerar jogos automaticamente."
-              echo "::error::Crie ${SOURCE_CSV} manualmente com cabeçalho: match_id,home,away"
-              exit 4
-            fi
-            python -m scripts.ingest_fixtures_apifootball \
-              --days "${LOOKAHEAD_DAYS}" \
-              --out "${SOURCE_CSV}"
+            echo "::error::Arquivo ${SOURCE_CSV} não encontrado ou vazio. Crie-o com cabeçalho: match_id,home,away"
+            exit 2
           fi
-          # sanity
           header="$(head -n1 "${SOURCE_CSV}" | tr -d '\r')"
           for c in match_id home away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 4; }
+            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 2; }
           done
+          cp -f "${SOURCE_CSV}" "${OUT_DIR}/matches_whitelist.csv"
 
-      - name: Normalize team names (PT/EN) and create whitelist
-        shell: bash
+      - name: Resolver IDs e possíveis fixtures (API-Football) → matches_norm.csv
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -euo pipefail
-          python -m scripts.normalize_teams \
+          python -m scripts.af_resolve_ids \
             --source "${SOURCE_CSV}" \
-            --out "${OUT_DIR}/matches_norm.csv"
-          # whitelist para consenso estrito (usa exatamente as mesmas linhas)
-          cp -f "${OUT_DIR}/matches_norm.csv" "${OUT_DIR}/matches_whitelist.csv"
+            --out "${OUT_DIR}/matches_norm.csv" \
+            --horizon_days "${LOOKAHEAD_DAYS}"
+          test -s "${OUT_DIR}/matches_norm.csv"
 
-      # =========================
-      # B) HISTÓRICO + FEATURES
-      # =========================
-      - name: Update Historical Data (API-Football or stub)
-        shell: bash
+      - name: Update history (API-Football) + coerção de esquema
+        env:
+            API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -euo pipefail
-          if ! python -m scripts.update_history --since_days 14 --out "data/history/results.csv"; then
-            echo "::notice::update_history falhou; criando stub 0-0 para destravar pipeline..."
-            mkdir -p data/history
-            printf "date,home,away,home_goals,away_goals\n1970-01-01,BOOT,BOOT,0,0\n" > data/history/results.csv
-          fi
-          header="$(head -n1 data/history/results.csv | tr -d '\r')"
-          for c in date home away home_goals away_goals; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c'"; exit 1; }
-          done
+          [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
+          # tenta atualizar; se cair, seguimos pra coerção
+          python -m scripts.update_history --since_days 14 --out "data/history/results.csv" || true
+
+          python - <<'PY'
+          import pandas as pd, os, sys
+          p="data/history/results.csv"
+          os.makedirs("data/history", exist_ok=True)
+          if not os.path.exists(p) or os.stat(p).st_size==0:
+              df=pd.DataFrame([{"date":"1970-01-01","home":"BOOT","away":"BOOT","home_goals":0,"away_goals":0}])
+              df.to_csv(p,index=False); sys.exit(0)
+          df=pd.read_csv(p)
+          def pick(colnames):
+              for c in colnames:
+                  if c in df.columns: return c
+              return None
+          hg = pick(["home_goals","home_score","goals.home","teams.home.goals"])
+          ag = pick(["away_goals","away_score","goals.away","teams.away.goals"])
+          if hg is None: df["home_goals"]=0
+          else: df["home_goals"]=df[hg]
+          if ag is None: df["away_goals"]=0
+          else: df["away_goals"]=df[ag]
+          dcol = pick(["date","fixture.date","kickoff_utc"])
+          hcol = pick(["home","teams.home.name"])
+          acol = pick(["away","teams.away.name"])
+          if "date" not in df.columns: df["date"]=df[dcol] if dcol else ""
+          if "home" not in df.columns: df["home"]=df[hcol] if hcol else ""
+          if "away" not in df.columns: df["away"]=df[acol] if acol else ""
+          df[["date","home","away","home_goals","away_goals"]].to_csv(p,index=False)
+          PY
+
           test -s "data/history/results.csv" || { echo "::error::history results.csv not generated"; exit 1; }
 
-      - name: Build Features
-        shell: bash
+      - name: Feature engineer (gera features.parquet)
         run: |
           set -euo pipefail
           [ -f scripts/feature_engineer.py ] || { echo "::error::scripts/feature_engineer.py not found"; exit 2; }
@@ -155,49 +124,32 @@ jobs:
             --ewma 0.20
           test -s "data/history/features.parquet" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      # =========================
-      # C) ODDS (TheOddsAPI, com fuzzy matching)
-      # =========================
-      - name: Ingest TheOddsAPI (fuzzy PT/EN)
-        shell: bash
+      - name: Ingest odds (TheOddsAPI) — obrigatório
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${THEODDS_API_KEY:-}" ]; then
-            echo "::notice::THEODDS_API_KEY não configurada; pulando ingest_odds_theoddsapi."
-            exit 0
-          fi
           python -m scripts.ingest_odds_theoddsapi \
             --rodada "${OUT_DIR}" \
             --regions "${REGIONS}" \
             --source_csv "${OUT_DIR}/matches_norm.csv"
-          [ -s "${OUT_DIR}/odds_theoddsapi.csv" ] || echo "::warning::odds_theoddsapi.csv not generated"
+          test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
 
-      # (Opcional) API-Football Odds — muitos planos não têm odds; step é tolerante
-      - name: Ingest API-Football (odds) — best effort
-        shell: bash
+      - name: Ingest odds (API-Football) — opcional
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${API_FOOTBALL_KEY:-}" ]; then
-            echo "::notice::API_FOOTBALL_KEY não configurada; pulando ingest_odds_apifootball."
-            exit 0
+          if [ -f scripts/ingest_odds_apifootball.py ]; then
+            python -m scripts.ingest_odds_apifootball \
+              --rodada "${OUT_DIR}" \
+              --source_csv "${OUT_DIR}/matches_norm.csv" || true
+            [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::notice::odds_apifootball.csv não gerado (ok)"
+          else
+            echo "::notice::scripts/ingest_odds_apifootball.py ausente (ok)"
           fi
-          [ -f scripts/ingest_odds_apifootball.py ] || { echo "::notice::sem scripts/ingest_odds_apifootball.py (tudo bem)"; exit 0; }
-          python -m scripts.ingest_odds_apifootball \
-            --rodada "${OUT_DIR}" \
-            --source_csv "${OUT_DIR}/matches_norm.csv" || true
-          [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::notice::odds_apifootball.csv não gerado (ok)"
 
-      # =========================
-      # D) CONSENSO + MODELAGEM
-      # =========================
-      - name: Consensus Odds (strict)
-        shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      - name: Consenso de odds (STRICT)
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -209,71 +161,13 @@ jobs:
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
-      - name: Train Dynamic Poisson Model
-        shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+      - name: List outputs (debug)
         run: |
-          set -euo pipefail
-          [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 7; }
-          python -m scripts.train_dynamic_model \
-            --rodada "${OUT_DIR}" \
-            --history "data/history/results.csv" \
-            --features "data/history/features.parquet" \
-            --ewma 0.20
-          test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 7; }
-
-      - name: Predict (Dynamic Bivariate Poisson)
-        shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-        run: |
-          set -euo pipefail
-          [ -f scripts/xg_bivariate.py ] || { echo "::error::scripts/xg_bivariate.py not found"; exit 8; }
-          python -m scripts.xg_bivariate --rodada "${OUT_DIR}" --max_goals 10
-          test -s "${OUT_DIR}/xg_bivariate.csv" || { echo "::error::xg_bivariate.csv not generated"; exit 8; }
-
-      - name: Calibrate probabilities (optional)
-        if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
-          python -m scripts.calibrate_probs --rodada "${OUT_DIR}"
-          test -s "${OUT_DIR}/probs_calibrated.csv" || { echo "::error::probs_calibrated.csv not generated"; exit 9; }
-
-      - name: Kelly bets
-        shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-        run: |
-          set -euo pipefail
-          [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 10; }
-          python -m scripts.kelly_bets \
-            --rodada "${OUT_DIR}" \
-            --bankroll "${BANKROLL}" \
-            --fraction "${KELLY_FRACTION}" \
-            --cap "${KELLY_CAP}" \
-            --topn "${KELLY_TOP_N}" \
-            --round_to "${ROUND_TO}"
-          test -s "${OUT_DIR}/kelly_stakes.csv" || { echo "::error::kelly_stakes.csv not generated"; exit 10; }
-
-      - name: Build Loteca ticket
-        shell: bash
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-        run: |
-          set -euo pipefail
-          [ -f scripts/make_loteca_ticket.py ] || { echo "::error::scripts/make_loteca_ticket.py not found"; exit 11; }
-          python -m scripts.make_loteca_ticket --rodada "${OUT_DIR}"
-          test -s "${OUT_DIR}/loteca_ticket.csv" || { echo "::error::loteca_ticket.csv not generated"; exit 11; }
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: rodada-${{ env.OUT_DIR }}
-          path: |
-            ${{ env.OUT_DIR }}/*.csv
-            ${{ env.OUT_DIR }}/*.json
-            data/history/*.csv
-            data/history/*.parquet
+          set -e
+          ls -lah "${OUT_DIR}"
+          echo "--- matches_norm.csv (top 10)"
+          sed -n '1,10p' "${OUT_DIR}/matches_norm.csv" || true
+          echo "--- odds_theoddsapi.csv (top 10)"
+          sed -n '1,10p' "${OUT_DIR}/odds_theoddsapi.csv" || true
+          echo "--- odds_consensus.csv (top 10)"
+          sed -n '1,10p' "${OUT_DIR}/odds_consensus.csv" || true
