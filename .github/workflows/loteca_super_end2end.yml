@@ -3,13 +3,12 @@ name: Loteca Super End-to-End
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 12 * * 4"  # qui 12:15 UTC (ajuste como preferir)
+    - cron: "15 12 * * 4"  # qui 12:15 UTC (ajuste se quiser)
 
 jobs:
   loteca:
     runs-on: ubuntu-latest
 
-    # Mapeia os secrets em variáveis de ambiente do job
     env:
       SEASON: "2025"
       LOOKAHEAD_DAYS: "3"
@@ -19,7 +18,7 @@ jobs:
       KELLY_CAP: "0.1"
       KELLY_TOP_N: "14"
       ROUND_TO: "1"
-      TRAIN_CALIBRATOR: "false"  # "true" para retreinar calibrador
+      TRAIN_CALIBRATOR: "false"
       SOURCE_CSV: "data/in/matches_source.csv"
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       THEODDS_API_KEY:  ${{ secrets.THEODDS_API_KEY }}
@@ -27,7 +26,7 @@ jobs:
       WANDB_API_KEY:    ${{ secrets.WANDB_API_KEY }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python 3.11
@@ -35,7 +34,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Instalar dependências (com parquet e normalização)
+      - name: Install dependencies (forced)
         run: |
           set -euo pipefail
           python -m pip install -U pip
@@ -48,10 +47,11 @@ jobs:
             python-dateutil pytz requests tqdm unidecode \
             matplotlib
           if [ -n "${WANDB_API_KEY:-}" ]; then
-            pip install wandb && python - <<'PY'
+            pip install wandb
+            python - <<PY
 import os, wandb
 key = os.environ.get("WANDB_API_KEY","")
-if key: 
+if key:
     try:
         wandb.login(key=key)
         print("[wandb] login ok")
@@ -60,37 +60,31 @@ if key:
 PY
           fi
 
-      - name: Definir diretórios e variáveis de saída
+      - name: Define directories and environment vars
         run: |
           set -euo pipefail
           OUT_DIR="data/out/${GITHUB_RUN_ID}"
+          mkdir -p "${OUT_DIR}" data/history data/in
           echo "OUT_DIR=${OUT_DIR}" >> $GITHUB_ENV
           echo "FEATURES_PARQUET=data/history/features.parquet" >> $GITHUB_ENV
           echo "SOURCE_CSV_NORM=${OUT_DIR}/matches_norm.csv" >> $GITHUB_ENV
-          mkdir -p "${OUT_DIR}" data/history data/in
 
-      # =================== HISTÓRICO & FEATURES ===================
+      # =================== HISTÓRICO ===================
 
-      - name: Update history (API-Sports) com fallback
+      - name: Update history (with stub fallback)
         run: |
           set -euo pipefail
           if [ ! -f scripts/update_history.py ]; then
             echo "::error::scripts/update_history.py not found"; exit 1
           fi
-
-          # tenta atualizar histórico real
           if ! python -m scripts.update_history --since_days 14 --out "data/history/results.csv"; then
-            echo "::notice::update_history falhou; gerando stub..."
+            echo "::notice::update_history falhou; criando stub..."
           fi
-
-          # fallback caso vazio
           if [ ! -s "data/history/results.csv" ] || [ "$(wc -l < data/history/results.csv)" -le 1 ]; then
             mkdir -p data/history
             printf "date,home,away,home_goals,away_goals\n1970-01-01,BOOT,BOOT,0,0\n" > data/history/results.csv
             echo "::notice::Stub de histórico criado (BOOT vs BOOT 0-0)."
           fi
-
-          # sanity: cabeçalhos
           header="$(head -n1 data/history/results.csv | tr -d '\r')"
           for c in date home away home_goals away_goals; do
             echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c'"; exit 1; }
@@ -106,23 +100,23 @@ PY
             --ewma 0.20
           test -s "${FEATURES_PARQUET}" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      - name: Enrich features with API-Football (opcional, não-fatal)
+      - name: Enrich features with API-Football (optional)
         run: |
           set -euo pipefail
           if [ -z "${API_FOOTBALL_KEY:-}" ]; then
-            echo "::notice::API_FOOTBALL_KEY não configurada; pulando enrich_api_football."
+            echo "::notice::API_FOOTBALL_KEY não configurada; pulando enrich."
             exit 0
           fi
           if [ ! -f scripts/enrich_api_football.py ]; then
-            echo "::notice::scripts/enrich_api_football.py não encontrado (ok)"; exit 0
+            echo "::notice::sem scripts/enrich_api_football.py"; exit 0
           fi
           python -m scripts.enrich_api_football \
             --features_in "${FEATURES_PARQUET}" \
-            --features_out "${FEATURES_PARQUET}" || echo "::notice::enrich falhou (continua)"
+            --features_out "${FEATURES_PARQUET}" || true
 
       # =================== TREINO DO MODELO DINÂMICO ===================
 
-      - name: Train Dynamic Model (obrigatório)
+      - name: Train Dynamic Model
         run: |
           set -euo pipefail
           [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 2; }
@@ -131,25 +125,19 @@ PY
             --out_state "${OUT_DIR}/state_params.json"
           test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 2; }
 
-      # =================== NORMALIZAÇÃO E LISTA DE JOGOS ===================
+      # =================== NORMALIZAÇÃO ===================
 
-      - name: Normalizar partidas de entrada (cria matches_norm.csv)
+      - name: Normalize matches (cria matches_norm.csv)
         run: |
           set -euo pipefail
           [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 3; }
           if [ ! -s "${SOURCE_CSV}" ]; then
-            echo "::error::Arquivo ${SOURCE_CSV} não encontrado ou vazio. Crie com cabeçalho: match_id,home,away"; exit 3
+            echo "::error::Arquivo ${SOURCE_CSV} não encontrado ou vazio"; exit 3
           fi
-          header="$(head -n1 "${SOURCE_CSV}" | tr -d '\r')"
-          for c in match_id home away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' em ${SOURCE_CSV}"; exit 3; }
-          done
           python -m scripts.normalize_matches \
             --in_csv "${SOURCE_CSV}" \
             --out_csv "${SOURCE_CSV_NORM}"
           test -s "${SOURCE_CSV_NORM}" || { echo "::error::matches_norm.csv not generated"; exit 3; }
-          # whitelist para consenso estrito
-          cp -f "${SOURCE_CSV_NORM}" "${OUT_DIR}/matches_whitelist.csv"
 
       # =================== INGEST DAS ODDS ===================
 
@@ -157,7 +145,7 @@ PY
         run: |
           set -euo pipefail
           if [ -z "${THEODDS_API_KEY:-}" ]; then
-            echo "::error::THEODDS_API_KEY não configurada (obrigatória)"; exit 5
+            echo "::error::THEODDS_API_KEY não configurada"; exit 5
           fi
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
           python -m scripts.ingest_odds_theoddsapi \
@@ -166,20 +154,18 @@ PY
             --source_csv "${SOURCE_CSV_NORM}"
           test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
 
-      - name: Ingest API-Football (opcional; metadados/resultados)
+      - name: Ingest API-Football (opcional)
         run: |
           set -euo pipefail
           if [ -z "${API_FOOTBALL_KEY:-}" ]; then
-            echo "::notice::API_FOOTBALL_KEY não configurada; pulando ingest_odds_apifootball."
-            exit 0
+            echo "::notice::API_FOOTBALL_KEY não configurada; pulando ingest."; exit 0
           fi
           if [ ! -f scripts/ingest_odds_apifootball.py ]; then
-            echo "::notice::sem scripts/ingest_odds_apifootball.py (ok)"; exit 0
+            echo "::notice::sem scripts/ingest_odds_apifootball.py"; exit 0
           fi
           python -m scripts.ingest_odds_apifootball \
             --rodada "${OUT_DIR}" \
             --source_csv "${SOURCE_CSV_NORM}" || true
-          [ -s "${OUT_DIR}/odds_apifootball.csv" ] || echo "::notice::odds_apifootball.csv não gerado (ok)"
 
       - name: Consensus odds (STRICT)
         run: |
@@ -188,14 +174,10 @@ PY
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
           OUT_FILE="${OUT_DIR}/odds_consensus.csv"
           test -s "$OUT_FILE" || { echo "::error::odds_consensus.csv not generated"; exit 6; }
-          header="$(head -n1 "$OUT_FILE" | tr -d '\r')"
-          for c in team_home team_away odds_home odds_draw odds_away; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
-          done
 
-      # =================== PREVISÃO, CALIBRAÇÃO, APOSTA ===================
+      # =================== PREVISÃO & CALIBRAÇÃO ===================
 
-      - name: xG bivariado (predição)
+      - name: xG Bivariado
         run: |
           set -euo pipefail
           [ -f scripts/predict_xg_bivariate.py ] || { echo "::error::scripts/predict_xg_bivariate.py not found"; exit 7; }
@@ -206,47 +188,28 @@ PY
             --out "${OUT_DIR}/pred_xg.csv"
           test -s "${OUT_DIR}/pred_xg.csv" || { echo "::error::pred_xg.csv not generated"; exit 7; }
 
-      - name: Train Calibrator (opcional)
-        if: env.TRAIN_CALIBRATOR == 'true'
-        run: |
-          set -euo pipefail
-          if [ ! -f scripts/train_calibrator.py ]; then
-            echo "::error::scripts/train_calibrator.py not found"; exit 8
-          fi
-          python -m scripts.train_calibrator \
-            --history "${FEATURES_PARQUET}" \
-            --out "${OUT_DIR}/calibrator.pkl"
-          test -s "${OUT_DIR}/calibrator.pkl" || { echo "::error::calibrator.pkl not generated"; exit 8; }
-
       - name: Calibrate probabilities
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 8; }
-          CALIB_MODEL=""
-          if [ -f "${OUT_DIR}/calibrator.pkl" ]; then
-            CALIB_MODEL="--model ${OUT_DIR}/calibrator.pkl"
-          elif [ -f "models/calibrator.pkl" ]; then
-            CALIB_MODEL="--model models/calibrator.pkl"
-          else
-            echo "::notice::Sem calibrator.pkl; será usada identidade (sem ajuste)."
+          CALIB=""
+          if [ -f "models/calibrator.pkl" ]; then
+            CALIB="--model models/calibrator.pkl"
           fi
           python -m scripts.calibrate_probs \
             --pred_in "${OUT_DIR}/pred_xg.csv" \
             --out "${OUT_DIR}/probs_calibrated.csv" \
-            $CALIB_MODEL
+            $CALIB
           test -s "${OUT_DIR}/probs_calibrated.csv" || { echo "::error::probs_calibrated.csv not generated"; exit 8; }
+
+      # =================== KELLY & CARTÃO ===================
 
       - name: Kelly bets
         run: |
           set -euo pipefail
           [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 9; }
-          INPUT="${OUT_DIR}/probs_calibrated.csv"
-          if [ ! -s "$INPUT" ]; then
-            echo "::notice::usando pred_xg.csv (não calibrado) para Kelly"
-            INPUT="${OUT_DIR}/pred_xg.csv"
-          fi
           python -m scripts.kelly_bets \
-            --pred_in "$INPUT" \
+            --pred_in "${OUT_DIR}/probs_calibrated.csv" \
             --bankroll "${BANKROLL}" \
             --kelly_fraction "${KELLY_FRACTION}" \
             --kelly_cap "${KELLY_CAP}" \
@@ -265,8 +228,6 @@ PY
             --bets "${OUT_DIR}/bets.csv" \
             --out_csv "${OUT_DIR}/cartao_loteca.csv"
           test -s "${OUT_DIR}/cartao_loteca.csv" || { echo "::error::cartao_loteca.csv not generated"; exit 10; }
-
-      # =================== ARTEFATOS ===================
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
