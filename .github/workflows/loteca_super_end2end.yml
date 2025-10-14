@@ -21,9 +21,9 @@ jobs:
       TRAIN_CALIBRATOR: "false"
       SOURCE_CSV: "data/in/matches_source.csv"
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-      THEODDS_API_KEY:  ${{ secrets.THEODDS_API_KEY }}
-      X_RAPIDAPI_KEY:   ${{ secrets.X_RAPIDAPI_KEY }}
-      WANDB_API_KEY:    ${{ secrets.WANDB_API_KEY }}
+      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      X_RAPIDAPI_KEY: ${{ secrets.X_RAPIDAPI_KEY }}
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
 
     steps:
       - name: Checkout repository
@@ -34,21 +34,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (no-heredoc)
+      - name: Install dependencies (safe)
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install -U pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
-          pip install pandas numpy scipy scikit-learn statsmodels pyarrow fastparquet python-dateutil pytz requests tqdm unidecode matplotlib
-          if [ -n "${WANDB_API_KEY:-}" ]; then
-            pip install wandb && python -c "import os,wandb; k=os.environ.get('WANDB_API_KEY',''); 
-import sys
-; 
-print('[wandb] skip') if not k else (wandb.login(key=k), print('[wandb] login ok'))"
-          fi
+          pip install pandas numpy scipy scikit-learn statsmodels pyarrow fastparquet python-dateutil pytz requests tqdm unidecode matplotlib wandb
 
-      - name: Define directories and env
+      - name: Define directories and env vars
         shell: bash
         run: |
           set -euo pipefail
@@ -58,95 +52,115 @@ print('[wandb] skip') if not k else (wandb.login(key=k), print('[wandb] login ok
           echo "FEATURES_PARQUET=data/history/features.parquet" >> $GITHUB_ENV
           echo "SOURCE_CSV_NORM=${OUT_DIR}/matches_norm.csv" >> $GITHUB_ENV
 
-      # ============== HISTÓRICO ==============
-
+      # ====================== HISTÓRICO ======================
       - name: Update history (with stub fallback)
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-          python -m scripts.update_history --since_days 14 --out "data/history/results.csv" || echo "::notice::update_history falhou; criando stub..."
-          if [ ! -s "data/history/results.csv" ] || [ "$(wc -l < data/history/results.csv)" -le 1 ]; then
-            mkdir -p data/history
-            printf "date,home,away,home_goals,away_goals\n1970-01-01,BOOT,BOOT,0,0\n" > data/history/results.csv
-            echo "::notice::Stub de histórico criado (BOOT vs BOOT 0-0)."
+          if [ ! -f scripts/update_history.py ]; then
+            echo "::error::scripts/update_history.py not found"
+            exit 1
           fi
-          header="$(head -n1 data/history/results.csv | tr -d '\r')"
-          for c in date home away home_goals away_goals; do
-            echo "$header" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::history sem coluna '$c'"; exit 1; }
-          done
+          python -m scripts.update_history --since_days 14 --out "data/history/results.csv" || echo "::notice::update_history falhou; criando stub..."
+          if [ ! -s "data/history/results.csv" ]; then
+            mkdir -p data/history
+            echo "date,home,away,home_goals,away_goals" > data/history/results.csv
+            echo "1970-01-01,BOOT,BOOT,0,0" >> data/history/results.csv
+          fi
 
-      - name: Feature engineering -> features.parquet
+      - name: Feature engineering
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/feature_engineer.py ] || { echo "::error::scripts/feature_engineer.py not found"; exit 2; }
+          [ -f scripts/feature_engineer.py ] || { echo "::error::feature_engineer.py not found"; exit 2; }
           python -m scripts.feature_engineer --history "data/history/results.csv" --out "${FEATURES_PARQUET}" --ewma 0.20
           test -s "${FEATURES_PARQUET}" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      - name: Enrich features with API-Football (optional)
+      # ====================== ENRICH API-FOOTBALL ======================
+      - name: Enrich features with API-Football (matches, injuries, stats)
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${API_FOOTBALL_KEY:-}" ]; then echo "::notice::API_FOOTBALL_KEY não configurada; pulando enrich."; exit 0; fi
-          if [ ! -f scripts/enrich_api_football.py ]; then echo "::notice::sem scripts/enrich_api_football.py"; exit 0; fi
-          python -m scripts.enrich_api_football --features_in "${FEATURES_PARQUET}" --features_out "${FEATURES_PARQUET}" || true
+          if [ -z "${API_FOOTBALL_KEY:-}" ]; then
+            echo "::notice::API_FOOTBALL_KEY não configurada; pulando enrich."
+            exit 0
+          fi
+          if [ ! -f scripts/enrich_api_football.py ]; then
+            echo "::notice::sem scripts/enrich_api_football.py"
+            exit 0
+          fi
+          python -m scripts.enrich_api_football \
+            --features_in "${FEATURES_PARQUET}" \
+            --features_out "${FEATURES_PARQUET}" || true
 
-      # ============== TREINO DO MODELO DINÂMICO ==============
-
-      - name: Train Dynamic Model
+      # ====================== TREINAMENTO ======================
+      - name: Train dynamic model (Maher / Kalman)
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 2; }
-          python -m scripts.train_dynamic_model --features "${FEATURES_PARQUET}" --out_state "${OUT_DIR}/state_params.json"
+          [ -f scripts/train_dynamic_model.py ] || { echo "::error::train_dynamic_model.py not found"; exit 2; }
+          python -m scripts.train_dynamic_model \
+            --features "${FEATURES_PARQUET}" \
+            --out_state "${OUT_DIR}/state_params.json"
           test -s "${OUT_DIR}/state_params.json" || { echo "::error::state_params.json not generated"; exit 2; }
 
-      # ============== NORMALIZAÇÃO ==============
-
-      - name: Normalize matches -> matches_norm.csv
+      # ====================== NORMALIZAÇÃO ======================
+      - name: Normalize matches
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 3; }
-          if [ ! -s "${SOURCE_CSV}" ]; then echo "::error::Arquivo ${SOURCE_CSV} não encontrado ou vazio"; exit 3; fi
-          python -m scripts.normalize_matches --in_csv "${SOURCE_CSV}" --out_csv "${SOURCE_CSV_NORM}"
+          [ -f scripts/normalize_matches.py ] || { echo "::error::normalize_matches.py not found"; exit 3; }
+          python -m scripts.normalize_matches \
+            --in_csv "${SOURCE_CSV}" \
+            --out_csv "${SOURCE_CSV_NORM}"
           test -s "${SOURCE_CSV_NORM}" || { echo "::error::matches_norm.csv not generated"; exit 3; }
 
-      # ============== ODDS ==============
-
-      - name: Ingest TheOddsAPI (obrigatório)
+      # ====================== ODDS ======================
+      - name: Ingest TheOddsAPI (main odds)
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${THEODDS_API_KEY:-}" ]; then echo "::error::THEODDS_API_KEY não configurada"; exit 5; fi
-          [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
-          python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --regions "${REGIONS}" --source_csv "${SOURCE_CSV_NORM}"
+          if [ -z "${THEODDS_API_KEY:-}" ]; then
+            echo "::error::THEODDS_API_KEY não configurada"
+            exit 5
+          fi
+          [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::ingest_odds_theoddsapi.py not found"; exit 5; }
+          python -m scripts.ingest_odds_theoddsapi \
+            --rodada "${OUT_DIR}" \
+            --regions "${REGIONS}" \
+            --source_csv "${SOURCE_CSV_NORM}"
           test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
 
-      - name: Ingest API-Football (opcional)
+      - name: Ingest API-Football odds (complementar)
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${API_FOOTBALL_KEY:-}" ]; then echo "::notice::API_FOOTBALL_KEY não configurada; pulando ingest."; exit 0; fi
-          if [ ! -f scripts/ingest_odds_apifootball.py ]; then echo "::notice::sem scripts/ingest_odds_apifootball.py"; exit 0; fi
-          python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV_NORM}" || true
+          if [ -z "${API_FOOTBALL_KEY:-}" ]; then
+            echo "::notice::API_FOOTBALL_KEY não configurada; pulando ingest."
+            exit 0
+          fi
+          if [ ! -f scripts/ingest_odds_apifootball.py ]; then
+            echo "::notice::sem scripts/ingest_odds_apifootball.py"
+            exit 0
+          fi
+          python -m scripts.ingest_odds_apifootball \
+            --rodada "${OUT_DIR}" \
+            --source_csv "${SOURCE_CSV_NORM}" || true
 
-      - name: Consensus odds (STRICT)
+      - name: Consensus odds (multi-source)
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
+          [ -f scripts/consensus_odds_safe.py ] || { echo "::error::consensus_odds_safe.py not found"; exit 6; }
           python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
           test -s "${OUT_DIR}/odds_consensus.csv" || { echo "::error::odds_consensus.csv not generated"; exit 6; }
 
-      # ============== PREVISÃO & CALIBRAÇÃO ==============
-
-      - name: xG Bivariado
+      # ====================== PREVISÃO ======================
+      - name: Predict xG bivariate
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/predict_xg_bivariate.py ] || { echo "::error::scripts/predict_xg_bivariate.py not found"; exit 7; }
+          [ -f scripts/predict_xg_bivariate.py ] || { echo "::error::predict_xg_bivariate.py not found"; exit 7; }
           python -m scripts.predict_xg_bivariate \
             --matches "${SOURCE_CSV_NORM}" \
             --odds "${OUT_DIR}/odds_consensus.csv" \
@@ -154,23 +168,28 @@ print('[wandb] skip') if not k else (wandb.login(key=k), print('[wandb] login ok
             --out "${OUT_DIR}/pred_xg.csv"
           test -s "${OUT_DIR}/pred_xg.csv" || { echo "::error::pred_xg.csv not generated"; exit 7; }
 
+      # ====================== CALIBRAÇÃO ======================
       - name: Calibrate probabilities
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 8; }
+          [ -f scripts/calibrate_probs.py ] || { echo "::error::calibrate_probs.py not found"; exit 8; }
           CALIB=""
-          if [ -f "models/calibrator.pkl" ]; then CALIB="--model models/calibrator.pkl"; fi
-          python -m scripts.calibrate_probs --pred_in "${OUT_DIR}/pred_xg.csv" --out "${OUT_DIR}/probs_calibrated.csv" $CALIB
+          if [ -f "models/calibrator.pkl" ]; then
+            CALIB="--model models/calibrator.pkl"
+          fi
+          python -m scripts.calibrate_probs \
+            --pred_in "${OUT_DIR}/pred_xg.csv" \
+            --out "${OUT_DIR}/probs_calibrated.csv" \
+            $CALIB
           test -s "${OUT_DIR}/probs_calibrated.csv" || { echo "::error::probs_calibrated.csv not generated"; exit 8; }
 
-      # ============== KELLY & CARTÃO ==============
-
+      # ====================== KELLY & CARTÃO ======================
       - name: Kelly bets
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 9; }
+          [ -f scripts/kelly_bets.py ] || { echo "::error::kelly_bets.py not found"; exit 9; }
           python -m scripts.kelly_bets \
             --pred_in "${OUT_DIR}/probs_calibrated.csv" \
             --bankroll "${BANKROLL}" \
@@ -185,7 +204,7 @@ print('[wandb] skip') if not k else (wandb.login(key=k), print('[wandb] login ok
         shell: bash
         run: |
           set -euo pipefail
-          [ -f scripts/montar_cartao_loteca.py ] || { echo "::error::scripts/montar_cartao_loteca.py not found"; exit 10; }
+          [ -f scripts/montar_cartao_loteca.py ] || { echo "::error::montar_cartao_loteca.py not found"; exit 10; }
           python -m scripts.montar_cartao_loteca \
             --matches "${SOURCE_CSV_NORM}" \
             --pred "${OUT_DIR}/probs_calibrated.csv" \
