@@ -3,43 +3,116 @@
 
 import argparse
 import csv
-import json
 import os
-import sys
-import time
 import re
+import sys
 from typing import Dict, List, Tuple, Optional
 
 import requests
 import pandas as pd
 from unidecode import unidecode
 
+API_BASE = "https://api.the-odds-api.com/v4"
 
-# ========================= Utils de normalização =========================
+
+# ========================= Helpers de string =========================
 
 def _slug(s: str) -> str:
     if s is None:
         return ""
     s = unidecode(str(s)).lower()
     s = (
-        s.replace("(", " ")
-         .replace(")", " ")
-         .replace("/", " ")
-         .replace("-", " ")
-         .replace("_", " ")
-         .replace(".", " ")
-         .replace(",", " ")
-         .replace("'", " ")
-         .replace("’", " ")
-         .replace("&", " and ")
+        s.replace("(", " ").replace(")", " ")
+         .replace("/", " ").replace("-", " ")
+         .replace("_", " ").replace(".", " ")
+         .replace(",", " ").replace("'", " ")
+         .replace("’", " ").replace("&", " and ")
     )
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
+def _aliased_names(team: str) -> List[str]:
+    """
+    Retorna uma lista de possíveis nomes (aliases) para casar outcomes/bookmakers.
+    Focado em clubes BR comuns no seu fluxo. Expanda à vontade.
+    """
+    base = unidecode(team).strip()
+    s = _slug(team)
+
+    # mapeamentos por slug
+    BR_ALIASES: Dict[str, List[str]] = {
+        # Paranaense
+        "athletico pr": ["athletico pr", "athletico paranaense", "atletico pr", "athletico-pr", "athletico paranaense pr"],
+        # Goianiense
+        "atletico go": ["atletico go", "atletico goianiense", "atletico-go", "atletico goianiense go"],
+        # Botafogo SP
+        "botafogo sp": ["botafogo sp", "botafogo-sp", "botafogo ribeirao", "botafogo ribeirao preto", "botafogo rp"],
+        # Ferroviária
+        "ferroviaria": ["ferroviaria", "ferroviaria sp", "a e ferroviaria"],
+        # Paysandu
+        "paysandu": ["paysandu", "paysandu pa"],
+        # Remo
+        "remo": ["remo", "remo pa", "clube do remo"],
+        # CRB
+        "crb": ["crb", "crb al", "clube de regatas brasil"],
+        # Chapecoense
+        "chapecoense": ["chapecoense", "chapecoense sc", "a chapecoense"],
+        # Avai
+        "avai": ["avai", "avai sc"],
+        # Volta Redonda
+        "volta redonda": ["volta redonda", "volta redonda rj", "volta redonda fc"],
+        # Atlético-GO grafia com acento
+        "atlético go": ["atletico go", "atlético go", "atletico goianiense", "atlético goianiense"],
+        # Athletico-PR com hífen
+        "athletico pr": ["athletico pr", "athletico-pr", "athletico paranaense", "atletico pr"],
+        # Botafogo-SP com hífen
+        "botafogo sp": ["botafogo sp", "botafogo-sp", "botafogo ribeirao preto"],
+        # Ferroviária com acento
+        "ferroviária": ["ferroviaria", "ferroviária", "ferroviaria sp"],
+        # Avaí com acento
+        "avai": ["avai", "avaí", "avai sc"],
+    }
+
+    # também tratar "paisandu/remo (pa)" que pode aparecer no csv original por engano
+    if "paysandu" in s and "remo" in s:
+        BR_ALIASES.setdefault("paysandu", ["paysandu", "paysandu pa"])
+        BR_ALIASES.setdefault("remo", ["remo", "remo pa"])
+
+    # fallback genérico: variações óbvias
+    generic = {base, team, team.replace("-", " "), team.replace("/", " "), team.replace("(", " ").replace(")", " ")}
+    generic.update({unidecode(x) for x in list(generic)})
+    generic_slugs = { _slug(x) for x in generic }
+
+    aliases = set()
+    aliases.update(generic)
+    for key, vals in BR_ALIASES.items():
+        if _slug(team) == key or _slug(base) == key or (_slug(team) in key) or (key in _slug(team)):
+            aliases.update(vals)
+
+    # garantir versões sem acento e com/sem UF
+    more = set()
+    for a in list(aliases):
+        a0 = unidecode(a)
+        more.add(a0)
+        more.add(a0.replace("-", " "))
+        more.add(a0.replace("/", " "))
+    aliases.update(more)
+
+    # remover vazios, normalizar espaços
+    aliases = { re.sub(r"\s+", " ", x).strip() for x in aliases if x and str(x).strip() }
+
+    return sorted(aliases)
+
+
+def _draw_aliases() -> List[str]:
+    return ["Draw", "Empate", "Tie"]
+
+
+# ========================= Helpers CSV =========================
+
 def pick_home_away_cols(df: pd.DataFrame) -> Tuple[str, str]:
-    # prioriza colunas normalizadas
     lc = {c.lower(): c for c in df.columns}
     home = lc.get("home_norm") or lc.get("home") or lc.get("team_home") or lc.get("mandante")
     away = lc.get("away_norm") or lc.get("away") or lc.get("team_away") or lc.get("visitante")
@@ -58,47 +131,50 @@ def pick_id_col(df: pd.DataFrame) -> str:
     return mid
 
 
-# ========================= TheOddsAPI Client =========================
+# ========================= Clientes TheOddsAPI =========================
 
-API_BASE = "https://api.the-odds-api.com/v4"
-
-def fetch_upcoming_odds(api_key: str, regions: str, sport_key: str = "upcoming", markets: str = "h2h",
-                        odds_format: str = "decimal", date_format: str = "iso", timeout: int = 20) -> List[dict]:
-    """
-    Busca odds de jogos vindouros. Para Soccer em geral, o 'sport_key' 'upcoming' funciona e retorna vários esportes.
-    Alternativamente, você pode usar 'soccer' (mas manteremos 'upcoming' como nos seus logs).
-    """
-    url = f"{API_BASE}/sports/{sport_key}/odds"
-    params = {
-        "apiKey": api_key,
-        "regions": regions,
-        "markets": markets,
-        "oddsFormat": odds_format,
-        "dateFormat": date_format,
-    }
+def _get(api_key: str, path: str, params: Dict[str, str], timeout: int = 25) -> Optional[requests.Response]:
+    url = f"{API_BASE}{path}"
     try:
-        r = requests.get(url, params=params, timeout=timeout)
+        r = requests.get(url, params={"apiKey": api_key, **params}, timeout=timeout)
         if r.status_code == 401:
-            print(f"[theoddsapi][ERROR] 401 Unauthorized — verifique a THEODDS_API_KEY e o plano/limite de requests.", file=sys.stderr)
-            return []
+            print("[theoddsapi][ERROR] 401 Unauthorized — verifique THEODDS_API_KEY/limites.", file=sys.stderr)
+            return None
         r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, list):
-            print("[theoddsapi][WARN] Resposta inesperada (não é lista).", file=sys.stderr)
-            return []
-        return data
+        return r
     except requests.RequestException as e:
-        print(f"[theoddsapi][ERROR] Falha ao consultar TheOddsAPI: {e}", file=sys.stderr)
+        print(f"[theoddsapi][ERROR] Falha HTTP: {e}", file=sys.stderr)
+        return None
+
+
+def list_sports(api_key: str) -> List[dict]:
+    r = _get(api_key, "/sports", params={"all": "true"})
+    if not r:
+        return []
+    try:
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception:
         return []
 
 
-# ========================= Extração de odds H2H =========================
+def fetch_odds_for_sport(api_key: str, sport_key: str, regions: str, markets: str = "h2h",
+                         odds_format: str = "decimal", date_format: str = "iso") -> List[dict]:
+    r = _get(api_key, f"/sports/{sport_key}/odds", params={
+        "regions": regions, "markets": markets, "oddsFormat": odds_format, "dateFormat": date_format
+    })
+    if not r:
+        return []
+    try:
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
-def extract_h2h_prices(event: dict) -> Tuple[Optional[str], Optional[str], List[Tuple[str, float]]]:
-    """
-    Retorna (home_team, away_team, lista_de_odds) em que lista_de_odds contém tuplas (nome, odd).
-    Agrega odds percorrendo todos os bookmakers e coletando o market 'h2h'.
-    """
+
+# ========================= Extração/Matching =========================
+
+def extract_h2h_prices(event: dict) -> Tuple[Optional[str], Optional[str], List[Tuple[str, float]], int]:
     home = event.get("home_team")
     away = event.get("away_team")
 
@@ -118,69 +194,56 @@ def extract_h2h_prices(event: dict) -> Tuple[Optional[str], Optional[str], List[
                 key = _slug(name)
                 prices.setdefault(key, []).append(float(price))
 
-    averaged = []
+    averaged: List[Tuple[str, float]] = []
     for k, vals in prices.items():
-        if not vals:
-            continue
-        averaged.append((k, sum(vals) / len(vals)))
+        if vals:
+            averaged.append((k, sum(vals) / len(vals)))
 
-    return home, away, averaged
+    books_count = len(books)
+    return home, away, averaged, books_count
 
 
-def match_event_to_pair(event_home: str, event_away: str, our_home: str, our_away: str) -> Tuple[bool, bool]:
-    """
-    Tenta casar (event_home,event_away) com (our_home,our_away) por slug.
-    Retorna (matched, reversed):
-      matched=True se houver match
-      reversed=True se o evento vier invertido (home/away trocados)
-    """
-    eh = _slug(event_home)
-    ea = _slug(event_away)
-    oh = _slug(our_home)
-    oa = _slug(our_away)
+def names_match(a: str, b: str) -> bool:
+    return _slug(a) == _slug(b)
 
+
+def event_matches_fixture(ehome: str, eaway: str, our_home: str, our_away: str) -> Tuple[bool, bool]:
+    eh, ea = _slug(ehome), _slug(eaway)
+    oh, oa = _slug(our_home), _slug(our_away)
     if eh == oh and ea == oa:
         return True, False
     if eh == oa and ea == oh:
         return True, True
+    # tenta por aliases (ex.: athletico pr vs athletico paranaense)
+    for ah in _aliased_names(our_home):
+        for aa in _aliased_names(our_away):
+            if names_match(ehome, ah) and names_match(eaway, aa):
+                return True, False
+            if names_match(ehome, aa) and names_match(eaway, ah):
+                return True, True
     return False, False
 
 
-def pick_h2h_triplet(averaged_prices: List[Tuple[str, float]], names_home: List[str], names_away: List[str]) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
-    """
-    A partir da lista média (key_slug, odd), seleciona odds de:
-      - home (nomes possíveis de casa)
-      - draw (empate)
-      - away (nomes possíveis de fora)
-    Também retorna 'books_count' estimado como o máximo de amostras usadas entre os três buckets.
-    """
-    # Mapeia chave slug -> odd
-    price_map = {k: v for k, v in averaged_prices}
+def pick_triplet(prices: List[Tuple[str, float]], home_aliases: List[str], away_aliases: List[str]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    price_map = {k: v for k, v in prices}
+    # chaves candidatas
+    home_keys = {_slug(x) for x in home_aliases}
+    away_keys = {_slug(x) for x in away_aliases}
+    draw_keys = {_slug(x) for x in _draw_aliases()}
 
-    draw_keys = {_slug("Draw"), _slug("Empate")}
-    # gera conjunto de chaves possíveis para nomes
-    home_keys = {_slug(n) for n in names_home if n}
-    away_keys = {_slug(n) for n in names_away if n}
-
-    # Busca por match direto; se não achar, tenta aproximações simples
-    def _first_in(keys: set) -> Optional[float]:
+    def find_first(keys: set) -> Optional[float]:
         for k in keys:
             if k in price_map:
                 return price_map[k]
         return None
 
-    o_home = _first_in(home_keys)
-    o_away = _first_in(away_keys)
-    o_draw = _first_in(draw_keys)
-
-    # books_count aproximado: não temos contagem por outcome aqui; usa a quantidade média de entradas agregadas
-    # Como aproximação simples (e estável), usa 0 se não temos preços; senão usa 1.
-    books_count = 1 if any(x is not None for x in (o_home, o_draw, o_away)) else 0
-
-    return o_home, o_draw, o_away, books_count
+    o_home = find_first(home_keys)
+    o_away = find_first(away_keys)
+    o_draw = find_first(draw_keys)
+    return o_home, o_draw, o_away
 
 
-# ========================= Pipeline principal =========================
+# ========================= Main =========================
 
 def main():
     ap = argparse.ArgumentParser(description="Ingest odds from TheOddsAPI and match with provided fixtures.")
@@ -207,79 +270,82 @@ def main():
 
     mid_col = pick_id_col(df)
     home_col, away_col = pick_home_away_cols(df)
+    sel = df[[mid_col, home_col, away_col]].copy()
+    sel.columns = ["match_id", "home", "away"]
+    sel["home"] = sel["home"].astype(str).str.strip()
+    sel["away"] = sel["away"].astype(str).str.strip()
 
-    # Normaliza strings
-    df = df[[mid_col, home_col, away_col]].copy()
-    df.columns = ["match_id", "home", "away"]
-    df["home"] = df["home"].astype(str).str.strip()
-    df["away"] = df["away"].astype(str).str.strip()
+    # 1) Tenta 'upcoming' mas filtra só soccer
+    events = fetch_odds_for_sport(api_key, "upcoming", args.regions, markets="h2h")
+    soccer_events = [e for e in events if str(e.get("sport_key", "")).startswith("soccer_")]
 
-    # Consulta API
-    events = fetch_upcoming_odds(api_key=api_key, regions=args.regions, sport_key="upcoming", markets="h2h")
-    if not events:
-        # Ainda assim, gera arquivo vazio com cabeçalho para não quebrar etapas posteriores
-        with open(out_csv, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away", "books_count"])
-        print(f"[theoddsapi]Eventos=0 | jogoselecionados={len(df)} — nenhum match. Arquivo vazio criado.")
-        return
+    # 2) Se pouca coisa, tenta ligar específicas do Brasil
+    if len(soccer_events) < len(sel):
+        sports = list_sports(api_key)
+        br_keys = [s.get("key") for s in sports if isinstance(s, dict) and str(s.get("key", "")).startswith("soccer_brazil_")]
+        for key in br_keys:
+            extra = fetch_odds_for_sport(api_key, key, args.regions, markets="h2h")
+            soccer_events.extend(extra)
 
-    # Pré-processa eventos: extrai tuplas úteis
-    processed_events = []
-    for ev in events:
-        ehome, eaway, prices = extract_h2h_prices(ev)
-        if not ehome or not eaway:
-            # Alguns esportes não têm esses campos — ignorar
+    # Dedup simples por id
+    seen = set()
+    filtered_events = []
+    for e in soccer_events:
+        eid = e.get("id") or (e.get("home_team"), e.get("away_team"), e.get("commence_time"))
+        if eid in seen:
             continue
-        processed_events.append((ehome, eaway, prices))
+        seen.add(eid)
+        filtered_events.append(e)
+
+    # Pré-processa
+    processed = []
+    for ev in filtered_events:
+        ehome, eaway, prices, books_count = extract_h2h_prices(ev)
+        if not ehome or not eaway:
+            continue
+        processed.append((ehome, eaway, prices, books_count))
 
     rows_out: List[List] = []
     matched = 0
 
-    for _, r in df.iterrows():
+    for _, r in sel.iterrows():
         mid = r["match_id"]
         our_home = r["home"]
         our_away = r["away"]
 
-        found = False
-        best_row = None
+        best = None
 
-        for (ehome, eaway, prices) in processed_events:
-            ok, reversed_flag = match_event_to_pair(ehome, eaway, our_home, our_away)
+        for (ehome, eaway, prices, books_count) in processed:
+            ok, reversed_flag = event_matches_fixture(ehome, eaway, our_home, our_away)
             if not ok:
                 continue
 
-            # nomes possíveis para outcomes (para resolver diferenças de escrita nos outcomes):
-            # quando reversed_flag=True, o 'home' do evento é nosso away.
+            # aliases para outcomes
             if not reversed_flag:
-                names_home = [ehome, our_home]
-                names_away = [eaway, our_away]
+                home_aliases = [ehome, our_home] + _aliased_names(our_home)
+                away_aliases = [eaway, our_away] + _aliased_names(our_away)
             else:
-                names_home = [eaway, our_home]  # invertido
-                names_away = [ehome, our_away]
+                home_aliases = [eaway, our_home] + _aliased_names(our_home)
+                away_aliases = [ehome, our_away] + _aliased_names(our_away)
 
-            o_home, o_draw, o_away, books_count = pick_h2h_triplet(prices, names_home, names_away)
+            o_home, o_draw, o_away = pick_triplet(prices, home_aliases, away_aliases)
 
-            # Só aceitamos se temos pelo menos 2 odds (home e away). Draw pode faltar em alguns books.
+            # Requer pelo menos home e away
             if o_home is not None and o_away is not None:
-                # Se vier invertido, os nomes finais devem refletir nosso CSV
-                out_home_name = our_home
-                out_away_name = our_away
-                best_row = [mid, out_home_name, out_away_name, o_home, o_draw, o_away, books_count]
-                found = True
+                best = [mid, our_home, our_away, o_home, o_draw, o_away, books_count]
                 break
 
-        if found and best_row:
-            rows_out.append(best_row)
+        if best:
+            rows_out.append(best)
             matched += 1
 
-    # Salva CSV mesmo que vazio (com header)
+    # Escreve saída (mesmo vazia, com header, para o workflow seguir a checagem)
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["match_id", "team_home", "team_away", "odds_home", "odds_draw", "odds_away", "books_count"])
         w.writerows(rows_out)
 
-    print(f"[theoddsapi]Eventos={len(events)} | jogoselecionados={len(df)} | pareados={matched} — salvo em {out_csv}")
+    print(f"[theoddsapi]Eventos={len(filtered_events)} | jogoselecionados={len(sel)} | pareados={matched} — salvo em {out_csv}")
 
 
 if __name__ == "__main__":
