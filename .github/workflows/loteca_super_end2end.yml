@@ -169,7 +169,6 @@ jobs:
 
       # ======= TheOddsAPI: Preflight + Ingest + Fallback =======
       - name: Preflight TheOddsAPI Serie A
-        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -210,7 +209,6 @@ PY
             --source_csv "${SOURCE_CSV_NORM}"
 
       - name: Fallback TheOddsAPI direct fetch if empty
-        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -398,7 +396,6 @@ with open(pred, newline="", encoding="utf-8") as f:
     r=csv.DictReader(f)
     for row in r:
         ph, pd, pa = float(row["p_home"]), float(row["p_draw"]), float(row["p_away"])
-        # identidade; normaliza por seguranca
         s = ph+pd+pa
         if s>0: ph,pd,pa = ph/s, pd/s, pa/s
         rows.append([row["team_home"],row["team_away"],ph,pd,pa])
