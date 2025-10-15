@@ -1,116 +1,194 @@
 # scripts/_utils_norm.py
 from __future__ import annotations
+
 import json
 import os
 import re
-from typing import Dict, Iterable, List, Optional
-from unidecode import unidecode
-from difflib import get_close_matches
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-# Procuraremos aliases em múltiplas fontes (manual e gerado automaticamente)
-_ALIAS_FILES = [
-    "data/aliases/auto_aliases.json",     # gerado pelo harvester (automático)
-    "data/aliases/team_aliases.json",     # curadoria manual (opcional)
-    "team_aliases.json",                  # fallback simples
-]
+try:
+    from unidecode import unidecode
+except Exception:  # pragma: no cover
+    def unidecode(x: str) -> str:
+        return x
 
-# substituições leves para normalizar
-_REPLACERS: Dict[str, str] = {
-    "&": " and ",
-    "/": " ",
-    "-": " ",
-    " fc": " ",
-    " afc": " ",
-    " sc": " ",
-    " ac": " ",
-    " ec": " ",
-    " ca ": " ",
-    " cf ": " ",
-    " de ": " ",
-    " do ": " ",
-    " da ": " ",
-    " (pa)": " ",
-    " (sp)": " ",
-    " (rj)": " ",
-    " (mg)": " ",
-    " (pr)": " ",
-    " (rs)": " ",
-}
+# RapidFuzz é preferível; se não existir, caímos em difflib
+try:
+    from rapidfuzz import fuzz, process  # type: ignore
+    _HAVE_RAPIDFUZZ = True
+except Exception:
+    import difflib
+    _HAVE_RAPIDFUZZ = False
 
-_WORD_RX = re.compile(r"[a-z0-9]+")
 
-def _apply_replacers(s: str) -> str:
-    out = s
-    for k, v in _REPLACERS.items():
-        out = out.replace(k, v)
-    return out
-
-def norm_name(name: str) -> str:
-    """Normaliza nome: sem acento, minúsculo, somente [a-z0-9] separados por espaço."""
-    if not isinstance(name, str):
-        return ""
-    s = unidecode(name).lower().strip()
-    s = _apply_replacers(s)
-    tokens = _WORD_RX.findall(s)
-    return " ".join(tokens)
-
-def token_key(name: str) -> str:
-    return norm_name(name).replace(" ", "")
-
-def load_json(path: str, default=None):
+# ------------------------
+# Utilidades de arquivo
+# ------------------------
+def load_json(path: str, default: Any = None) -> Any:
+    """Carrega JSON seguro; retorna default se não existir/estiver vazio."""
+    if default is None:
+        default = {}
     try:
+        if not os.path.exists(path) or os.path.isdir(path) or os.path.getsize(path) == 0:
+            return default
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return default
 
-def dump_json(obj, path: str):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+def dump_json(obj: Any, path: str) -> None:
+    """Salva JSON (cria diretório se necessário)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-def _merge_alias_sources() -> Dict[str, str]:
-    """
-    Lê todos os arquivos de alias e mescla (o primeiro da lista tem prioridade).
-    Formato esperado: {"grafia_da_fonte": "Nome Canonico"}
-    No dicionário final, a CHAVE é sempre token_key(grafia_da_fonte),
-    e o VALOR é norm_name(Nome Canonico).
-    """
-    merged: Dict[str, str] = {}
-    for p in _ALIAS_FILES:
-        data = load_json(p, default=None)
-        if not isinstance(data, dict):
-            continue
-        # entradas anteriores NÃO são sobrepostas pelos posteriores (prioridade por ordem em _ALIAS_FILES)
-        for raw, canon in data.items():
-            k = token_key(str(raw))
-            v = norm_name(str(canon))
-            if k not in merged:
-                merged[k] = v
-    return merged
 
-_ALIAS_MAP = _merge_alias_sources()
+# ------------------------
+# Normalização e alias
+# ------------------------
+_BR_SUFFIXES = [
+    r"\bFC\b", r"\bEC\b", r"\bAC\b", r"\bSC\b", r"\bAA\b",
+    r"\bFutebol Clube\b", r"\bEsporte Clube\b", r"\bAtlético Clube\b",
+    r"\bSaf\b", r"\bS\.A\.F\.\b",
+]
 
-def apply_alias(name: str) -> str:
-    """Aplica mapeamento se existir; senão, retorna nome normalizado."""
-    key = token_key(name)
-    return _ALIAS_MAP.get(key, norm_name(name))
+_PARENS = re.compile(r"\s*\([^)]*\)")
+_MULTI_WS = re.compile(r"\s+")
 
-def best_match(target: str, candidates: Iterable[str], cutoff: float = 0.84) -> Optional[str]:
+def _cleanup(text: str) -> str:
+    # remove parênteses, pontuação e espaços extras
+    text = _PARENS.sub("", text)
+    text = re.sub(r"[.,;:!?'’]", " ", text)
+    text = _MULTI_WS.sub(" ", text).strip()
+    return text
+
+
+def norm_name(name: str) -> str:
     """
-    Fuzzy match entre strings (padrão: difflib) com nomes já normalizados/aliased.
-    Retorna o candidato ORIGINAL (não-normalizado) mais próximo.
+    Normaliza nomes de times para comparação/matching.
+    Ex.: "Botafogo-SP" -> "botafogo sp" ; "Paysandu/Remo (PA)" -> "paysandu remo pa"
     """
-    target_n = apply_alias(target)
-    cand_norm = {c: apply_alias(c) for c in candidates}
-    # lista única de normalizados
-    norm_to_orig = {}
-    norm_list: List[str] = []
-    for orig, nn in cand_norm.items():
-        if nn not in norm_to_orig:
-            norm_to_orig[nn] = orig
-            norm_list.append(nn)
-    matches = get_close_matches(target_n, norm_list, n=1, cutoff=cutoff)
-    if not matches:
-        return None
-    return norm_to_orig[matches[0]]
+    if not isinstance(name, str):
+        return ""
+    s = name.strip()
+
+    # uniformiza separadores: hífen/"/"
+    s = s.replace("/", " ").replace("-", " ")
+
+    # remove sufixos comuns do BR (FC, EC, etc.)
+    for pat in _BR_SUFFIXES:
+        s = re.sub(pat, " ", s, flags=re.IGNORECASE)
+
+    s = _cleanup(s)
+
+    # normaliza acentos e caixa
+    s = unidecode(s).lower()
+
+    # normalizações específicas úteis
+    # ex.: “atletico pr” ~ “athletico pr”
+    s = s.replace("athletico", "atletico")
+    s = s.replace("botafogo sp", "botafogo sp")  # idempotente, mas deixa explícito
+    s = s.replace("remo pa", "remo")             # alguns feeds trazem UF
+
+    # garante tokens simples
+    s = _MULTI_WS.sub(" ", s).strip()
+    return s
+
+
+def token_key(name: str) -> str:
+    """Chave de tokens ordenados para ajudar matching determinístico."""
+    norm = norm_name(name)
+    if not norm:
+        return ""
+    toks = norm.split()
+    toks.sort()
+    return " ".join(toks)
+
+
+def load_alias_maps() -> Dict[str, str]:
+    """
+    Carrega e mescla aliases:
+      - data/aliases/team_aliases.json
+      - data/aliases/auto_aliases.json
+    Formato esperado: { "alias_normalizado": "canonical_name" }
+    """
+    manual = load_json("data/aliases/team_aliases.json", default={})
+    auto = load_json("data/aliases/auto_aliases.json", default={})
+
+    # normaliza chaves para garantir consistência
+    out: Dict[str, str] = {}
+    for src in (manual, auto):
+        if isinstance(src, dict):
+            for k, v in src.items():
+                nk = norm_name(k)
+                if nk:
+                    out[nk] = v
+    return out
+
+
+def apply_alias(name: str, alias_map: Optional[Dict[str, str]] = None) -> str:
+    """Aplica alias se houver, respeitando normalização da chave."""
+    if alias_map is None:
+        alias_map = load_alias_maps()
+    nk = norm_name(name)
+    return alias_map.get(nk, name)
+
+
+# ------------------------
+# Matching com score_cutoff
+# ------------------------
+def best_match(
+    query: str,
+    choices: Iterable[str],
+    *,
+    score_cutoff: Optional[int] = None,
+    scorer: Optional[Any] = None
+) -> Tuple[Optional[str], float]:
+    """
+    Retorna (melhor_candidato, score) para `query` em `choices`.
+    Aceita `score_cutoff`: se score < cutoff -> (None, 0.0)
+
+    - Usa RapidFuzz se disponível (padrão scorer: fuzz.WRatio).
+    - Fallback: difflib SequenceMatcher (score 0–100).
+    """
+    qn = norm_name(query)
+    norm_choices: List[str] = [norm_name(c) for c in choices]
+
+    if not qn or not norm_choices:
+        return (None, 0.0)
+
+    if _HAVE_RAPIDFUZZ:
+        _scorer = scorer or fuzz.WRatio
+        result = process.extractOne(
+            qn,
+            norm_choices,
+            scorer=_scorer,
+            score_cutoff=score_cutoff if score_cutoff is not None else 0,
+        )
+        if not result:
+            return (None, 0.0)
+        # result = (match, score, index)
+        match_str, score, idx = result
+        # devolve o original correspondente ao índice para manter integridade
+        original = list(choices)[idx]
+        if score_cutoff is not None and score < score_cutoff:
+            return (None, float(score))
+        return (original, float(score))
+
+    # --- fallback difflib ---
+    best_s = -1.0
+    best_c: Optional[str] = None
+    for orig, nc in zip(choices, norm_choices):
+        s = _ratio_difflib(qn, nc)
+        if s > best_s:
+            best_s = s
+            best_c = orig
+    if score_cutoff is not None and best_s < score_cutoff:
+        return (None, float(best_s))
+    return (best_c, float(best_s))
+
+
+def _ratio_difflib(a: str, b: str) -> float:
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio() * 100.0
