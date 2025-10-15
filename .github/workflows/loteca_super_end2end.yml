@@ -47,14 +47,30 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dependencies (garante engine Parquet)
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install pandas pyarrow numpy scikit-learn requests
+            pip install pandas numpy scikit-learn requests
           fi
+          # Garante pyarrow (e opcionalmente fastparquet) mesmo com requirements.txt
+          # Se fastparquet falhar por conflito, ao menos pyarrow fica instalado.
+          pip install --upgrade "pyarrow>=15.0.0" || true
+          pip install --upgrade "fastparquet>=2024.5.0" || true
+          python - << 'PY'
+          import importlib, sys
+          ok = False
+          for m in ("pyarrow","fastparquet"):
+              try:
+                  importlib.import_module(m)
+                  ok = True
+              except Exception:
+                  pass
+          if not ok:
+              sys.exit("Nenhum engine Parquet disponível (pyarrow/fastparquet).")
+          PY
 
       - name: Prepare data folders and stubs
         shell: bash
@@ -312,7 +328,6 @@ jobs:
             echo "::notice::render_loteca_card prerequisites ausentes; pulando"
           fi
 
-      # ===================== Diagnóstico (varredura) =====================
       - name: Diagnostic sweep (não falha o job)
         shell: bash
         run: |
