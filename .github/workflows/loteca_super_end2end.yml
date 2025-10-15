@@ -36,12 +36,18 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: 02 Install dependencies
+      - name: 02 Install Python deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --upgrade pandas numpy requests python-dateutil unidecode rapidfuzz pyarrow scikit-learn pyyaml
+
+      - name: 02b Install CLI tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
       - name: 03 Validate secrets
         run: |
@@ -125,16 +131,11 @@ jobs:
       - name: 12 Preflight TheOddsAPI Serie A
         run: |
           set -euo pipefail
-          python - <<'PY'
-import os, json, urllib.request, urllib.parse
-api = os.environ['THEODDS_API_KEY']
-regions = os.environ.get('REGIONS','eu')
-qs = urllib.parse.urlencode({'regions': regions, 'markets': 'h2h', 'dateFormat': 'iso', 'oddsFormat': 'decimal', 'apiKey': api})
-url = f"https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?{qs}"
-with urllib.request.urlopen(url, timeout=25) as r:
-    data = json.load(r)
-print("[preflight] events Serie A =", len(data))
-PY
+          API="${THEODDS_API_KEY}"
+          REG="${REGIONS}"
+          URL="https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}"
+          CNT="$(curl -sS --max-time 25 "${URL}" | jq 'length')"
+          echo "[preflight] Serie A events=${CNT}"
 
       - name: 13 Ingest TheOddsAPI primary
         run: |
@@ -148,46 +149,27 @@ PY
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
           L=0; [ -s "$OUT" ] && L="$(wc -l < "$OUT" | tr -d ' ')"
           if [ "$L" -le 1 ]; then
-            python - <<'PY'
-import os, csv, json, urllib.request, urllib.parse
-API = os.environ['THEODDS_API_KEY']
-REG = os.environ.get('REGIONS','eu')
-OUT = os.path.join(os.environ['OUT_DIR'],'odds_theoddsapi.csv')
-def fetch(sport):
-    qs = urllib.parse.urlencode(dict(apiKey=API, regions=REG, markets='h2h', oddsFormat='decimal', dateFormat='iso'))
-    url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds?{qs}"
-    with urllib.request.urlopen(url, timeout=25) as r:
-        return json.load(r)
-rows = []
-for sport in ('soccer_brazil_campeonato','soccer_brazil_serie_b'):
-    data = fetch(sport) or []
-    for ev in data:
-        home = ev.get('home_team') or ''
-        away = ev.get('away_team') or ''
-        best = {'home': None, 'draw': None, 'away': None}
-        for b in ev.get('bookmakers',[]) or []:
-            for mk in b.get('markets',[]) or []:
-                if mk.get('key') != 'h2h':
-                    continue
-                for o in mk.get('outcomes',[]) or []:
-                    n = o.get('name','')
-                    p = o.get('price',None)
-                    if p is None:
-                        continue
-                    if n == home:
-                        best['home'] = max(best['home'] or 0, p)
-                    elif n == away:
-                        best['away'] = max(best['away'] or 0, p)
-                    elif n.lower() == 'draw':
-                        best['draw'] = max(best['draw'] or 0, p)
-        if all(best[k] for k in ('home','draw','away')):
-            rows.append([home, away, best['home'], best['draw'], best['away']])
-with open(OUT,'w',newline='',encoding='utf-8') as f:
-    w = csv.writer(f)
-    w.writerow(['team_home','team_away','odds_home','odds_draw','odds_away'])
-    w.writerows(rows)
-print('[fallback] wrote', OUT, 'rows=', len(rows))
-PY
+            API="${THEODDS_API_KEY}"
+            REG="${REGIONS}"
+            F1="$(mktemp)"; F2="$(mktemp)"; TMP="$(mktemp)"
+            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F1}"
+            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_serie_b/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F2}"
+            jq -s 'add' "${F1}" "${F2}" > "${TMP}"
+            {
+              echo "team_home,team_away,odds_home,odds_draw,odds_away"
+              jq -r '
+                .[] as $ev
+                | $ev.home_team as $h
+                | $ev.away_team as $a
+                | ([ $ev.bookmakers[].markets[] | select(.key=="h2h") | .outcomes[] | select(.name==$h) | .price ] | max?) as $oh
+                | ([ $ev.bookmakers[].markets[] | select(.key=="h2h") | .outcomes[] | select(.name=="Draw") | .price ] | max?) as $od
+                | ([ $ev.bookmakers[].markets[] | select(.key=="h2h") | .outcomes[] | select(.name==$a) | .price ] | max?) as $oa
+                | select($oh and $od and $oa)
+                | [$h, $a, ($oh|tostring), ($od|tostring), ($oa|tostring)]
+                | @csv
+              ' "${TMP}"
+            } > "${OUT}"
+            echo "[fallback] wrote ${OUT} rows=$(($(wc -l <"${OUT}")-1))"
           fi
           [ -s "$OUT" ] && [ "$(wc -l < "$OUT" | tr -d ' ')" -gt 1 ] || { echo "::error::No odds from TheOddsAPI (primary and fallback)"; exit 5; }
 
@@ -226,59 +208,38 @@ PY
           python -m scripts.predict_dynamic_model --model "${MODEL_PKL}" --state "${STATE_JSON}" --matches "${SOURCE_CSV_NORM}" --out "${PREDICTIONS_CSV}"
           test -s "${PREDICTIONS_CSV}" || { echo "::error::predictions.csv not generated"; exit 8; }
 
-      - name: 19 Train calibrator or identity
+      - name: 19 Train calibrator
         run: |
           set -euo pipefail
-          if [ "${TRAIN_CALIBRATOR}" = "true" ]; then
-            [ -f scripts/calibrator_train.py ] || { echo "::error::scripts/calibrator_train.py not found"; exit 9; }
-            if ! python -m scripts.calibrator_train --history "${FEATURES_PARQUET}" --out "${CALIBRATOR_PKL}"; then
-              python - <<'PY'
-import pickle, os
-with open(os.environ['CALIBRATOR_PKL'],'wb') as f:
-    pickle.dump({'type':'identity'}, f)
-print('[cal] identity fallback saved')
-PY
-            fi
-          else
-            python - <<'PY'
-import pickle, os
-with open(os.environ['CALIBRATOR_PKL'],'wb') as f:
-    pickle.dump({'type':'identity'}, f)
-print('[cal] identity saved (TRAIN_CALIBRATOR=false)')
-PY
-          fi
+          [ -f scripts/calibrator_train.py ] || { echo "::error::scripts/calibrator_train.py not found"; exit 9; }
+          python -m scripts.calibrator_train --history "${FEATURES_PARQUET}" --out "${CALIBRATOR_PKL}"
           test -s "${CALIBRATOR_PKL}" || { echo "::error::calibrator.pkl not generated"; exit 9; }
 
       - name: 20 Apply calibration
         run: |
           set -euo pipefail
-          python - <<'PY'
-import csv, os, pickle
+          python - <<'PYCODE'
+import csv, os
 pred = os.environ['PREDICTIONS_CSV']
 out = os.environ['PREDICTIONS_CALIB_CSV']
-with open(os.environ['CALIBRATOR_PKL'],'rb') as f:
-    cal = pickle.load(f)
-rows = []
+rows=[]
 with open(pred, newline='', encoding='utf-8') as f:
     r = csv.DictReader(f)
     for row in r:
         ph, pd, pa = float(row['p_home']), float(row['p_draw']), float(row['p_away'])
-        s = ph + pd + pa
-        if s > 0:
-            ph, pd, pa = ph/s, pd/s, pa/s
+        s = ph+pd+pa
+        if s>0: ph,pd,pa = ph/s, pd/s, pa/s
         rows.append([row['team_home'], row['team_away'], ph, pd, pa])
 with open(out,'w',newline='',encoding='utf-8') as f:
-    w = csv.writer(f)
-    w.writerow(['team_home','team_away','p_home','p_draw','p_away'])
-    w.writerows(rows)
+    w=csv.writer(f); w.writerow(['team_home','team_away','p_home','p_draw','p_away']); w.writerows(rows)
 print('[calibration] wrote', out, 'rows=', len(rows))
-PY
+PYCODE
           test -s "${PREDICTIONS_CALIB_CSV}" || { echo "::error::predictions_calibrated.csv not generated"; exit 9; }
 
       - name: 21 Kelly staking 1x2
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python - <<'PYCODE'
 import csv, os
 BANK = float(os.environ.get('BANKROLL','1000'))
 FRAC = float(os.environ.get('KELLY_FRACTION','0.5'))
@@ -287,61 +248,59 @@ ROUND_TO = int(os.environ.get('ROUND_TO','1'))
 pred = os.environ['PREDICTIONS_CALIB_CSV']
 odds = os.environ['CONSENSUS_CSV']
 out  = os.environ['KELLY_BETS_CSV']
-odict = {}
+odict={}
 with open(odds, newline='', encoding='utf-8') as f:
-    r = csv.DictReader(f)
+    r=csv.DictReader(f)
     for row in r:
-        key = (row['team_home'], row['team_away'])
-        odict[key] = (float(row['odds_home']), float(row['odds_draw']), float(row['odds_away']))
-rows = []
-def kelly(p, o, frac, cap):
-    b = o - 1.0
-    k = (p*b - (1 - p)) / b if b > 0 else 0.0
-    k = max(0.0, min(k*frac, cap))
-    return k
+        key=(row['team_home'],row['team_away'])
+        odict[key]=(float(row['odds_home']),float(row['odds_draw']),float(row['odds_away']))
+rows=[]
+def kelly(p,o):
+    b=o-1.0
+    if b<=0: return 0.0
+    k=(p*b-(1-p))/b
+    return max(0.0,min(k*FRAC,CAP))
 with open(pred, newline='', encoding='utf-8') as f:
-    r = csv.DictReader(f)
+    r=csv.DictReader(f)
     for row in r:
-        key = (row['team_home'], row['team_away'])
-        if key not in odict:
-            continue
-        ph, pd, pa = float(row['p_home']), float(row['p_draw']), float(row['p_away'])
-        oh, od, oa = odict[key]
-        kh, kd, ka = kelly(ph,oh,FRAC,CAP), kelly(pd,od,FRAC,CAP), kelly(pa,oa,FRAC,CAP)
-        side, k, o, p = max([('H',kh,oh,ph), ('D',kd,od,pd), ('A',ka,oa,pa)], key=lambda x: x[1])
-        stake = round(BANK*k, ROUND_TO)
-        ev = p*o - 1
-        rows.append([row['team_home'], row['team_away'], side, p, o, k, stake, ev])
+        key=(row['team_home'],row['team_away'])
+        if key not in odict: continue
+        ph,pd,pa=float(row['p_home']),float(row['p_draw']),float(row['p_away'])
+        oh,od,oa=odict[key]
+        kh,kd,ka=kelly(ph,oh),kelly(pd,od),kelly(pa,oa)
+        side,k,o,p=max([('H',kh,oh,ph),('D',kd,od,pd),('A',ka,oa,pa)], key=lambda x:x[1])
+        stake=round(BANK*k, ROUND_TO)
+        ev=p*o-1
+        rows.append([row['team_home'],row['team_away'],side,p,o,k,stake,ev])
 with open(out,'w',newline='',encoding='utf-8') as f:
-    w = csv.writer(f)
+    w=csv.writer(f)
     w.writerow(['team_home','team_away','side','p','odds','kelly_frac','stake','expected_value'])
     w.writerows(rows)
 print('[kelly] bets ->', out, 'rows=', len(rows))
-PY
+PYCODE
           test -s "${KELLY_BETS_CSV}" || { echo "::error::bets_kelly.csv not generated"; exit 10; }
 
       - name: 22 Loteca card top 14
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python - <<'PYCODE'
 import csv, os
-TOP = int(os.environ.get('KELLY_TOP_N','14'))
-bets = os.environ['KELLY_BETS_CSV']
-out  = os.environ['LOTECA_CARD_CSV']
-rows = []
+TOP=int(os.environ.get('KELLY_TOP_N','14'))
+bets=os.environ['KELLY_BETS_CSV']
+out=os.environ['LOTECA_CARD_CSV']
+rows=[]
 with open(bets, newline='', encoding='utf-8') as f:
-    r = csv.DictReader(f)
-    rows = list(r)
-rows.sort(key=lambda x: (float(x['stake']), float(x['expected_value'])), reverse=True)
-rows = rows[:TOP]
+    r=csv.DictReader(f); rows=list(r)
+rows.sort(key=lambda x:(float(x['stake']), float(x['expected_value'])), reverse=True)
+rows=rows[:TOP]
 with open(out,'w',newline='',encoding='utf-8') as f:
-    w = csv.writer(f)
+    w=csv.writer(f)
     w.writerow(['jogo','home','away','palpite','stake','odds','p','ev'])
-    for i, row in enumerate(rows, 1):
-        palpite = {'H':'1','D':'X','A':'2'}[row['side']]
-        w.writerow([i, row['team_home'], row['team_away'], palpite, row['stake'], row['odds'], row['p'], row['expected_value']])
+    for i,row in enumerate(rows,1):
+        palpite={'H':'1','D':'X','A':'2'}[row['side']]
+        w.writerow([i,row['team_home'],row['team_away'],palpite,row['stake'],row['odds'],row['p'],row['expected_value']])
 print('[loteca] card ->', out, 'rows=', len(rows))
-PY
+PYCODE
           test -s "${LOTECA_CARD_CSV}" || { echo "::error::loteca_card.csv not generated"; exit 11; }
 
       - name: 23 Final listing
