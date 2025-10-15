@@ -171,7 +171,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
+          cat > /tmp/preflight_theodds.py <<'PY'
 import os, json, urllib.request, urllib.parse
 api = os.environ.get("THEODDS_API_KEY")
 regions = os.environ.get("REGIONS","eu")
@@ -192,6 +192,7 @@ try:
 except Exception as e:
     print("[preflight] erro:", e)
 PY
+          python /tmp/preflight_theodds.py
 
       - name: Ingest TheOddsAPI primary
         shell: bash
@@ -221,7 +222,7 @@ PY
             exit 0
           fi
           echo "[fallback] coleta direta TheOddsAPI…"
-          python - <<'PY'
+          cat > /tmp/fallback_theodds.py <<'PY'
 import os, csv, json, sys, urllib.request, urllib.parse
 API=os.environ.get("THEODDS_API_KEY")
 REG=os.environ.get("REGIONS","eu")
@@ -262,6 +263,7 @@ with open(OUT,"w",newline="",encoding="utf-8") as f:
     for r in rows: w.writerow(r)
 print(f"[fallback] escrito {OUT} com {len(rows)} linhas")
 PY
+          python /tmp/fallback_theodds.py
           if [ ! -s "$OUT" ] || [ "$(wc -l < "$OUT")" -le 1 ]; then
             echo "::warning::Fallback nao obteve odds; pipeline seguira sem odds da TheOddsAPI."
           fi
@@ -318,7 +320,7 @@ PY
               --out "${BIVARIATE_CSV}" || true
           fi
           if [ ! -s "${BIVARIATE_CSV}" ]; then
-            python - <<'PY'
+            cat > /tmp/bivariate_fallback.py <<'PY'
 import csv, os
 src=os.environ["SOURCE_CSV_NORM"]; out=os.environ["BIVARIATE_CSV"]
 rows=[]
@@ -331,6 +333,7 @@ with open(out,"w",newline="",encoding="utf-8") as f:
     w=csv.writer(f); w.writerow(["team_home","team_away","p_home","p_draw","p_away"]); w.writerows(rows)
 print(f"[bivariate] fallback gerado {out} com {len(rows)} jogos")
 PY
+            python /tmp/bivariate_fallback.py
           fi
           test -s "${BIVARIATE_CSV}" || { echo "::error::bivariate.csv not generated"; exit 7; }
 
@@ -346,7 +349,7 @@ PY
               --out "${PREDICTIONS_CSV}" || true
           fi
           if [ ! -s "${PREDICTIONS_CSV}" ]; then
-            python - <<'PY'
+            cat > /tmp/predict_from_bivariate.py <<'PY'
 import csv, os
 biv=os.environ["BIVARIATE_CSV"]; out=os.environ["PREDICTIONS_CSV"]
 rows=[]
@@ -358,6 +361,7 @@ with open(out,"w",newline="",encoding="utf-8") as f:
     w=csv.writer(f); w.writerow(["team_home","team_away","p_home","p_draw","p_away"]); w.writerows(rows)
 print(f"[predict] fallback (bivariate) -> {out} ({len(rows)} jogos)")
 PY
+            python /tmp/predict_from_bivariate.py
           fi
           test -s "${PREDICTIONS_CSV}" || { echo "::error::predictions.csv not generated"; exit 8; }
 
@@ -371,20 +375,21 @@ PY
               --out "${CALIBRATOR_PKL}" || true
           fi
           if [ ! -s "${CALIBRATOR_PKL}" ]; then
-            python - <<'PY'
+            cat > /tmp/calibrator_identity.py <<'PY'
 import pickle, os
 out=os.environ["CALIBRATOR_PKL"]
 cal={"type":"identity"}
 with open(out,"wb") as f: pickle.dump(cal,f)
 print("[calibrator] identity criado", out)
 PY
+            python /tmp/calibrator_identity.py
           fi
 
       - name: Apply calibration
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
+          cat > /tmp/apply_calibration.py <<'PY'
 import csv, pickle, os
 pred=os.environ["PREDICTIONS_CSV"]
 out=os.environ["PREDICTIONS_CALIB_CSV"]
@@ -402,6 +407,7 @@ with open(out,"w",newline="",encoding="utf-8") as f:
     w=csv.writer(f); w.writerow(["team_home","team_away","p_home","p_draw","p_away"]); w.writerows(rows)
 print(f"[calibration] escrito {out} ({len(rows)} jogos)")
 PY
+          python /tmp/apply_calibration.py
           test -s "${PREDICTIONS_CALIB_CSV}" || { echo "::error::predictions_calibrated.csv not generated"; exit 9; }
 
       # ============ Kelly / Loteca card ============
@@ -409,7 +415,7 @@ PY
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
+          cat > /tmp/kelly.py <<'PY'
 import csv, os
 BANK=float(os.environ.get("BANKROLL","1000"))
 FRAC=float(os.environ.get("KELLY_FRACTION","0.5"))
@@ -448,13 +454,14 @@ with open(out,"w",newline="",encoding="utf-8") as f:
     w.writerows(rows)
 print(f"[kelly] bets -> {out} ({len(rows)} jogos)")
 PY
+          python /tmp/kelly.py
           test -s "${KELLY_BETS_CSV}" || { echo "::error::bets_kelly.csv not generated"; exit 10; }
 
       - name: Loteca card top N
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
+          cat > /tmp/loteca_card.py <<'PY'
 import csv, os
 TOP=int(os.environ.get("KELLY_TOP_N","14"))
 bets=os.environ["KELLY_BETS_CSV"]
@@ -473,6 +480,7 @@ with open(out,"w",newline="",encoding="utf-8") as f:
                     row["stake"], row["odds"], row["p"], row["expected_value"]])
 print(f"[loteca] card -> {out} ({len(rows)} jogos)")
 PY
+          python /tmp/loteca_card.py
           test -s "${LOTECA_CARD_CSV}" || { echo "::error::loteca_card.csv not generated"; exit 11; }
 
       # ============ Diagnostics and list ============
