@@ -1,6 +1,13 @@
-match_id,home,away
-1,Volta Redonda,Atlético-GO
-2,CRB,Ferroviária
-3,Chapecoense,Botafogo-SP
-4,Paysandu,Remo
-5,Athletico-PR,Avaí
+match_id,home,away,date
+1,Palmeiras,Red Bull Bragantino,2025-10-15 19:00:00
+2,Botafogo,Flamengo,2025-10-15 19:30:00
+3,Mirassol,Internacional,2025-10-15 20:00:00
+4,Sport Recife,Ceará,2025-10-15 20:00:00
+5,Santos,Corinthians,2025-10-15 21:30:00
+6,Atlético-MG,Cruzeiro,2025-10-15 21:30:00
+7,Fortaleza,Vasco da Gama,2025-10-15 21:30:00
+8,Grêmio,São Paulo,2025-10-16 19:00:00
+9,Vitória,Bahia,2025-10-16 21:30:00
+10,Fluminense,Juventude,2025-10-16 21:30:00
+11,Amazonas,Novorizontino,2025-10-17 20:00:00
+12,Atlético-GO,Vila Nova,2025-10-18 16:00:00
