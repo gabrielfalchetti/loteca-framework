@@ -47,7 +47,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (garante Parquet + Unidecode)
+      - name: Install dependencies (Parquet + Unidecode + fuzzy)
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
@@ -217,7 +217,7 @@ jobs:
             --rodada "${OUT_DIR}" \
             --regions "${REGIONS}" \
             --source_csv "${SOURCE_CSV_NORM}"
-          test -s "${OUT_DIR}/odds_theoddsapi.csv" || { echo "::error::odds_theoddsapi.csv not generated"; exit 5; }
+          # pode não gerar nada dependendo do dia/hora; não falhar aqui
 
       - name: Ingest odds — API-FOOTBALL (complementar/opcional)
         shell: bash
@@ -237,12 +237,31 @@ jobs:
             --rodada "${OUT_DIR}" \
             --source_csv "${SOURCE_CSV_NORM}" || true
 
+      - name: Check odds presence / create stub
+        shell: bash
+        run: |
+          set -euo pipefail
+          has_theodds=0
+          has_apifootball=0
+          [ -s "${OUT_DIR}/odds_theoddsapi.csv" ] && has_theodds=1 || true
+          [ -s "${OUT_DIR}/odds_apifootball.csv" ] && has_apifootball=1 || true
+          if [ $has_theodds -eq 1 ] || [ $has_apifootball -eq 1 ]; then
+            echo "HAS_ODDS=1" >> "$GITHUB_ENV"
+            echo "::notice::Encontrado pelo menos um odds_* — seguindo para consenso"
+          else
+            echo "HAS_ODDS=0" >> "$GITHUB_ENV"
+            echo "::warning::Nenhum odds_* gerado; criando stub de consensus e pulando consenso/kelly"
+            echo "team_home,team_away,odds_home,odds_draw,odds_away" > "${CONSENSUS_CSV}"
+          fi
+
       - name: Consensus odds (safe)
+        if: env.HAS_ODDS == '1'
         shell: bash
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
-          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
+          # sem --strict para tolerar fontes faltantes
+          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}"
           OUT_FILE="${CONSENSUS_CSV}"
           test -s "${OUT_FILE}" || { echo "::error::odds_consensus.csv not generated"; exit 6; }
           header="$(head -n1 "${OUT_FILE}" | tr -d '\r')"
@@ -297,6 +316,7 @@ jobs:
           fi
 
       - name: Kelly staking & seleção de apostas
+        if: env.HAS_ODDS == '1'
         shell: bash
         run: |
           set -euo pipefail
@@ -312,7 +332,7 @@ jobs:
               --out "${KELLY_BETS_CSV}"
             test -s "${KELLY_BETS_CSV}" || echo "::warning::bets_kelly.csv vazio"
           else
-            echo "::notice::kelly_bets prerequisites ausentes; pulando"
+            echo "::notice::kelly_bets prerequisites ausentes ou sem odds; pulando"
           fi
 
       - name: Cartão da Loteca (1X2)
