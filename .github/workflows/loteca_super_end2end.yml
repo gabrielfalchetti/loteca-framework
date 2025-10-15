@@ -28,33 +28,28 @@ jobs:
       WANDB_DISABLED: "true"
 
     steps:
-      - name: 00 - Checkout
+      - name: 00 Checkout
         uses: actions/checkout@v4
 
-      - name: 01 - Setup Python
+      - name: 01 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: 02 - Install dependencies
-        shell: bash
+      - name: 02 Install dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --upgrade pandas numpy requests python-dateutil unidecode rapidfuzz pyarrow scikit-learn pyyaml
 
-      - name: 03 - Validate required secrets
-        shell: bash
+      - name: 03 Validate secrets
         run: |
           set -euo pipefail
           [ -n "${THEODDS_API_KEY:-}" ] || { echo "::error::Missing THEODDS_API_KEY secret"; exit 1; }
           [ -n "${API_FOOTBALL_KEY:-}" ] || { echo "::error::Missing API_FOOTBALL_KEY secret"; exit 1; }
 
-      - name: 04 - Prepare data folders
-        shell: bash
+      - name: 04 Prepare data folders
         run: |
           set -euo pipefail
           mkdir -p data/history data/in data/out data/aliases models
@@ -64,8 +59,7 @@ jobs:
             exit 1
           fi
 
-      - name: 05 - Define run variables
-        shell: bash
+      - name: 05 Define run variables
         run: |
           set -euo pipefail
           OUT_DIR="data/out/${GITHUB_RUN_ID}"
@@ -86,32 +80,27 @@ jobs:
             echo "LOTECA_CARD_CSV=${OUT_DIR}/loteca_card.csv"
           } >> "$GITHUB_ENV"
 
-      - name: 06 - Update history
-        shell: bash
+      - name: 06 Update history
         run: |
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
           python -m scripts.update_history --since_days 30 --out "data/history/results.csv"
           [ -s "data/history/results.csv" ] || { echo "::error::results.csv empty"; exit 1; }
 
-      - name: 07 - Feature engineering
-        shell: bash
+      - name: 07 Feature engineering
         run: |
           set -euo pipefail
           [ -f scripts/feature_engineer.py ] || { echo "::error::scripts/feature_engineer.py not found"; exit 2; }
           python -m scripts.feature_engineer --history "data/history/results.csv" --out "${FEATURES_PARQUET}" --ewma 0.20
           test -s "${FEATURES_PARQUET}" || { echo "::error::features.parquet not generated"; exit 2; }
 
-      - name: 08 - Enrich features with API Football
-        shell: bash
+      - name: 08 Enrich features API Football
         run: |
           set -euo pipefail
           [ -f scripts/enrich_api_football.py ] || { echo "::error::scripts/enrich_api_football.py not found"; exit 2; }
           python -m scripts.enrich_api_football --features_in "${FEATURES_PARQUET}" --features_out "${FEATURES_PARQUET}"
-          echo "[enrich] done"
 
-      - name: 09 - Train dynamic model
-        shell: bash
+      - name: 09 Train dynamic model
         run: |
           set -euo pipefail
           [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 2; }
@@ -119,27 +108,24 @@ jobs:
           test -s "${STATE_JSON}" || { echo "::error::state_params.json not generated"; exit 2; }
           test -s "${MODEL_PKL}" || { echo "::error::dynamic_model.pkl not generated"; exit 2; }
 
-      - name: 10 - Normalize matches
-        shell: bash
+      - name: 10 Normalize matches
         run: |
           set -euo pipefail
           [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 3; }
           python -m scripts.normalize_matches --in_csv "${SOURCE_CSV}" --out_csv "${SOURCE_CSV_NORM}"
           test -s "${SOURCE_CSV_NORM}" || { echo "::error::matches_norm.csv not generated"; exit 3; }
 
-      - name: 11 - Auto aliases harvest
-        shell: bash
+      - name: 11 Auto aliases harvest
         run: |
           set -euo pipefail
           [ -f scripts/harvest_aliases.py ] || { echo "::error::scripts/harvest_aliases.py not found"; exit 3; }
           python -m scripts.harvest_aliases --source_csv "${SOURCE_CSV_NORM}" --lookahead_hours 72 --out_json "${AUTO_ALIASES_JSON}"
           test -s "${AUTO_ALIASES_JSON}" || { echo "::error::auto_aliases.json empty"; exit 3; }
 
-      - name: 12 - Preflight TheOddsAPI Serie A
-        shell: bash
+      - name: 12 Preflight TheOddsAPI Serie A
         run: |
           set -euo pipefail
-          cat <<'PY' >/tmp/preflight_theodds.py
+          python - <<'PY'
 import os, json, urllib.request, urllib.parse
 api = os.environ['THEODDS_API_KEY']
 regions = os.environ.get('REGIONS','eu')
@@ -149,23 +135,20 @@ with urllib.request.urlopen(url, timeout=25) as r:
     data = json.load(r)
 print("[preflight] events Serie A =", len(data))
 PY
-          python /tmp/preflight_theodds.py
 
-      - name: 13 - Ingest TheOddsAPI primary
-        shell: bash
+      - name: 13 Ingest TheOddsAPI primary
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
           python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --regions "${REGIONS}" --source_csv "${SOURCE_CSV_NORM}"
 
-      - name: 14 - Fallback direct fetch if empty
-        shell: bash
+      - name: 14 Fallback direct fetch if empty
         run: |
           set -euo pipefail
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
           L=0; [ -s "$OUT" ] && L="$(wc -l < "$OUT" | tr -d ' ')"
           if [ "$L" -le 1 ]; then
-            cat <<'PY' >/tmp/fallback_theodds.py
+            python - <<'PY'
 import os, csv, json, urllib.request, urllib.parse
 API = os.environ['THEODDS_API_KEY']
 REG = os.environ.get('REGIONS','eu')
@@ -205,19 +188,16 @@ with open(OUT,'w',newline='',encoding='utf-8') as f:
     w.writerows(rows)
 print('[fallback] wrote', OUT, 'rows=', len(rows))
 PY
-            python /tmp/fallback_theodds.py
           fi
           [ -s "$OUT" ] && [ "$(wc -l < "$OUT" | tr -d ' ')" -gt 1 ] || { echo "::error::No odds from TheOddsAPI (primary and fallback)"; exit 5; }
 
-      - name: 15 - Ingest API Football complementary
-        shell: bash
+      - name: 15 Ingest API Football complementary
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
           python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV_NORM}"
 
-      - name: 16 - Consensus odds
-        shell: bash
+      - name: 16 Consensus odds
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -232,53 +212,47 @@ PY
             echo "${header}" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
 
-      - name: 17 - Bivariate estimator
-        shell: bash
+      - name: 17 Bivariate estimator
         run: |
           set -euo pipefail
           [ -f scripts/bivariate_estimator.py ] || { echo "::error::scripts/bivariate_estimator.py not found"; exit 7; }
           python -m scripts.bivariate_estimator --history "${FEATURES_PARQUET}" --matches "${SOURCE_CSV_NORM}" --out "${BIVARIATE_CSV}"
           test -s "${BIVARIATE_CSV}" || { echo "::error::bivariate.csv not generated"; exit 7; }
 
-      - name: 18 - Predict with dynamic model
-        shell: bash
+      - name: 18 Predict with dynamic model
         run: |
           set -euo pipefail
           [ -f scripts/predict_dynamic_model.py ] || { echo "::error::scripts/predict_dynamic_model.py not found"; exit 8; }
           python -m scripts.predict_dynamic_model --model "${MODEL_PKL}" --state "${STATE_JSON}" --matches "${SOURCE_CSV_NORM}" --out "${PREDICTIONS_CSV}"
           test -s "${PREDICTIONS_CSV}" || { echo "::error::predictions.csv not generated"; exit 8; }
 
-      - name: 19 - Train calibrator or identity
-        shell: bash
+      - name: 19 Train calibrator or identity
         run: |
           set -euo pipefail
           if [ "${TRAIN_CALIBRATOR}" = "true" ]; then
             [ -f scripts/calibrator_train.py ] || { echo "::error::scripts/calibrator_train.py not found"; exit 9; }
             if ! python -m scripts.calibrator_train --history "${FEATURES_PARQUET}" --out "${CALIBRATOR_PKL}"; then
-              cat <<'PY' >/tmp/cal_id.py
+              python - <<'PY'
 import pickle, os
 with open(os.environ['CALIBRATOR_PKL'],'wb') as f:
     pickle.dump({'type':'identity'}, f)
 print('[cal] identity fallback saved')
 PY
-              python /tmp/cal_id.py
             fi
           else
-            cat <<'PY' >/tmp/cal_id.py
+            python - <<'PY'
 import pickle, os
 with open(os.environ['CALIBRATOR_PKL'],'wb') as f:
     pickle.dump({'type':'identity'}, f)
 print('[cal] identity saved (TRAIN_CALIBRATOR=false)')
 PY
-            python /tmp/cal_id.py
           fi
           test -s "${CALIBRATOR_PKL}" || { echo "::error::calibrator.pkl not generated"; exit 9; }
 
-      - name: 20 - Apply calibration
-        shell: bash
+      - name: 20 Apply calibration
         run: |
           set -euo pipefail
-          cat <<'PY' >/tmp/apply_cal.py
+          python - <<'PY'
 import csv, os, pickle
 pred = os.environ['PREDICTIONS_CSV']
 out = os.environ['PREDICTIONS_CALIB_CSV']
@@ -299,14 +273,12 @@ with open(out,'w',newline='',encoding='utf-8') as f:
     w.writerows(rows)
 print('[calibration] wrote', out, 'rows=', len(rows))
 PY
-          python /tmp/apply_cal.py
           test -s "${PREDICTIONS_CALIB_CSV}" || { echo "::error::predictions_calibrated.csv not generated"; exit 9; }
 
-      - name: 21 - Kelly staking 1x2
-        shell: bash
+      - name: 21 Kelly staking 1x2
         run: |
           set -euo pipefail
-          cat <<'PY' >/tmp/kelly.py
+          python - <<'PY'
 import csv, os
 BANK = float(os.environ.get('BANKROLL','1000'))
 FRAC = float(os.environ.get('KELLY_FRACTION','0.5'))
@@ -346,14 +318,12 @@ with open(out,'w',newline='',encoding='utf-8') as f:
     w.writerows(rows)
 print('[kelly] bets ->', out, 'rows=', len(rows))
 PY
-          python /tmp/kelly.py
           test -s "${KELLY_BETS_CSV}" || { echo "::error::bets_kelly.csv not generated"; exit 10; }
 
-      - name: 22 - Loteca card top 14
-        shell: bash
+      - name: 22 Loteca card top 14
         run: |
           set -euo pipefail
-          cat <<'PY' >/tmp/loteca_card.py
+          python - <<'PY'
 import csv, os
 TOP = int(os.environ.get('KELLY_TOP_N','14'))
 bets = os.environ['KELLY_BETS_CSV']
@@ -372,11 +342,9 @@ with open(out,'w',newline='',encoding='utf-8') as f:
         w.writerow([i, row['team_home'], row['team_away'], palpite, row['stake'], row['odds'], row['p'], row['expected_value']])
 print('[loteca] card ->', out, 'rows=', len(rows))
 PY
-          python /tmp/loteca_card.py
           test -s "${LOTECA_CARD_CSV}" || { echo "::error::loteca_card.csv not generated"; exit 11; }
 
-      - name: 23 - Final listing
-        shell: bash
+      - name: 23 Final listing
         run: |
           set -euo pipefail
           ls -lh "${OUT_DIR}"
