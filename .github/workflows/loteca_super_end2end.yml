@@ -3,7 +3,7 @@ name: Loteca Super End-to-End
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 12 * * *" # opcional: roda todo dia 12:15 UTC
+    - cron: "15 12 * * *"
 
 jobs:
   super:
@@ -34,7 +34,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (with safe fallbacks)
+      - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -42,17 +42,13 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt || true
           fi
-          # Garantir libs essenciais
-          pip install --upgrade \
-            pandas numpy requests python-dateutil unidecode rapidfuzz \
-            pyarrow scikit-learn
+          pip install --upgrade pandas numpy requests python-dateutil unidecode rapidfuzz pyarrow scikit-learn
 
       - name: Prepare data folders and stubs
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p data/history data/in data/out data/aliases models
-          # stubs seguros
           if [ ! -s "data/history/results.csv" ]; then
             echo "date,home,away,home_goals,away_goals" > data/history/results.csv
             echo "1970-01-01,BOOT,BOOT,0,0" >> data/history/results.csv
@@ -66,7 +62,6 @@ jobs:
           fi
 
       - name: Define run variables
-        id: define_vars
         shell: bash
         run: |
           set -euo pipefail
@@ -89,7 +84,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       # =========================
-      # Histórico -> Features
+      # Histórico -> Features -> Enrich -> Train
       # =========================
       - name: Update history (optional)
         shell: bash
@@ -146,7 +141,7 @@ jobs:
       # =========================
       # Fonte de jogos
       # =========================
-      - name: Normalize matches (source -> canonical)
+      - name: Normalize matches
         shell: bash
         run: |
           set -euo pipefail
@@ -156,12 +151,11 @@ jobs:
             --out_csv "${SOURCE_CSV_NORM}"
           test -s "${SOURCE_CSV_NORM}" || { echo "::error::matches_norm.csv not generated"; exit 3; }
 
-      - name: Auto-alias harvester (optional, robust)
+      - name: Auto-alias harvester (optional)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p data/aliases
-          # Tenta nova CLI; se falhar, tenta antiga; se falhar, cria vazio.
           if [ -f scripts/harvest_aliases.py ]; then
             python -m scripts.harvest_aliases \
               --source_csv "${SOURCE_CSV_NORM}" \
@@ -179,8 +173,8 @@ jobs:
       # =========================
       # TheOddsAPI: Preflight + Ingest + Fallback
       # =========================
-      - name: Preflight TheOddsAPI (Série A)
-        if: always()
+      - name: Preflight TheOddsAPI (Serie A)
+        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -190,14 +184,14 @@ jobs:
           fi
           echo ">> regions=${REGIONS}"
           curl -sS "https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions=${REGIONS}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${THEODDS_API_KEY}" \
-            | python - << 'PY'
+            | python - <<'PY'
 import sys, json
 try:
     data = json.load(sys.stdin)
     if isinstance(data, dict) and data.get("message"):
         print(f"[preflight] API message: {data['message']}")
     else:
-        print(f"[preflight] eventos Série A (h2h) = {len(data)}")
+        print(f"[preflight] eventos Serie A (h2h) = {len(data)}")
         for e in (data or [])[:5]:
             print("  -", e.get("home_team"), "vs", e.get("away_team"), "@", e.get("commence_time"))
 except Exception as e:
@@ -217,10 +211,9 @@ PY
             --rodada "${OUT_DIR}" \
             --regions "${REGIONS}" \
             --source_csv "${SOURCE_CSV_NORM}"
-          # não validamos aqui; fallback cuida abaixo
 
-      - name: Fallback — gerar odds diretas se ingest não produzir linhas
-        if: always()
+      - name: Fallback TheOddsAPI (direct fetch if empty)
+        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -228,17 +221,13 @@ PY
             echo "::notice::THEODDS_API_KEY não configurada; pulando fallback."
             exit 0
           fi
-
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
-
-          # Se já existe e tem >1 linha, não faz nada
           if [ -s "$OUT" ] && [ "$(wc -l < "$OUT")" -gt 1 ]; then
             echo "[fallback] odds_theoddsapi.csv já parece válido; pulando."
             exit 0
           fi
-
           echo "[fallback] Iniciando coleta direta do TheOddsAPI…"
-          python - << 'PY'
+          python - <<'PY'
 import os, csv, json, sys, urllib.request, urllib.parse
 API=os.environ["THEODDS_API_KEY"]
 REG=os.environ.get("REGIONS","eu")
@@ -260,8 +249,7 @@ for sport in ("soccer_brazil_campeonato","soccer_brazil_serie_b"):
                 for mk in b.get("markets",[]):
                     if mk.get("key")!="h2h": continue
                     for o in mk.get("outcomes",[]) or []:
-                        n=o.get("name","")
-                        p=o.get("price",None)
+                        n=o.get("name",""); p=o.get("price",None)
                         if p is None: continue
                         if n==home:
                             best["home"]=max(best["home"] or 0,p)
@@ -280,12 +268,11 @@ with open(OUT,"w",newline="",encoding="utf-8") as f:
     for r in rows: w.writerow(r)
 print(f"[fallback] escrito {OUT} com {len(rows)} linhas")
 PY
-
           if [ ! -s "$OUT" ] || [ "$(wc -l < "$OUT")" -le 1 ]; then
             echo "::warning::Fallback não obteve odds; pipeline seguirá sem odds da TheOddsAPI."
           fi
 
-      - name: Ingest API-Football odds (complementar, opcional)
+      - name: Ingest API-Football odds (optional)
         shell: bash
         run: |
           set -euo pipefail
@@ -302,7 +289,7 @@ PY
             --source_csv "${SOURCE_CSV_NORM}" || true
           echo "[apifootball] ingest complementar finalizado"
 
-      - name: Consensus odds (com fallback interno)
+      - name: Consensus odds (with fallback to TheOddsAPI file)
         shell: bash
         run: |
           set -euo pipefail
@@ -310,7 +297,6 @@ PY
           if [ -f scripts/consensus_odds_safe.py ]; then
             python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict || true
           fi
-          # Fallback: se não gerou, copie do odds_theoddsapi.csv
           if [ ! -s "${OUT_FILE}" ]; then
             if [ -s "${OUT_DIR}/odds_theoddsapi.csv" ]; then
               cp "${OUT_DIR}/odds_theoddsapi.csv" "${OUT_FILE}"
@@ -329,7 +315,7 @@ PY
       # =========================
       # Bivariate / Predições / Calibração
       # =========================
-      - name: Bivariate (baseline ou script)
+      - name: Bivariate (or fallback 1/3 each)
         shell: bash
         run: |
           set -euo pipefail
@@ -339,26 +325,24 @@ PY
               --matches "${SOURCE_CSV_NORM}" \
               --out "${BIVARIATE_CSV}" || true
           fi
-          # Fallback simples: 1/3 para cada resultado
           if [ ! -s "${BIVARIATE_CSV}" ]; then
-            python - << 'PY'
+            python - <<'PY'
 import csv, os
 src=os.environ["SOURCE_CSV_NORM"]; out=os.environ["BIVARIATE_CSV"]
 rows=[]
 with open(src, newline="", encoding="utf-8") as f:
     r=csv.DictReader(f)
-    for i,row in enumerate(r,1):
+    for row in r:
         rows.append([row["home"], row["away"], 1/3, 1/3, 1/3])
 os.makedirs(os.path.dirname(out), exist_ok=True)
 with open(out,"w",newline="",encoding="utf-8") as f:
-    w=csv.writer(f); w.writerow(["team_home","team_away","p_home","p_draw","p_away"])
-    w.writerows(rows)
+    w=csv.writer(f); w.writerow(["team_home","team_away","p_home","p_draw","p_away"]); w.writerows(rows)
 print(f"[bivariate] fallback gerado {out} com {len(rows)} jogos")
 PY
           fi
           test -s "${BIVARIATE_CSV}" || { echo "::error::bivariate.csv not generated"; exit 7; }
 
-      - name: Predict (dynamic model ou fallback)
+      - name: Predict (dynamic model or bivariate fallback)
         shell: bash
         run: |
           set -euo pipefail
@@ -369,9 +353,8 @@ PY
               --matches "${SOURCE_CSV_NORM}" \
               --out "${PREDICTIONS_CSV}" || true
           fi
-          # Fallback: usa o bivariate
           if [ ! -s "${PREDICTIONS_CSV}" ]; then
-            python - << 'PY'
+            python - <<'PY'
 import csv, os
 biv=os.environ["BIVARIATE_CSV"]; out=os.environ["PREDICTIONS_CSV"]
 rows=[]
@@ -380,8 +363,7 @@ with open(biv, newline="", encoding="utf-8") as f:
     for row in r:
         rows.append([row["team_home"],row["team_away"],row["p_home"],row["p_draw"],row["p_away"]])
 with open(out,"w",newline="",encoding="utf-8") as f:
-    w=csv.writer(f); w.writerow(["team_home","team_away","p_home","p_draw","p_away"])
-    w.writerows(rows)
+    w=csv.writer(f); w.writerow(["team_home","team_away","p_home","p_draw","p_away"]); w.writerows(rows)
 print(f"[predict] fallback (bivariate) -> {out} ({len(rows)} jogos)")
 PY
           fi
@@ -396,9 +378,8 @@ PY
               --history "${FEATURES_PARQUET}" \
               --out "${CALIBRATOR_PKL}" || true
           fi
-          # Identity calibrator se não existir
           if [ ! -s "${CALIBRATOR_PKL}" ]; then
-            python - << 'PY'
+            python - <<'PY'
 import pickle, os
 out=os.environ["CALIBRATOR_PKL"]
 cal={"type":"identity"}
@@ -411,7 +392,7 @@ PY
         shell: bash
         run: |
           set -euo pipefail
-          python - << 'PY'
+          python - <<'PY'
 import csv, pickle, os
 pred=os.environ["PREDICTIONS_CSV"]
 out=os.environ["PREDICTIONS_CALIB_CSV"]
@@ -424,13 +405,11 @@ with open(pred, newline="", encoding="utf-8") as f:
         ph, pd, pa = float(row["p_home"]), float(row["p_draw"]), float(row["p_away"])
         if cal.get("type")=="identity":
             pass
-        # (pontos p/ aplicar outras calibrações no futuro)
         s = ph+pd+pa
         if s>0: ph,pd,pa = ph/s, pd/s, pa/s
         rows.append([row["team_home"],row["team_away"],ph,pd,pa])
 with open(out,"w",newline="",encoding="utf-8") as f:
-    w=csv.writer(f); w.writerow(["team_home","team_away","p_home","p_draw","p_away"])
-    w.writerows(rows)
+    w=csv.writer(f); w.writerow(["team_home","team_away","p_home","p_draw","p_away"]); w.writerows(rows)
 print(f"[calibration] escrito {out} ({len(rows)} jogos)")
 PY
           test -s "${PREDICTIONS_CALIB_CSV}" || { echo "::error::predictions_calibrated.csv not generated"; exit 9; }
@@ -442,8 +421,8 @@ PY
         shell: bash
         run: |
           set -euo pipefail
-          python - << 'PY'
-import csv, os, math
+          python - <<'PY'
+import csv, os
 BANK=float(os.environ.get("BANKROLL","1000"))
 FRAC=float(os.environ.get("KELLY_FRACTION","0.5"))
 CAP=float(os.environ.get("KELLY_CAP","0.10"))
@@ -451,8 +430,6 @@ ROUND_TO=int(os.environ.get("ROUND_TO","1"))
 pred=os.environ["PREDICTIONS_CALIB_CSV"]
 odds=os.environ["CONSENSUS_CSV"]
 out=os.environ["KELLY_BETS_CSV"]
-
-# carrega odds para dict
 odict={}
 with open(odds, newline="", encoding="utf-8") as f:
     r=csv.DictReader(f)
@@ -460,6 +437,11 @@ with open(odds, newline="", encoding="utf-8") as f:
         key=(row["team_home"],row["team_away"])
         odict[key]=(float(row["odds_home"]), float(row["odds_draw"]), float(row["odds_away"]))
 rows=[]
+def kelly(p,o,frac,cap):
+    b=o-1.0
+    k=(p*b-(1-p))/b if b>0 else 0.0
+    k=max(0.0, min(k*frac, cap))
+    return k
 with open(pred, newline="", encoding="utf-8") as f:
     r=csv.DictReader(f)
     for row in r:
@@ -467,15 +449,9 @@ with open(pred, newline="", encoding="utf-8") as f:
         if key not in odict: continue
         ph,pd,pa = float(row["p_home"]), float(row["p_draw"]), float(row["p_away"])
         oh,od,oa = odict[key]
-        # Kelly fracionado por resultado
-        def kelly(p,o):
-            b=o-1.0
-            k=(p*b-(1-p))/b if b>0 else 0.0
-            return max(0.0, min(k*FRAC, CAP))
-        kh,kd,ka = kelly(ph,oh), kelly(pd,od), kelly(pa,oa)
-        # decide melhor outcome
-        ks=[("H",kh,oh,ph),("D",kd,od,pd),("A",ka,oa,pa)]
-        side, k, o, p = max(ks, key=lambda x: x[1])
+        kh,kd,ka = kelly(ph,oh,FRAC,CAP), kelly(pd,od,FRAC,CAP), kelly(pa,oa,FRAC,CAP)
+        cand=[("H",kh,oh,ph),("D",kd,od,pd),("A",ka,oa,pa)]
+        side,k,o,p = max(cand, key=lambda x: x[1])
         stake = round(BANK * k, ROUND_TO)
         ev = p*o - 1
         rows.append([row["team_home"], row["team_away"], side, p, o, k, stake, ev])
@@ -491,16 +467,14 @@ PY
         shell: bash
         run: |
           set -euo pipefail
-          python - << 'PY'
+          python - <<'PY'
 import csv, os
 TOP=int(os.environ.get("KELLY_TOP_N","14"))
 bets=os.environ["KELLY_BETS_CSV"]
 out=os.environ["LOTECA_CARD_CSV"]
 rows=[]
 with open(bets, newline="", encoding="utf-8") as f:
-    r=csv.DictReader(f)
-    rows=list(r)
-# ordenar por stake desc, depois EV desc
+    r=csv.DictReader(f); rows=list(r)
 rows.sort(key=lambda x:(float(x["stake"]), float(x["expected_value"])), reverse=True)
 rows=rows[:TOP]
 with open(out,"w",newline="",encoding="utf-8") as f:
@@ -515,7 +489,7 @@ PY
           test -s "${LOTECA_CARD_CSV}" || { echo "::error::loteca_card.csv not generated"; exit 11; }
 
       # =========================
-      # Diagnóstico (opcional)
+      # Diagnóstico e listagem
       # =========================
       - name: Diagnostics (optional)
         shell: bash
