@@ -11,6 +11,9 @@ permissions:
 jobs:
   super:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
 
     env:
       SEASON: "2025"
@@ -43,7 +46,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --upgrade pandas numpy requests python-dateutil unidecode rapidfuzz pyarrow scikit-learn pyyaml
 
-      - name: 02b Install CLI tools
+      - name: 02b Install jq
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -70,21 +73,19 @@ jobs:
           set -euo pipefail
           OUT_DIR="data/out/${GITHUB_RUN_ID}"
           mkdir -p "${OUT_DIR}"
-          {
-            echo "OUT_DIR=${OUT_DIR}"
-            echo "FEATURES_PARQUET=data/history/features.parquet"
-            echo "SOURCE_CSV_NORM=${OUT_DIR}/matches_norm.csv"
-            echo "AUTO_ALIASES_JSON=data/aliases/auto_aliases.json"
-            echo "BIVARIATE_CSV=${OUT_DIR}/bivariate.csv"
-            echo "MODEL_PKL=${OUT_DIR}/dynamic_model.pkl"
-            echo "STATE_JSON=${OUT_DIR}/state_params.json"
-            echo "PREDICTIONS_CSV=${OUT_DIR}/predictions.csv"
-            echo "CALIBRATOR_PKL=${OUT_DIR}/calibrator.pkl"
-            echo "PREDICTIONS_CALIB_CSV=${OUT_DIR}/predictions_calibrated.csv"
-            echo "CONSENSUS_CSV=${OUT_DIR}/odds_consensus.csv"
-            echo "KELLY_BETS_CSV=${OUT_DIR}/bets_kelly.csv"
-            echo "LOTECA_CARD_CSV=${OUT_DIR}/loteca_card.csv"
-          } >> "$GITHUB_ENV"
+          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
+          echo "FEATURES_PARQUET=data/history/features.parquet" >> "$GITHUB_ENV"
+          echo "SOURCE_CSV_NORM=${OUT_DIR}/matches_norm.csv" >> "$GITHUB_ENV"
+          echo "AUTO_ALIASES_JSON=data/aliases/auto_aliases.json" >> "$GITHUB_ENV"
+          echo "BIVARIATE_CSV=${OUT_DIR}/bivariate.csv" >> "$GITHUB_ENV"
+          echo "MODEL_PKL=${OUT_DIR}/dynamic_model.pkl" >> "$GITHUB_ENV"
+          echo "STATE_JSON=${OUT_DIR}/state_params.json" >> "$GITHUB_ENV"
+          echo "PREDICTIONS_CSV=${OUT_DIR}/predictions.csv" >> "$GITHUB_ENV"
+          echo "CALIBRATOR_PKL=${OUT_DIR}/calibrator.pkl" >> "$GITHUB_ENV"
+          echo "PREDICTIONS_CALIB_CSV=${OUT_DIR}/predictions_calibrated.csv" >> "$GITHUB_ENV"
+          echo "CONSENSUS_CSV=${OUT_DIR}/odds_consensus.csv" >> "$GITHUB_ENV"
+          echo "KELLY_BETS_CSV=${OUT_DIR}/bets_kelly.csv" >> "$GITHUB_ENV"
+          echo "LOTECA_CARD_CSV=${OUT_DIR}/loteca_card.csv" >> "$GITHUB_ENV"
 
       - name: 06 Update history
         run: |
@@ -169,7 +170,7 @@ jobs:
                 | @csv
               ' "${TMP}"
             } > "${OUT}"
-            echo "[fallback] wrote ${OUT} rows=$(($(wc -l <"${OUT}")-1))"
+            echo "[fallback] wrote ${OUT} rows=$(($(wc -l < "${OUT}") - 1))"
           fi
           [ -s "$OUT" ] && [ "$(wc -l < "$OUT" | tr -d ' ')" -gt 1 ] || { echo "::error::No odds from TheOddsAPI (primary and fallback)"; exit 5; }
 
@@ -218,89 +219,65 @@ jobs:
       - name: 20 Apply calibration
         run: |
           set -euo pipefail
-          python - <<'PYCODE'
-import csv, os
-pred = os.environ['PREDICTIONS_CSV']
-out = os.environ['PREDICTIONS_CALIB_CSV']
-rows=[]
-with open(pred, newline='', encoding='utf-8') as f:
-    r = csv.DictReader(f)
-    for row in r:
-        ph, pd, pa = float(row['p_home']), float(row['p_draw']), float(row['p_away'])
-        s = ph+pd+pa
-        if s>0: ph,pd,pa = ph/s, pd/s, pa/s
-        rows.append([row['team_home'], row['team_away'], ph, pd, pa])
-with open(out,'w',newline='',encoding='utf-8') as f:
-    w=csv.writer(f); w.writerow(['team_home','team_away','p_home','p_draw','p_away']); w.writerows(rows)
-print('[calibration] wrote', out, 'rows=', len(rows))
-PYCODE
+          python -c "import csv,os;pred=os.environ['PREDICTIONS_CSV'];out=os.environ['PREDICTIONS_CALIB_CSV'];rows=[]; \
+f=open(pred,newline='',encoding='utf-8');r=csv.DictReader(f); \
+[rows.append([row['team_home'],row['team_away'],float(row['p_home']),float(row['p_draw']),float(row['p_away'])]) for row in r]; f.close(); \
+w=open(out,'w',newline='',encoding='utf-8');cw=csv.writer(w);cw.writerow(['team_home','team_away','p_home','p_draw','p_away']); \
+[ cw.writerow([h,a]+([(ph+pd+pa) and ph/(ph+pd+pa) or ph, (ph+pd+pa) and pd/(ph+pd+pa) or pd, (ph+pd+pa) and pa/(ph+pd+pa) or pa])) for (h,a,ph,pd,pa) in rows ]; w.close(); \
+print('[calibration] wrote',out,'rows=',len(rows))"
           test -s "${PREDICTIONS_CALIB_CSV}" || { echo "::error::predictions_calibrated.csv not generated"; exit 9; }
 
       - name: 21 Kelly staking 1x2
         run: |
           set -euo pipefail
-          python - <<'PYCODE'
-import csv, os
-BANK = float(os.environ.get('BANKROLL','1000'))
-FRAC = float(os.environ.get('KELLY_FRACTION','0.5'))
-CAP  = float(os.environ.get('KELLY_CAP','0.10'))
-ROUND_TO = int(os.environ.get('ROUND_TO','1'))
-pred = os.environ['PREDICTIONS_CALIB_CSV']
-odds = os.environ['CONSENSUS_CSV']
-out  = os.environ['KELLY_BETS_CSV']
-odict={}
-with open(odds, newline='', encoding='utf-8') as f:
-    r=csv.DictReader(f)
-    for row in r:
-        key=(row['team_home'],row['team_away'])
-        odict[key]=(float(row['odds_home']),float(row['odds_draw']),float(row['odds_away']))
-rows=[]
-def kelly(p,o):
-    b=o-1.0
-    if b<=0: return 0.0
-    k=(p*b-(1-p))/b
-    return max(0.0,min(k*FRAC,CAP))
-with open(pred, newline='', encoding='utf-8') as f:
-    r=csv.DictReader(f)
-    for row in r:
-        key=(row['team_home'],row['team_away'])
-        if key not in odict: continue
-        ph,pd,pa=float(row['p_home']),float(row['p_draw']),float(row['p_away'])
-        oh,od,oa=odict[key]
-        kh,kd,ka=kelly(ph,oh),kelly(pd,od),kelly(pa,oa)
-        side,k,o,p=max([('H',kh,oh,ph),('D',kd,od,pd),('A',ka,oa,pa)], key=lambda x:x[1])
-        stake=round(BANK*k, ROUND_TO)
-        ev=p*o-1
-        rows.append([row['team_home'],row['team_away'],side,p,o,k,stake,ev])
-with open(out,'w',newline='',encoding='utf-8') as f:
-    w=csv.writer(f)
-    w.writerow(['team_home','team_away','side','p','odds','kelly_frac','stake','expected_value'])
-    w.writerows(rows)
-print('[kelly] bets ->', out, 'rows=', len(rows))
-PYCODE
+          python -c "import csv,os;BANK=float(os.environ.get('BANKROLL','1000'));FRAC=float(os.environ.get('KELLY_FRACTION','0.5')); \
+CAP=float(os.environ.get('KELLY_CAP','0.10'));ROUND_TO=int(os.environ.get('ROUND_TO','1')); \
+pred=os.environ['PREDICTIONS_CALIB_CSV'];odds=os.environ['CONSENSUS_CSV'];out=os.environ['KELLY_BETS_CSV']; \
+odict={}; \
+f=open(odds,newline='',encoding='utf-8');r=csv.DictReader(f); \
+[odict.__setitem__((row['team_home'],row['team_away']),(float(row['odds_home']),float(row['odds_draw']),float(row['odds_away']))) for row in r]; f.close(); \
+rows=[]; \
+def kelly(p,o): \
+    b=o-1.0; \
+    k=(p*b-(1-p))/b if b>0 else 0.0; \
+    k=max(0.0,min(k*FRAC,CAP)); \
+    return k; \
+f=open(pred,newline='',encoding='utf-8');r=csv.DictReader(f); \
+import math; \
+for row in r: \
+    key=(row['team_home'],row['team_away']); \
+    if key not in odict: \
+        continue; \
+    ph,pd,pa=float(row['p_home']),float(row['p_draw']),float(row['p_away']); \
+    oh,od,oa=odict[key]; \
+    kh,kd,ka=kelly(ph,oh),kelly(pd,od),kelly(pa,oa); \
+    side,k,o,p=max([('H',kh,oh,ph),('D',kd,od,pd),('A',ka,oa,pa)], key=lambda x:x[1]); \
+    stake=round(BANK*k, ROUND_TO); \
+    ev=p*o-1.0; \
+    rows.append([row['team_home'],row['team_away'],side,p,o,k,stake,ev]); \
+f.close(); \
+w=open(out,'w',newline='',encoding='utf-8');cw=csv.writer(w); \
+cw.writerow(['team_home','team_away','side','p','odds','kelly_frac','stake','expected_value']); \
+[cw.writerow(rw) for rw in rows]; w.close(); \
+print('[kelly] bets ->',out,'rows=',len(rows))"
           test -s "${KELLY_BETS_CSV}" || { echo "::error::bets_kelly.csv not generated"; exit 10; }
 
       - name: 22 Loteca card top 14
         run: |
           set -euo pipefail
-          python - <<'PYCODE'
-import csv, os
-TOP=int(os.environ.get('KELLY_TOP_N','14'))
-bets=os.environ['KELLY_BETS_CSV']
-out=os.environ['LOTECA_CARD_CSV']
-rows=[]
-with open(bets, newline='', encoding='utf-8') as f:
-    r=csv.DictReader(f); rows=list(r)
-rows.sort(key=lambda x:(float(x['stake']), float(x['expected_value'])), reverse=True)
-rows=rows[:TOP]
-with open(out,'w',newline='',encoding='utf-8') as f:
-    w=csv.writer(f)
-    w.writerow(['jogo','home','away','palpite','stake','odds','p','ev'])
-    for i,row in enumerate(rows,1):
-        palpite={'H':'1','D':'X','A':'2'}[row['side']]
-        w.writerow([i,row['team_home'],row['team_away'],palpite,row['stake'],row['odds'],row['p'],row['expected_value']])
-print('[loteca] card ->', out, 'rows=', len(rows))
-PYCODE
+          python -c "import csv,os;TOP=int(os.environ.get('KELLY_TOP_N','14')); \
+bets=os.environ['KELLY_BETS_CSV'];out=os.environ['LOTECA_CARD_CSV']; \
+f=open(bets,newline='',encoding='utf-8');r=csv.DictReader(f);rows=list(r);f.close(); \
+rows.sort(key=lambda x:(float(x['stake']),float(x['expected_value'])),reverse=True);rows=rows[:TOP]; \
+w=open(out,'w',newline='',encoding='utf-8');cw=csv.writer(w); \
+cw.writerow(['jogo','home','away','palpite','stake','odds','p','ev']); \
+m={'H':'1','D':'X','A':'2'}; \
+i=1; \
+for row in rows: \
+    cw.writerow([i,row['team_home'],row['team_away'],m[row['side']],row['stake'],row['odds'],row['p'],row['expected_value']]); \
+    i+=1; \
+w.close(); \
+print('[loteca] card ->',out,'rows=',len(rows))"
           test -s "${LOTECA_CARD_CSV}" || { echo "::error::loteca_card.csv not generated"; exit 11; }
 
       - name: 23 Final listing
