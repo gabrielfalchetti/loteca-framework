@@ -1,4 +1,4 @@
-name: Loteca Super End-to-End
+name: Loteca Super End2End
 
 on:
   workflow_dispatch:
@@ -83,7 +83,7 @@ jobs:
             echo "LOTECA_CARD_CSV=${OUT_DIR}/loteca_card.csv"
           } >> "$GITHUB_ENV"
 
-      # ============ Historico / Features / Enrich / Treino ============
+      # ============ History / Features / Enrich / Train ============
       - name: Update history (optional)
         shell: bash
         run: |
@@ -92,7 +92,7 @@ jobs:
             python -m scripts.update_history --since_days 14 --out "data/history/results.csv" || \
               echo "::notice::update_history falhou; mantendo stub"
           else
-            echo "::notice::scripts/update_history.py não encontrado — mantendo stub"
+            echo "::notice::scripts/update_history.py nao encontrado; mantendo stub"
           fi
           [ -s "data/history/results.csv" ] || { echo "::error::results.csv vazio"; exit 1; }
 
@@ -112,7 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${API_FOOTBALL_KEY:-}" ]; then
-            echo "::notice::API_FOOTBALL_KEY não configurada; pulando enrich."
+            echo "::notice::API_FOOTBALL_KEY nao configurada; pulando enrich."
             exit 0
           fi
           if [ ! -f scripts/enrich_api_football.py ]; then
@@ -136,7 +136,7 @@ jobs:
           test -s "${STATE_JSON}" || { echo "::error::state_params.json not generated"; exit 2; }
           test -s "${MODEL_PKL}" || { echo "::error::dynamic_model.pkl not generated"; exit 2; }
 
-      # ========================= Fonte de jogos =========================
+      # ========================= Matches source =========================
       - name: Normalize matches
         shell: bash
         run: |
@@ -153,7 +153,6 @@ jobs:
           set -euo pipefail
           mkdir -p data/aliases
           if [ -f scripts/harvest_aliases.py ]; then
-            # tenta interface nova; se nao existir, cai na antiga
             python -m scripts.harvest_aliases \
               --source_csv "${SOURCE_CSV_NORM}" \
               --lookahead_hours 72 \
@@ -162,7 +161,7 @@ jobs:
               --hours 72 --regions "${REGIONS}" --out "${AUTO_ALIASES_JSON}" || true
             [ -s "${AUTO_ALIASES_JSON}" ] || echo "{}" > "${AUTO_ALIASES_JSON}"
           else
-            echo "::notice::sem scripts/harvest_aliases.py — criando auto_aliases.json vazio"
+            echo "::notice::sem scripts/harvest_aliases.py; criando auto_aliases.json vazio"
             echo "{}" > "${AUTO_ALIASES_JSON}"
           fi
           echo "::notice::auto_aliases.json pronto em ${AUTO_ALIASES_JSON}"
@@ -199,7 +198,7 @@ PY
         run: |
           set -euo pipefail
           if [ -z "${THEODDS_API_KEY:-}" ]; then
-            echo "::error::THEODDS_API_KEY não configurada"
+            echo "::error::THEODDS_API_KEY nao configurada"
             exit 5
           fi
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
@@ -213,7 +212,7 @@ PY
         run: |
           set -euo pipefail
           if [ -z "${THEODDS_API_KEY:-}" ]; then
-            echo "::notice::THEODDS_API_KEY não configurada; pulando fallback."
+            echo "::notice::THEODDS_API_KEY nao configurada; pulando fallback."
             exit 0
           fi
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
@@ -264,7 +263,7 @@ with open(OUT,"w",newline="",encoding="utf-8") as f:
 print(f"[fallback] escrito {OUT} com {len(rows)} linhas")
 PY
           if [ ! -s "$OUT" ] || [ "$(wc -l < "$OUT")" -le 1 ]; then
-            echo "::warning::Fallback não obteve odds; pipeline seguirá sem odds da TheOddsAPI."
+            echo "::warning::Fallback nao obteve odds; pipeline seguira sem odds da TheOddsAPI."
           fi
 
       - name: Ingest API-Football odds optional
@@ -272,7 +271,7 @@ PY
         run: |
           set -euo pipefail
           if [ -z "${API_FOOTBALL_KEY:-}" ]; then
-            echo "::notice::API_FOOTBALL_KEY não configurada; pulando ingest complementar."
+            echo "::notice::API_FOOTBALL_KEY nao configurada; pulando ingest complementar."
             exit 0
           fi
           if [ ! -f scripts/ingest_odds_apifootball.py ]; then
@@ -297,7 +296,7 @@ PY
               cp "${OUT_DIR}/odds_theoddsapi.csv" "${OUT_FILE}"
               echo "::notice::consensus caiu no fallback (somente TheOddsAPI)."
             else
-              echo "::error::consensus não gerado e não há odds_theoddsapi.csv"
+              echo "::error::consensus nao gerado e nao ha odds_theoddsapi.csv"
               exit 6
             fi
           fi
@@ -305,9 +304,9 @@ PY
           for c in team_home team_away odds_home odds_draw odds_away; do
             echo "${header}" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
-          echo "[consensus] OK — ${OUT_FILE}"
+          echo "[consensus] OK - ${OUT_FILE}"
 
-      # ============ Bivariate / Predicoes / Calibracao ============
+      # ============ Bivariate / Predictions / Calibration ============
       - name: Bivariate or fallback 1-3-3
         shell: bash
         run: |
@@ -405,7 +404,7 @@ print(f"[calibration] escrito {out} ({len(rows)} jogos)")
 PY
           test -s "${PREDICTIONS_CALIB_CSV}" || { echo "::error::predictions_calibrated.csv not generated"; exit 9; }
 
-      # ============ Kelly / Cartao Loteca ============
+      # ============ Kelly / Loteca card ============
       - name: Kelly staking 1x2
         shell: bash
         run: |
@@ -451,7 +450,7 @@ print(f"[kelly] bets -> {out} ({len(rows)} jogos)")
 PY
           test -s "${KELLY_BETS_CSV}" || { echo "::error::bets_kelly.csv not generated"; exit 10; }
 
-      - name: Loteca card top-N
+      - name: Loteca card top N
         shell: bash
         run: |
           set -euo pipefail
@@ -476,7 +475,7 @@ print(f"[loteca] card -> {out} ({len(rows)} jogos)")
 PY
           test -s "${LOTECA_CARD_CSV}" || { echo "::error::loteca_card.csv not generated"; exit 11; }
 
-      # ============ Diagnostico e listagem ============
+      # ============ Diagnostics and list ============
       - name: Diagnostics optional
         shell: bash
         run: |
@@ -487,7 +486,7 @@ PY
             export HAS_ODDS
             python -m scripts.diag_pipeline || true
           else
-            echo "::warning::scripts/diag_pipeline.py não encontrado; pulando diagnóstico"
+            echo "::warning::scripts/diag_pipeline.py nao encontrado; pulando diagnostico"
           fi
 
       - name: List outputs
