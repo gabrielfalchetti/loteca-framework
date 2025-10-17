@@ -2,7 +2,7 @@
 import argparse
 import os
 import sys
-import pandas as pd
+import pandas as pd  # Verificação explícita da importação
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import CalibratedClassifierCV
@@ -56,6 +56,13 @@ def main() -> None:
         sys.exit(9)
 
     try:
+        # Verificar se pandas está importado corretamente
+        try:
+            pd.DataFrame()  # Teste simples de importação
+        except NameError:
+            _log("Erro crítico: módulo pandas não importado corretamente.")
+            sys.exit(9)
+
         df = pd.read_csv(args.inp)
         # Validação de entrada
         if not all(col in df.columns for col in ["match_id", "team_home", "team_away", "p_home", "p_draw", "p_away"]):
