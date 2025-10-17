@@ -2,7 +2,11 @@
 import argparse
 import os
 import sys
-import pandas as pd  # Verificação explícita da importação
+try:
+    import pandas as pd  # Tentativa explícita de importação
+except ImportError:
+    print("[calibrate] Erro: módulo pandas não encontrado. Verifique o ambiente.", file=sys.stderr)
+    sys.exit(9)
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import CalibratedClassifierCV
