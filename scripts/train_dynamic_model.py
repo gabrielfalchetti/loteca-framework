@@ -40,20 +40,21 @@ def fit_states(df: pd.DataFrame, span: int = 12, model_type: str = "poisson") ->
 
     df = df.sort_values("date")
     alpha = 2.0 / (span + 1.0)
-    states: Dict[str, Dict] = {}
+    states = {}
 
     for team, group in df.groupby("team"):
-        # Inicialização Kalman
+        # Inicialização Kalman (somente ataque e defesa)
         kf = KalmanFilter(
-            initial_state_mean=[0.1, 0.1, 0.15],  # [ataque, defesa, home_adv]
+            initial_state_mean=[0.1, 0.1],  # [ataque, defesa]
             n_dim_obs=2,  # gf, ga
-            observation_matrices=np.eye(2),
-            transition_matrices=np.eye(3) * (1 - alpha),
-            observation_covariance=0.1 * np.eye(2),
-            transition_covariance=0.01 * np.eye(3)
+            observation_matrices=np.eye(2),  # 2x2, mapeia gf, ga para ataque, defesa
+            transition_matrices=np.eye(2) * (1 - alpha),  # 2x2
+            observation_covariance=0.1 * np.eye(2),  # 2x2
+            transition_covariance=0.01 * np.eye(2)  # 2x2
         )
         observations = group[["gf", "ga"]].values
         if len(observations) < 2:
+            _log(f"Dados insuficientes para {team}, usando valores iniciais.")
             states[team] = {"attack": 0.1, "defense": 0.1, "home_adv": 0.15, "gamma": 0.0}
             continue
 
@@ -61,7 +62,8 @@ def fit_states(df: pd.DataFrame, span: int = 12, model_type: str = "poisson") ->
         state_means, _ = kf.filter(observations)
         atk_mean = np.mean(state_means[:, 0])
         dfn_mean = np.mean(state_means[:, 1])
-        home_adv = np.mean(state_means[:, 2])
+        # home_adv fixo (fora do Kalman por simplicidade)
+        home_adv = 0.15
 
         # Dixon-Coles (dependência γ) - estimado simplificado
         gamma = -0.1  # Valor típico; estimar via MLE seria ideal
@@ -75,7 +77,7 @@ def fit_states(df: pd.DataFrame, span: int = 12, model_type: str = "poisson") ->
         states[team] = {
             "attack": max(atk_mean, 0.1),
             "defense": max(dfn_mean, 0.1),
-            "home_adv": max(home_adv, 0.15),
+            "home_adv": home_adv,
             "gamma": gamma,
             "xG_weight": np.mean(group["xG"]) / np.mean(group["gf"]) if np.mean(group["gf"]) > 0 else 1.0,
             "vaep_impact": np.mean(group["vaep"]),
