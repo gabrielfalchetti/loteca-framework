@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import CalibratedClassifierCV
+import csv
 from typing import Dict, List
 
 """
@@ -105,5 +106,4 @@ def main() -> None:
         sys.exit(9)
 
 if __name__ == "__main__":
-    import csv
     main()
