@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install --upgrade pandas numpy requests python-dateutil unidecode rapidfuzz pyarrow scikit-learn pyyaml pytest pykalman statsmodels torch huggingface_hub
+          pip install --upgrade pandas numpy requests python-dateutil unidecode rapidfuzz pyarrow scikit-learn pyyaml pytest pykalman statsmodels torch huggingface_hub transformers
 
       - name: 05 Install jq
         run: |
@@ -115,6 +115,7 @@ jobs:
           set -euo pipefail
           [ -f scripts/update_tactics.py ] || { echo "::error::scripts/update_tactics.py not found"; exit 1; }
           python -m scripts.update_tactics --history "data/history/results.csv" --out "data/history/tactics.json"
+          [ -s "data/history/tactics.json" ] || { echo "::error::tactics.json not generated"; exit 1; }
 
       - name: 11 Verify Historical Data
         run: |
