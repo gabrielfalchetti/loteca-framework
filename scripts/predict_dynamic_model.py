@@ -102,3 +102,18 @@ def predict_dynamic_model(model_path: str, state_path: str, matches_path: str, o
         _log(f"[CRITICAL] Erro: {e}")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["match_id", "team_home", "team_away", "p_home", "p_draw", "p_away"])
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True, help="Caminho do modelo pickle")
+    parser.add_argument("--state", type=str, required=True, help="Caminho do JSON de estados")
+    parser.add_argument("--matches", type=str, required=True, help="Caminho do CSV de partidas")
+    parser.add_argument("--out", type=str, required=True, help="Caminho do CSV de previsões")
+    args = parser.parse_args()
+    predict_dynamic_model(args.model, args.state, args.matches, args.out)
+
+if __name__ == "__main__":
+    import joblib
+    main()
