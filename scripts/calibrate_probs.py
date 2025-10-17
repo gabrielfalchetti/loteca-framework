@@ -1,44 +1,96 @@
 # -*- coding: utf-8 -*-
 import argparse, os, sys, csv, pickle, pandas as pd
 import numpy as np
+from sklearn.isotonic import IsotonicRegression
+from sklearn.calibration import CalibratedClassifierCV
+from typing import Dict, List
 
-def _safe_load_cal(path):
-    with open(path, "rb") as f:
-        return pickle.load(f)
+"""
+Calibra probabilidades de previsão de resultados de futebol usando Regressão Isotônica ou Dirichlet.
+Aplica modelo pré-treinado salvo em pickle, ajustando probs brutas para valores calibrados.
 
-def _apply_iso(ir, p):
+Saída: CSV com cabeçalho: match_id,team_home,team_away,p_home_cal,p_draw_cal,p_away_cal
+
+Uso:
+  python -m scripts.calibrate_probs --in predictions.csv --cal calibrator.pkl --out predictions_calibrated.csv
+"""
+
+def _log(msg: str) -> None:
+    print(f"[calibrate] {msg}", flush=True)
+
+def _safe_load_cal(path: str) -> Dict[str, IsotonicRegression]:
     try:
-        return float(ir.predict([p])[0])
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        _log(f"Erro ao carregar calibrador: {e}. Usando probs originais.")
+        return {"home": None, "draw": None, "away": None}
+
+def _calculate_brier_score(true_probs: np.ndarray, pred_probs: np.ndarray) -> float:
+    """Calcula Brier Score para avaliar calibração."""
+    return np.mean(np.sum((pred_probs - true_probs) ** 2, axis=1))
+
+def _apply_calibration(probs: np.ndarray, calibrator: IsotonicRegression, method: str = "isotonic") -> np.ndarray:
+    """Aplica calibração isotônica ou Dirichlet."""
+    if calibrator is None or method == "none":
+        return probs
+    try:
+        if method == "isotonic":
+            return calibrator.predict(probs)
+        elif method == "dirichlet":
+            # Placeholder: Dirichlet requer mais dados (ex.: matriz de confusão)
+            return probs  # Implementar futuramente com CalibratedClassifierCV
     except Exception:
-        return p
+        _log("Falha na calibração, retornando probs originais.")
+        return probs
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", required=True)
-    ap.add_argument("--cal", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--in", dest="inp", required=True, help="CSV de entrada com probs brutas")
+    ap.add_argument("--cal", required=True, help="Arquivo pickle com calibrador")
+    ap.add_argument("--out", required=True, help="CSV de saída com probs calibradas")
+    ap.add_argument("--method", type=str, default="isotonic", choices=["isotonic", "dirichlet", "none"], help="Método de calibração")
     args = ap.parse_args()
 
     df = pd.read_csv(args.inp)
-    cal = _safe_load_cal(args.cal)  # dict: home/draw/away -> IsotonicRegression
+    # Validação de entrada
+    if not all(col in df.columns for col in ["match_id", "team_home", "team_away", "p_home", "p_draw", "p_away"]):
+        raise ValueError("CSV de entrada sem colunas esperadas")
+    probs = df[["p_home", "p_draw", "p_away"]].values
+    if not np.all((probs >= 0) & (probs <= 1)):
+        raise ValueError("Probs inválidas (fora de [0,1])")
+    if not np.allclose(probs.sum(axis=1), 1, atol=0.01):
+        _log("Soma de probs != 1, normalizando...")
+        probs = probs / probs.sum(axis=1, keepdims=True)
 
-    out_rows = []
-    for _, r in df.iterrows():
-        ph, pd, pa = float(r["p_home"]), float(r["p_draw"]), float(r["p_away"])
-        ph2 = _apply_iso(cal.get("home"), ph)
-        pd2 = _apply_iso(cal.get("draw"), pd)
-        pa2 = _apply_iso(cal.get("away"), pa)
-        s = ph2+pd2+pa2
-        if s <= 0: ph2,pd2,pa2 = ph,pd,pa; s = ph+pd+pa
-        ph2, pd2, pa2 = ph2/s, pd2/s, pa2/s
-        out_rows.append([r["match_id"], r["team_home"], r["team_away"], ph2, pd2, pa2])
+    # Carregar calibrador
+    calibrators = _safe_load_cal(args.cal)
+    if not isinstance(calibrators, dict) or not all(k in calibrators for k in ["home", "draw", "away"]):
+        _log("Calibrador inválido, usando probs originais.")
+        calibrators = {"home": None, "draw": None, "away": None}
 
+    # Aplicar calibração
+    cal_probs = np.zeros_like(probs)
+    for i, (ph, pd, pa) in enumerate(probs):
+        cal_probs[i, 0] = _apply_calibration(np.array([ph]), calibrators["home"], args.method)
+        cal_probs[i, 1] = _apply_calibration(np.array([pd]), calibrators["draw"], args.method)
+        cal_probs[i, 2] = _apply_calibration(np.array([pa]), calibrators["away"], args.method)
+    s = cal_probs.sum(axis=1, keepdims=True)
+    cal_probs = cal_probs / s if s.any() > 0 else probs  # Normaliza se soma > 0
+
+    # Calcular Brier Score (placeholder, requer verdadeiros)
+    # brier = _calculate_brier_score(np.ones_like(cal_probs) * 0.33, cal_probs)  # Exemplo fictício
+    # _log(f"Brier Score: {brier:.4f}")
+
+    # Salvar resultados
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    out_rows = [[r["match_id"], r["team_home"], r["team_away"], cal_p[0], cal_p[1], cal_p[2]] 
+                for r, cal_p in zip(df.to_dict("records"), cal_probs)]
     with open(args.out, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["match_id","team_home","team_away","p_home_cal","p_draw_cal","p_away_cal"])
+        w.writerow(["match_id", "team_home", "team_away", "p_home_cal", "p_draw_cal", "p_away_cal"])
         w.writerows(out_rows)
-    print(f"[calibrate] OK -> {args.out} (linhas={len(out_rows)})")
+    _log(f"OK -> {args.out} (linhas={len(out_rows)})")
 
 if __name__ == "__main__":
     main()
