@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-import argparse, json, os, sys, pandas as pd, numpy as np
+import argparse, json, os, pandas as pd, numpy as np
 from pykalman import KalmanFilter
 from statsmodels.discrete.discrete_model import NegativeBinomial
 import joblib
+from typing import Dict
 
 """
 Treina um modelo dinâmico para prever resultados de futebol usando Poisson Bivariado com Filtro de Kalman,
@@ -11,8 +12,7 @@ suportando Dixon-Coles (dependência γ) e Negativa Binomial (overdispersion). I
 Saída: JSON com estados (ataque, defesa, home_adv) e modelo picklável.
 
 Uso:
-  python -m scripts.train_dynamic_model \
-      --features data/history/features.parquet \
+  python -m scripts.train_dynamic_model --features data/history/features.parquet \
       --out_state data/out/state_params.json \
       --out_model data/out/dynamic_model.pkl \
       --model_type poisson  # ou negative_binomial
@@ -31,7 +31,7 @@ def fit_states(df: pd.DataFrame, span: int = 12, model_type: str = "poisson") ->
 
     df = df.sort_values("date")
     alpha = 2.0 / (span + 1.0)
-    states = {}
+    states: Dict[str, Dict] = {}
 
     for team, group in df.groupby("team"):
         # Inicialização Kalman
@@ -54,7 +54,7 @@ def fit_states(df: pd.DataFrame, span: int = 12, model_type: str = "poisson") ->
         dfn_mean = np.mean(state_means[:, 1])
         home_adv = np.mean(state_means[:, 2])
 
-        # Dixon-Coles (dependência γ) - simplificado
+        # Dixon-Coles (dependência γ) - estimado simplificado
         gamma = -0.1  # Valor típico; estimar via MLE seria ideal
         if model_type == "negative_binomial":
             # NB para overdispersion (placeholder)
