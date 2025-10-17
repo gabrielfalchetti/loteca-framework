@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import pandas as pd
 import numpy as np
 from typing import Optional
@@ -27,7 +28,7 @@ def estimate_bivariate(history: pd.DataFrame, matches: pd.DataFrame) -> pd.DataF
     Estima lambdas (taxas de gols) e correlação bivariada para cada partida.
     Usa histórico para calcular médias ponderadas e matches para contextos futuros.
     """
-    # Verificar colunas mínimas
+    # Verificar colunas mínimas no histórico
     required_cols = ["team", "gf", "ga"]
     if not all(col in history.columns for col in required_cols):
         raise ValueError(f"history sem colunas obrigatórias: {required_cols}")
@@ -35,12 +36,20 @@ def estimate_bivariate(history: pd.DataFrame, matches: pd.DataFrame) -> pd.DataF
     # Agregar histórico por time
     hist_agg = history.groupby("team").agg({"gf": "mean", "ga": "mean"}).rename(columns={"gf": "avg_gf", "ga": "avg_ga"})
 
+    # Mapear colunas de matches (suporta 'home'/'away' ou 'team_home'/'team_away')
+    home_col = next((col for col in ["team_home", "home"] if col in matches.columns), None)
+    away_col = next((col for col in ["team_away", "away"] if col in matches.columns), None)
+    match_id_col = next((col for col in ["match_id"] if col in matches.columns), "match_id_default")
+
+    if not home_col or not away_col:
+        raise ValueError("matches sem colunas de times (ex.: team_home, home, team_away, away)")
+
     # Preparar saída
     results = []
     for _, match in matches.iterrows():
-        home_team = match["team_home"]
-        away_team = match["team_away"]
-        match_id = match.get("match_id", f"{home_team}_vs_{away_team}")
+        home_team = match[home_col]
+        away_team = match[away_col]
+        match_id = match.get(match_id_col, f"{home_team}_vs_{away_team}")
 
         # Buscar médias do histórico
         home_stats = hist_agg.loc[home_team] if home_team in hist_agg.index else {"avg_gf": 1.0, "avg_ga": 1.0}
