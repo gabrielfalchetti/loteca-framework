@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
 import os
 import sys
-import pandas as pd  # Importação direta
+
+# Função _log definida antes de qualquer uso
+def _log(msg: str) -> None:
+    print(f"[calibrate] {msg}", flush=True)
+
+# Verificação e importação de pandas
+try:
+    import pandas as pd
+    _log(f"Versão do pandas: {pd.__version__}")
+except ImportError as e:
+    _log(f"Erro crítico: falha na importação de pandas: {e}")
+    sys.exit(9)
+
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import CalibratedClassifierCV
 import csv
 from typing import Dict, List
-
-# Verificação inicial da importação
-try:
-    _log(f"Versão do pandas: {pd.__version__}")
-except NameError:
-    print("[calibrate] Erro crítico: módulo pandas não importado corretamente.", file=sys.stderr)
-    sys.exit(9)
 
 """
 Calibra probabilidades de previsão de resultados de futebol usando Regressão Isotônica ou Dirichlet.
@@ -24,9 +29,6 @@ Saída: CSV com cabeçalho: match_id,team_home,team_away,p_home_cal,p_draw_cal,p
 Uso:
   python -m scripts.calibrate_probs --in predictions.csv --cal calibrator.pkl --out predictions_calibrated.csv
 """
-
-def _log(msg: str) -> None:
-    print(f"[calibrate] {msg}", flush=True)
 
 def _calculate_brier_score(true_probs: np.ndarray, pred_probs: np.ndarray) -> float:
     """Calcula Brier Score para avaliar calibração."""
