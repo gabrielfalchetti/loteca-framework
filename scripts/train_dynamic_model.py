@@ -31,7 +31,7 @@ def fit_states(df: pd.DataFrame, span: int = 12, model_type: str = "poisson") ->
 
     df = df.sort_values("date")
     alpha = 2.0 / (span + 1.0)
-    states: Dict[str, Dict] = {}
+    states = {}
 
     for team, group in df.groupby("team"):
         # Inicialização Kalman
