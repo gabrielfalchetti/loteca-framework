@@ -26,12 +26,21 @@ def fit_states(df: pd.DataFrame, span: int = 12, model_type: str = "poisson") ->
     Estima estados dinâmicos (ataque, defesa) por time usando Kalman Filter ou NB.
     Inclui dependência γ (Dixon-Coles) e features como xG, VAEP, lesões.
     """
-    if not all(col in df.columns for col in ["date", "team", "gf", "ga", "xG", "vaep", "injury_impact", "tactic_score"]):
-        raise ValueError("features sem colunas esperadas")
+    required_cols = ["date", "team", "gf", "ga"]
+    optional_cols = ["xG", "vaep", "injury_impact", "tactic_score"]
+    missing_required = [col for col in required_cols if col not in df.columns]
+    if missing_required:
+        raise ValueError(f"features sem colunas obrigatórias: {missing_required}")
+
+    # Preencher opcionais com 0 se ausentes
+    for col in optional_cols:
+        if col not in df.columns:
+            _log(f"Coluna opcional '{col}' ausente, preenchendo com 0.")
+            df[col] = 0.0
 
     df = df.sort_values("date")
     alpha = 2.0 / (span + 1.0)
-    states = {}
+    states: Dict[str, Dict] = {}
 
     for team, group in df.groupby("team"):
         # Inicialização Kalman
