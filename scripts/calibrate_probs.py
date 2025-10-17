@@ -1,13 +1,19 @@
 # -*- coding: utf-8 -*-
-import argparse
 import os
 import sys
-import pandas as pd
+import pandas as pd  # Importação direta fora de try/except
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import CalibratedClassifierCV
 import csv
 from typing import Dict, List
+
+# Verificação inicial da importação
+try:
+    _log(f"Versão do pandas: {pd.__version__}")
+except NameError:
+    print("[calibrate] Erro crítico: módulo pandas não importado corretamente.", file=sys.stderr)
+    sys.exit(9)
 
 """
 Calibra probabilidades de previsão de resultados de futebol usando Regressão Isotônica ou Dirichlet.
