@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 import json
+import csv
 import pandas as pd
 import numpy as np
 from typing import Dict, List
@@ -38,8 +39,15 @@ def predict_dynamic_model(model_path: str, state_path: str, matches_path: str, o
 
         # Carregar partidas
         df_matches = pd.read_csv(matches_path)
-        if not all(col in df_matches.columns for col in ["match_id", "team_home", "team_away"]):
-            raise ValueError("matches sem colunas esperadas")
+        required_cols = ["match_id", "team_home", "team_away"]
+        missing_cols = [col for col in required_cols if col not in df_matches.columns]
+        if missing_cols:
+            # Tentar mapear colunas alternativas
+            col_map = {"match_id": "match_id", "team_home": next((col for col in ["team_home", "home"] if col in df_matches.columns), None),
+                       "team_away": next((col for col in ["team_away", "away"] if col in df_matches.columns), None)}
+            if not all(col_map.values()):
+                raise ValueError(f"matches sem colunas esperadas: {missing_cols}")
+            df_matches = df_matches.rename(columns={v: k for k, v in col_map.items() if v})
 
         # Calcular probabilidades
         def poisson_prob(lam: float, k: int) -> float:
@@ -94,18 +102,3 @@ def predict_dynamic_model(model_path: str, state_path: str, matches_path: str, o
         _log(f"[CRITICAL] Erro: {e}")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["match_id", "team_home", "team_away", "p_home", "p_draw", "p_away"])
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True, help="Caminho do modelo pickle")
-    parser.add_argument("--state", type=str, required=True, help="Caminho do JSON de estados")
-    parser.add_argument("--matches", type=str, required=True, help="Caminho do CSV de partidas")
-    parser.add_argument("--out", type=str, required=True, help="Caminho do CSV de previsões")
-    args = parser.parse_args()
-    predict_dynamic_model(args.model, args.state, args.matches, args.out)
-
-if __name__ == "__main__":
-    import joblib
-    main()
