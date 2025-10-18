@@ -30,12 +30,10 @@ def match_team(api_name: str, source_teams: list, aliases: dict, threshold: floa
         source_norm = normalize_team_name(source_team).lower()
         # Priorizar aliases explícitos
         if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])]:
-            _log(f"Match encontrado para {api_name} -> {source_team} (alias direto)")
             return source_team
         # Usar fuzz.ratio apenas se não houver alias direto
         score = fuzz.ratio(api_norm, source_norm)
         if score > threshold:
-            _log(f"Match encontrado para {api_name} -> {source_team} (score={score})")
             return source_team
     return None
 
@@ -53,12 +51,11 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
     matches_df[home_col] = matches_df[home_col].apply(normalize_team_name)
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
-    _log(f"Times no CSV após normalização: {source_teams}")
 
     # Aliases explícitos para todos os times do Concurso 1216
     explicit_aliases = {
-        "Flamengo": ["Flamengo", "Flamengo/RJ", "Flamengo RJ", "Flamengo-rj"],
-        "Palmeiras": ["Palmeiras", "Palmeiras/SP", "Palmeiras SP", "Palmeiras-sp"],
+        "Flamengo": ["Flamengo", "Flamengo/RJ", "Flamengo RJ"],
+        "Palmeiras": ["Palmeiras", "Palmeiras/SP", "Palmeiras SP"],
         "Internacional": ["Internacional", "INTERNACIONAL/RS", "Internacional RS"],
         "Sport": ["Sport", "SPORT/PE", "Sport Recife"],
         "Corinthians": ["Corinthians", "CORINTHIANS/SP", "Corinthians SP"],
@@ -156,18 +153,17 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
 
     _log(f"Total de fixtures retornados: {len(fixtures)}")
     fixture_map = {}
-    matches_set = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist())
     for game in fixtures:
         home_team = normalize_team_name(game["home_team"] if isinstance(game, dict) and "home_team" in game else game["teams"]["home"]["name"])
         away_team = normalize_team_name(game["away_team"] if isinstance(game, dict) and "away_team" in game else game["teams"]["away"]["name"])
         fixture_id = game["id"] if isinstance(game, dict) and "id" in game else game["fixture"]["id"]
         home_matched = match_team(home_team, source_teams, aliases)
         away_matched = match_team(away_team, source_teams, aliases)
-        if home_matched and away_matched and (home_matched, away_matched) in matches_set:
+        if home_matched and away_matched and (home_matched, away_matched) in matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist():
             fixture_map[(home_matched, away_matched)] = fixture_id
             _log(f"Jogo pareado: {home_matched} x {away_matched} (fixture_id={fixture_id})")
 
-    unmatched_csv = matches_set - set(fixture_map.keys())
+    unmatched_csv = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist()) - set(fixture_map.keys())
     if unmatched_csv:
         _log(f"Jogos do CSV não pareados: {unmatched_csv}")
 
@@ -226,7 +222,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
 
     df = pd.DataFrame(stats)
     if len(df) < 14:
-        unmatched_csv = matches_set - set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1))
+        unmatched_csv = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist()) - set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).tolist())
         _log(f"Jogos do CSV não pareados: {unmatched_csv}")
         sys.exit(5)
 
