@@ -17,7 +17,7 @@ def normalize_team_name(name: str) -> str:
     name = unidecode(name).lower().strip()
     name = name.replace("/rj", "").replace("/sp", "").replace("/mg", "").replace("/rs", "").replace("/ce", "").replace("/ba", "").replace("/pe", "")
     name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd").replace("ldu quito", "ldu")
-    name = name.replace("sport recife", "sport").replace("atletico mineiro", "atletico").replace("bragantino-sp", "bragantino").replace("vasco da gama", "vasco").replace("fluminense", "fluminense").replace("santos", "santos").replace("vitoria", "vitoria").replace("mirassol", "mirassol").replace("gremio", "gremio").replace("juventude", "juventude").replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("getafe", "getafe").replace("osasuna", "osasuna").replace("fortaleza", "fortaleza").replace("cruzeiro", "cruzeiro").replace("tottenham", "tottenham").replace("aston villa", "aston villa").replace("liverpool", "liverpool").replace("manchester united", "manchester united").replace("lazio", "lazio").replace("bahia", "bahia").replace("milan", "milan").replace("real madrid", "real madrid")
+    name = name.replace("sport recife", "sport").replace("atletico mineiro", "atlético").replace("bragantino-sp", "bragantino").replace("vasco da gama", "vasco").replace("fluminense", "fluminense").replace("santos", "santos").replace("vitoria", "vitória").replace("mirassol", "mirassol").replace("gremio", "grêmio").replace("juventude", "juventude").replace("roma", "roma").replace("getafe", "getafe").replace("real madrid", "real madrid").replace("liverpool", "liverpool")
     return name.capitalize()
 
 def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
@@ -69,7 +69,7 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
         "soccer_epl",
         "soccer_spain_la_liga",
         "soccer_conmebol_copa_libertadores",
-        "soccer_ecuador_liga_pro"
+        "soccer_ecuador_primera_a"
     ]
     for sport in sports:
         url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key}"
