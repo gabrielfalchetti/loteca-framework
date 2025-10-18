@@ -12,10 +12,8 @@ def normalize_team_name(name: str) -> str:
     if not isinstance(name, str):
         return ""
     name = unidecode(name).lower().strip()
-    # Remove sufixos regionais
-    name = name.replace("/rj", "").replace("/sp", "").replace("/mg", "").replace("/rs", "").replace("/ce", "").replace("/ba", "")
-    # Normalizar nomes comuns
-    name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd")
+    name = name.replace("/rj", "").replace("/sp", "").replace("/mg", "").replace("/rs", "").replace("/ce", "").replace("/ba", "").replace("/pe", "")
+    name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd").replace("ldu quito", "ldu")
     return name.capitalize()
 
 def main():
@@ -31,6 +29,10 @@ def main():
     df = pd.read_csv(args.in_csv)
     if df.empty:
         _log("Arquivo de entrada vazio")
+        sys.exit(3)
+
+    if len(df) != 14:  # Concurso 1216 tem 14 jogos
+        _log(f"Arquivo {args.in_csv} contém {len(df)} jogos, esperado 14")
         sys.exit(3)
 
     home_col = next((col for col in ['team_home', 'home'] if col in df.columns), None)
