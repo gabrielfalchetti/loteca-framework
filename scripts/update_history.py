@@ -13,41 +13,53 @@ def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
     """Busca partidas finalizadas da API-Football."""
     since = (datetime.utcnow() - timedelta(days=since_days)).strftime("%Y-%m-%d")
     until = datetime.utcnow().strftime("%Y-%m-%d")
-    _log(f"buscando partidas finalizadas de {since} até {until} (UTC) …")
+    _log(f"Buscando partidas finalizadas de {since} até {until} (UTC) …")
     
-    url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
-    headers = {
-        "X-RapidAPI-Key": api_key,
-        "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"
-    }
-    params = {
-        "from": since,
-        "to": until,
-        "status": "FT"  # Partidas finalizadas
-    }
-    response = requests.get(url, headers=headers, params=params)
-    data = response.json()
-    
-    if not data.get("response"):
-        _log("API retornou 0 partidas — falhando.")
-        sys.exit(1)
-    
+    # Ligas Brasileirão Série A (ID 71) e Série B (ID 72)
+    leagues = [71, 72]
     matches = []
-    for game in data["response"]:
-        matches.append({
-            "match_id": game["fixture"]["id"],
-            "team_home": game["teams"]["home"]["name"],
-            "team_away": game["teams"]["away"]["name"],
-            "score_home": game["goals"]["home"],
-            "score_away": game["goals"]["away"],
-            "date": game["fixture"]["date"]
-        })
+    for league_id in leagues:
+        url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
+        headers = {
+            "X-RapidAPI-Key": api_key,
+            "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"
+        }
+        params = {
+            "from": since,
+            "to": until,
+            "status": "FT",  # Partidas finalizadas
+            "league": league_id,
+            "season": 2025
+        }
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as e:
+            _log(f"Erro na API-Football para liga {league_id}: {e}")
+            sys.exit(1)
+        
+        if not data.get("response"):
+            _log(f"Nenhuma partida retornada para liga {league_id}")
+            continue
+        
+        for game in data["response"]:
+            matches.append({
+                "match_id": game["fixture"]["id"],
+                "team_home": game["teams"]["home"]["name"],
+                "team_away": game["teams"]["away"]["name"],
+                "score_home": game["goals"]["home"],
+                "score_away": game["goals"]["away"],
+                "date": game["fixture"]["date"],
+                "league_id": league_id
+            })
     
     df = pd.DataFrame(matches)
     if df.empty:
-        _log("Nenhuma partida válida coletada — falhando.")
+        _log("Nenhuma partida válida coletada para qualquer liga — falhando.")
         sys.exit(1)
     
+    _log(f"Coletadas {len(df)} partidas")
     return df
 
 def main():
@@ -62,6 +74,7 @@ def main():
         sys.exit(1)
 
     df = fetch_matches(args.since_days, args.api_key)
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
     df.to_csv(args.out, index=False, encoding="utf-8")
     _log(f"OK — gerado {args.out} com {len(df)} partidas")
 
