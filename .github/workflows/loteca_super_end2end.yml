@@ -198,7 +198,7 @@ jobs:
             REG="${REGIONS}"
             F1="$(mktemp)"; F2="$(mktemp)"; TMP="$(mktemp)"
             curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F1}"
-            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_serie_b/odds?regions={REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F2}"
+            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_serie_b/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F2}"
             jq -s 'add' "${F1}" "${F2}" > "${TMP}"
             {
               echo "team_home,team_away,odds_home,odds_draw,odds_away"
