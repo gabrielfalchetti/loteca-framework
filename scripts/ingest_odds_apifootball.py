@@ -26,21 +26,17 @@ def normalize_team_name(name: str) -> str:
 
 def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
     api_norm = normalize_team_name(api_name).lower()
-    best_match = None
-    best_score = -1
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
+        # Priorizar aliases explícitos
         if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])]:
             _log(f"Match encontrado para {api_name} -> {source_team} (alias direto)")
             return source_team
+        # Usar fuzz.ratio apenas se não houver alias direto
         score = fuzz.ratio(api_norm, source_norm)
-        if score > threshold and score > best_score:
-            best_match = source_team
-            best_score = score
-    if best_match:
-        _log(f"Match encontrado para {api_name} -> {best_match} (score={best_score})")
-        return best_match
-    _log(f"Sem match para {api_name}")
+        if score > threshold:
+            _log(f"Match encontrado para {api_name} -> {source_team} (score={score})")
+            return source_team
     return None
 
 def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, api_key_theodds: str, regions: str) -> pd.DataFrame:
@@ -61,8 +57,8 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
 
     # Aliases explícitos para todos os times do Concurso 1216
     explicit_aliases = {
-        "Flamengo": ["Flamengo", "Flamengo/RJ", "Flamengo RJ"],
-        "Palmeiras": ["Palmeiras", "Palmeiras/SP", "Palmeiras SP"],
+        "Flamengo": ["Flamengo", "Flamengo/RJ", "Flamengo RJ", "Flamengo-rj"],
+        "Palmeiras": ["Palmeiras", "Palmeiras/SP", "Palmeiras SP", "Palmeiras-sp"],
         "Internacional": ["Internacional", "INTERNACIONAL/RS", "Internacional RS"],
         "Sport": ["Sport", "SPORT/PE", "Sport Recife"],
         "Corinthians": ["Corinthians", "CORINTHIANS/SP", "Corinthians SP"],
@@ -166,7 +162,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
         fixture_id = game["id"] if isinstance(game, dict) and "id" in game else game["fixture"]["id"]
         home_matched = match_team(home_team, source_teams, aliases)
         away_matched = match_team(away_team, source_teams, aliases)
-        if home_matched and away_matched:
+        if home_matched and away_matched and (home_matched, away_matched) in matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).values:
             fixture_map[(home_matched, away_matched)] = fixture_id
             _log(f"Jogo pareado: {home_matched} x {away_matched} (fixture_id={fixture_id})")
 
