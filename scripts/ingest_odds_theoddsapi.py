@@ -9,7 +9,7 @@ from rapidfuzz import fuzz
 def _log(msg: str) -> None:
     print(f"[theoddsapi] {msg}", flush=True)
 
-def match_team(api_name: str, source_teams: list, threshold: float = 80) -> str:
+def match_team(api_name: str, source_teams: list, threshold: float = 70) -> str:
     for source_team in source_teams:
         if fuzz.ratio(api_name.lower(), source_team.lower()) > threshold:
             return source_team
@@ -26,39 +26,40 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str) -> pd.D
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
     odds = []
     
-    # Buscar odds para Brasileirão
-    url = f"https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key}"
-    try:
-        response = requests.get(url, timeout=25)
-        response.raise_for_status()
-        games = response.json()
-    except Exception as e:
-        _log(f"Erro ao buscar odds do TheOddsAPI: {e}")
-        sys.exit(6)
-
-    _log(f"Jogos retornados pelo TheOddsAPI: {len(games)}")
-    for game in games[:5]:
-        _log(f"Game ID: {game['id']}, Jogo: {game['home_team']} x {game['away_team']}")
-
-    # Mapear jogos
-    for game in games:
-        home_team = match_team(game["home_team"], source_teams)
-        away_team = match_team(game["away_team"], source_teams)
-        if home_team and away_team:
-            odds_values = next((market for market in game["bookmakers"][0]["markets"] if market["key"] == "h2h"), None) if game.get("bookmakers") else None
-            if odds_values:
-                odds.append({
-                    "match_id": game["id"],
-                    "team_home": home_team,
-                    "team_away": away_team,
-                    "odds_home": odds_values["outcomes"][0]["price"] if len(odds_values["outcomes"]) > 0 else 0,
-                    "odds_draw": odds_values["outcomes"][1]["price"] if len(odds_values["outcomes"]) > 1 else 0,
-                    "odds_away": odds_values["outcomes"][2]["price"] if len(odds_values["outcomes"]) > 2 else 0
-                })
+    sports = [
+        "soccer_brazil_campeonato",
+        "soccer_italy_serie_a",
+        "soccer_epl",
+        "soccer_spain_la_liga",
+        "soccer_conmebol_copa_libertadores"
+    ]
+    for sport in sports:
+        url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key}"
+        try:
+            response = requests.get(url, timeout=25)
+            response.raise_for_status()
+            games = response.json()
+            _log(f"TheOddsAPI retornou {len(games)} jogos para {sport}")
+            for game in games:
+                home_team = match_team(game["home_team"], source_teams)
+                away_team = match_team(game["away_team"], source_teams)
+                if home_team and away_team:
+                    odds_values = next((market for market in game["bookmakers"][0]["markets"] if market["key"] == "h2h"), None) if game.get("bookmakers") else None
+                    if odds_values:
+                        odds.append({
+                            "match_id": game["id"],
+                            "team_home": home_team,
+                            "team_away": away_team,
+                            "odds_home": odds_values["outcomes"][0]["price"] if len(odds_values["outcomes"]) > 0 else 0,
+                            "odds_draw": odds_values["outcomes"][1]["price"] if len(odds_values["outcomes"]) > 1 else 0,
+                            "odds_away": odds_values["outcomes"][2]["price"] if len(odds_values["outcomes"]) > 2 else 0
+                        })
+        except Exception as e:
+            _log(f"Erro ao buscar {sport}: {e}")
 
     df = pd.DataFrame(odds)
     if df.empty:
-        _log("Nenhum jogo processado pelo TheOddsAPI. Verifique times em source_csv.")
+        _log("Nenhum jogo processado pelo TheOddsAPI")
         sys.exit(6)
 
     out_file = f"{rodada}/odds_theoddsapi.csv"
