@@ -15,7 +15,7 @@ def normalize_team_name(name: str) -> str:
     if not isinstance(name, str):
         return ""
     name = unidecode(name).lower().strip()
-    name = name.replace("/rj", "").replace("/sp", "").replace("/mg", "").replace("/rs", "").replace("/ce", "").replace("/ba", "")
+    name = name.replace("/rj", "").replace("/sp", "").replace("/mg", "").replace("/rs", "").replace("/ce", "").replace("/ba", "").replace("/pe", "")
     name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd").replace("ldu quito", "ldu")
     return name.capitalize()
 
@@ -27,25 +27,40 @@ def match_team(api_name: str, source_teams: list, aliases: dict, threshold: floa
             return source_team
     return None
 
-def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases_file: str) -> pd.DataFrame:
+def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases_file: str, api_key_apifootball: str) -> pd.DataFrame:
     matches_df = pd.read_csv(source_csv)
     home_col = next((col for col in ['team_home', 'home'] if col in matches_df.columns), None)
     away_col = next((col for col in ['team_away', 'away'] if col in matches_df.columns), None)
     if not (home_col and away_col):
         _log("Colunas team_home/team_away ou home/away não encontradas")
         sys.exit(6)
+    if len(matches_df) != 14:
+        _log(f"Arquivo {source_csv} contém {len(matches_df)} jogos, esperado 14")
+        sys.exit(6)
 
-    # Normalizar times no CSV
     matches_df[home_col] = matches_df[home_col].apply(normalize_team_name)
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
 
-    # Carregar aliases
+    # Gerar aliases automaticamente usando API-Football
     aliases = {}
     if os.path.exists(aliases_file):
         with open(aliases_file, 'r') as f:
             aliases = json.load(f)
-    
+    url_teams = "https://v3.football.api-sports.io/teams"
+    headers = {"x-apisports-key": api_key_apifootball}
+    leagues = ["71", "72", "203", "70", "74", "77", "39", "140", "13", "2", "112"]  # Ligas do Concurso 1216
+    for league in leagues:
+        try:
+            response = requests.get(url_teams, headers=headers, params={"league": league, "season": 2025}, timeout=25)
+            response.raise_for_status()
+            teams_data = response.json().get("response", [])
+            for team in teams_data:
+                team_name = normalize_team_name(team["team"]["name"])
+                aliases[team_name] = [team_name, normalize_team_name(team["team"].get("code", team_name))]
+        except Exception as e:
+            _log(f"Erro ao buscar times da liga {league}: {e}")
+
     odds = []
     sports = [
         "soccer_brazil_campeonato",
@@ -82,8 +97,8 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
             _log(f"Erro ao buscar {sport}: {e}")
 
     df = pd.DataFrame(odds)
-    if len(df) < 14:  # Concurso 1216 tem 14 jogos
-        _log(f"Apenas {len(df)} jogos pareados, esperado 14. Verifique times em source_csv ou API key.")
+    if len(df) < 14:
+        _log(f"Apenas {len(df)} jogos pareados, esperado 14. Verifique times em source_csv.")
         sys.exit(6)
 
     out_file = f"{rodada}/odds_theoddsapi.csv"
@@ -99,13 +114,14 @@ def main():
     ap.add_argument("--api_key", default=os.getenv("THEODDS_API_KEY"))
     ap.add_argument("--regions", default="uk,eu,us,au")
     ap.add_argument("--aliases_file", default="data/aliases/auto_aliases.json")
+    ap.add_argument("--api_key_apifootball", default=os.getenv("API_FOOTBALL_KEY"))
     args = ap.parse_args()
 
-    if not args.api_key:
-        _log("THEODDS_API_KEY não definida")
+    if not args.api_key or not args.api_key_apifootball:
+        _log("THEODDS_API_KEY ou API_FOOTBALL_KEY não definida")
         sys.exit(6)
 
-    fetch_odds(args.rodada, args.source_csv, args.api_key, args.regions, args.aliases_file)
+    fetch_odds(args.rodada, args.source_csv, args.api_key, args.regions, args.aliases_file, args.api_key_apifootball)
 
 if __name__ == "__main__":
     main()
