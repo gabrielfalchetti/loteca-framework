@@ -4,56 +4,82 @@ import sys
 import pandas as pd
 import requests
 import os
-import json
+from rapidfuzz import fuzz
 
 def _log(msg: str) -> None:
     print(f"[theoddsapi] {msg}", flush=True)
 
-def fetch_odds(rodada: str, regions: str, source_csv: str, api_key: str) -> pd.DataFrame:
-    """Busca odds do TheOddsAPI."""
-    url = f"https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key}"
-    response = requests.get(url)
-    data = response.json()
+def match_team(api_name: str, source_teams: list, threshold: float = 80) -> str:
+    for source_team in source_teams:
+        if fuzz.ratio(api_name.lower(), source_team.lower()) > threshold:
+            return source_team
+    return None
 
+def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str) -> pd.DataFrame:
     matches_df = pd.read_csv(source_csv)
-    paired = []
-    for event in data:
-        home_team = event["home_team"]
-        away_team = event["away_team"]
-        odds = next((m for m in event["bookmakers"][0]["markets"] if m["key"] == "h2h"), None)
-        if odds:
-            paired.append({
-                "team_home": home_team,
-                "team_away": away_team,
-                "odds_home": odds["outcomes"][0]["price"],
-                "odds_draw": odds["outcomes"][1]["price"],
-                "odds_away": odds["outcomes"][2]["price"]
-            })
+    home_col = next((col for col in ['team_home', 'home'] if col in matches_df.columns), None)
+    away_col = next((col for col in ['team_away', 'away'] if col in matches_df.columns), None)
+    if not (home_col and away_col):
+        _log("Colunas team_home/team_away ou home/away não encontradas")
+        sys.exit(6)
 
-    df = pd.DataFrame(paired)
+    source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
+    odds = []
+    
+    # Buscar odds para Brasileirão
+    url = f"https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key}"
+    try:
+        response = requests.get(url, timeout=25)
+        response.raise_for_status()
+        games = response.json()
+    except Exception as e:
+        _log(f"Erro ao buscar odds do TheOddsAPI: {e}")
+        sys.exit(6)
+
+    _log(f"Jogos retornados pelo TheOddsAPI: {len(games)}")
+    for game in games[:5]:
+        _log(f"Game ID: {game['id']}, Jogo: {game['home_team']} x {game['away_team']}")
+
+    # Mapear jogos
+    for game in games:
+        home_team = match_team(game["home_team"], source_teams)
+        away_team = match_team(game["away_team"], source_teams)
+        if home_team and away_team:
+            odds_values = next((market for market in game["bookmakers"][0]["markets"] if market["key"] == "h2h"), None) if game.get("bookmakers") else None
+            if odds_values:
+                odds.append({
+                    "match_id": game["id"],
+                    "team_home": home_team,
+                    "team_away": away_team,
+                    "odds_home": odds_values["outcomes"][0]["price"] if len(odds_values["outcomes"]) > 0 else 0,
+                    "odds_draw": odds_values["outcomes"][1]["price"] if len(odds_values["outcomes"]) > 1 else 0,
+                    "odds_away": odds_values["outcomes"][2]["price"] if len(odds_values["outcomes"]) > 2 else 0
+                })
+
+    df = pd.DataFrame(odds)
     if df.empty:
-        _log("Nenhum jogo pareado — falhando.")
-        sys.exit(5)
+        _log("Nenhum jogo processado pelo TheOddsAPI. Verifique times em source_csv.")
+        sys.exit(6)
 
     out_file = f"{rodada}/odds_theoddsapi.csv"
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
     df.to_csv(out_file, index=False)
-    _log(f"Eventos={len(data)} | jogoselecionados={len(matches_df)} | pareados={len(df)} — salvo em {out_file}")
+    _log(f"Arquivo {out_file} gerado com {len(df)} jogos")
     return df
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Diretório de saída")
-    ap.add_argument("--regions", required=True, help="Regiões para odds")
-    ap.add_argument("--source_csv", required=True, help="CSV com jogos")
-    ap.add_argument("--api_key", default=os.getenv("THEODDS_API_KEY"), help="Chave TheOddsAPI")
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--source_csv", required=True)
+    ap.add_argument("--api_key", default=os.getenv("THEODDS_API_KEY"))
+    ap.add_argument("--regions", default="uk,eu,us,au")
     args = ap.parse_args()
 
     if not args.api_key:
         _log("THEODDS_API_KEY não definida")
-        sys.exit(5)
+        sys.exit(6)
 
-    fetch_odds(args.rodada, args.regions, args.source_csv, args.api_key)
+    fetch_odds(args.rodada, args.source_csv, args.api_key, args.regions)
 
 if __name__ == "__main__":
     main()
