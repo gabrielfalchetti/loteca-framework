@@ -35,12 +35,12 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     url_fixtures = "https://v3.football.api-sports.io/fixtures"
     headers = {"x-apisports-key": api_key}
     since = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
-    until = (datetime.utcnow() + timedelta(days=7)).strftime("%Y-%m-%d")  # Ampliado para 7 dias
+    until = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%d")  # Ampliado para 30 dias
     params = {
         "from": since,
         "to": until,
         "season": 2025,
-        "league": "71,72"  # Série A e B
+        "league": "71,72,70,71"  # Série A, Série B, Carioca, Paulista
     }
     
     try:
@@ -58,7 +58,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
         sys.exit(5)
 
     if not fixtures_data.get("response"):
-        _log("Nenhum fixture retornado pela API-Football para ligas 71,72 no período {} a {}".format(since, until))
+        _log("Nenhum fixture retornado pela API-Football para ligas 71,72,70,71 no período {} a {}".format(since, until))
         sys.exit(5)
 
     # Logar fixtures retornados
