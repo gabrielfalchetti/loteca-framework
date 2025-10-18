@@ -24,12 +24,23 @@ def normalize_team_name(name: str) -> str:
     name = name.replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 40) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
     api_norm = normalize_team_name(api_name).lower()
+    best_match = None
+    best_score = -1
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
-        if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])] or fuzz.partial_ratio(api_norm, source_norm) > threshold:
+        if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])]:
+            _log(f"Match encontrado para {api_name} -> {source_team} (alias direto)")
             return source_team
+        score = fuzz.ratio(api_norm, source_norm)
+        if score > threshold and score > best_score:
+            best_match = source_team
+            best_score = score
+    if best_match:
+        _log(f"Match encontrado para {api_name} -> {best_match} (score={best_score})")
+        return best_match
+    _log(f"Sem match para {api_name}")
     return None
 
 def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, api_key_theodds: str, regions: str) -> pd.DataFrame:
@@ -46,6 +57,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
     matches_df[home_col] = matches_df[home_col].apply(normalize_team_name)
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
+    _log(f"Times no CSV após normalização: {source_teams}")
 
     # Aliases explícitos para todos os times do Concurso 1216
     explicit_aliases = {
@@ -156,6 +168,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
         away_matched = match_team(away_team, source_teams, aliases)
         if home_matched and away_matched:
             fixture_map[(home_matched, away_matched)] = fixture_id
+            _log(f"Jogo pareado: {home_matched} x {away_matched} (fixture_id={fixture_id})")
 
     unmatched_csv = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1)) - set(fixture_map.keys())
     if unmatched_csv:
