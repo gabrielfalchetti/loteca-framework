@@ -36,11 +36,10 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     headers = {"x-apisports-key": api_key}
     since = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
     until = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%d")
-    # Ligas ampliadas: Série A (71), Série B (72), Copa do Brasil (203), Paulista (71), Carioca (70)
     params = {
         "from": since,
         "to": until,
-        "season": 2024,  # Usar 2024 para dados disponíveis; 2025 pode ser futuro
+        "season": 2024,  # Changed to 2024 as 2025 may not have data yet
         "league": "71,72,203,70"  # Série A, Série B, Copa do Brasil, Carioca
     }
     
@@ -127,7 +126,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     out_file = f"{rodada}/odds_apifootball.csv"
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
     df.to_csv(out_file, index=False)
-    _log(f"Arquivo {out_file} gerado com {len(df)} jogos encontrado")
+    _log(f"Arquivo {out_file} gerado com {len(df)} jogos encontrados")
     return df
 
 def main():
