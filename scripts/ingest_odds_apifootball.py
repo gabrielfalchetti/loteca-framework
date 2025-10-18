@@ -43,6 +43,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
 
+    # Gerar aliases automaticamente usando API-Football
     aliases = {}
     if os.path.exists(aliases_file):
         with open(aliases_file, 'r') as f:
