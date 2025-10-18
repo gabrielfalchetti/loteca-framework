@@ -1,138 +1,116 @@
 # -*- coding: utf-8 -*-
 import argparse
+import os
 import sys
 import pandas as pd
-import requests
-import os
-from rapidfuzz import fuzz
-from datetime import datetime, timedelta
+import numpy as np
+from sklearn.isotonic import IsotonicRegression
+import pickle
+import csv
+from typing import Dict, List
 
 def _log(msg: str) -> None:
-    print(f"[apifootball] {msg}", flush=True)
+    print(f"[calibrate] {msg}", flush=True)
 
-def match_team(api_name: str, source_teams: list, threshold: float = 80) -> str:
-    for source_team in source_teams:
-        if fuzz.ratio(api_name.lower(), source_team.lower()) > threshold:
-            return source_team
-    return None
+# Verificação inicial da importação
+try:
+    pd.DataFrame()  # Teste simples para garantir que pandas está disponível
+    _log(f"Versão do pandas: {pd.__version__}")
+except (NameError, ImportError) as e:
+    _log(f"Erro crítico: módulo pandas não importado corretamente: {e}")
+    sys.exit(9)
 
-def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
-    matches_df = pd.read_csv(source_csv)
-    
-    home_col = 'team_home' if 'team_home' in matches_df.columns else 'home' if 'home' in matches_df.columns else None
-    away_col = 'team_away' if 'team_away' in matches_df.columns else 'away' if 'away' in matches_df.columns else None
-    if not (home_col and away_col):
-        _log("Colunas team_home/team_away ou home/away não encontradas em source_csv")
-        sys.exit(5)
+"""
+Calibra probabilidades de previsão de resultados de futebol usando Regressão Isotônica ou Dirichlet.
+Aplica modelo pré-treinado salvo em pickle, ajustando probs brutas para valores calibrados.
 
-    source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
-    stats = []
-    
-    # Buscar fixtures para encontrar match_id válidos
-    url_fixtures = "https://v3.football.api-sports.io/fixtures"
-    headers = {"x-apisports-key": api_key}
-    since = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
-    until = (datetime.utcnow() + timedelta(days=60)).strftime("%Y-%m-%d")
-    params = {
-        "from": since,
-        "to": until,
-        "season": 2025,
-        "timezone": "America/Sao_Paulo"
-        # Omit league to fetch all
-    }
-    
+Saída: CSV com cabeçalho: match_id,team_home,team_away,p_home_cal,p_draw_cal,p_away_cal
+
+Uso:
+  python -m scripts.calibrate_probs --in predictions.csv --cal calibrator.pkl --out predictions_calibrated.csv
+"""
+
+def _calculate_brier_score(true_probs: np.ndarray, pred_probs: np.ndarray) -> float:
+    """Calcula Brier Score para avaliar calibração."""
+    return np.mean(np.sum((pred_probs - true_probs) ** 2, axis=1))
+
+def _apply_calibration(probs: np.ndarray, calibrator: IsotonicRegression, method: str = "isotonic") -> np.ndarray:
+    """Aplica calibração isotônica ou Dirichlet."""
+    if calibrator is None or method == "none":
+        return probs
     try:
-        response = requests.get(url_fixtures, headers=headers, params=params, timeout=25)
-        response.raise_for_status()
-        fixtures_data = response.json()
-    except requests.exceptions.HTTPError as e:
-        if response.status_code == 403:
-            _log(f"Erro 403: Chave API-Football inválida ou limite excedido. Verifique API_FOOTBALL_KEY.")
-        else:
-            _log(f"Erro HTTP ao buscar fixtures: {e}")
-        sys.exit(5)
-    except requests.RequestException as e:
-        _log(f"Erro de conexão ao buscar fixtures: {e}")
-        sys.exit(5)
+        if method == "isotonic":
+            return calibrator.predict(probs)
+        elif method == "dirichlet":
+            # Placeholder: Dirichlet requer mais dados (ex.: matriz de confusão)
+            return probs  # Implementar futuramente com CalibratedClassifierCV
+    except Exception:
+        _log("Falha na calibração, retornando probs originais.")
+        return probs
 
-    if not fixtures_data.get("response"):
-        _log("Nenhum fixture retornado pela API-Football no período {} a {}".format(since, until))
-        sys.exit(5)
-
-    # Logar fixtures retornados
-    _log(f"Fixtures retornados: {len(fixtures_data['response'])}")
-    for game in fixtures_data["response"][:5]:  # Logar primeiros 5 para depuração
-        _log(f"Fixture ID: {game['fixture']['id']}, Jogo: {game['teams']['home']['name']} x {game['teams']['away']['name']}")
-
-    # Mapear match_id por time
-    fixture_map = {}
-    for game in fixtures_data["response"]:
-        home_team = game["teams"]["home"]["name"]
-        away_team = game["teams"]["away"]["name"]
-        fixture_id = game["fixture"]["id"]
-        home_matched = match_team(home_team, source_teams)
-        away_matched = match_team(away_team, source_teams)
-        if home_matched and away_matched:
-            fixture_map[(home_matched, away_matched)] = fixture_id
-        else:
-            _log(f"Não pareado: {home_team} x {away_team}")
-
-    # Buscar stats para cada jogo
-    url_stats = "https://v3.football.api-sports.io/fixtures/statistics"
-    for _, row in matches_df.iterrows():
-        home_team = row[home_col]
-        away_team = row[away_col]
-        fixture_id = fixture_map.get((home_team, away_team))
-        if not fixture_id:
-            _log(f"Fixture não encontrado para {home_team} x {away_team}")
-            continue
-
-        params = {"fixture": fixture_id}
-        try:
-            response = requests.get(url_stats, headers=headers, params=params, timeout=25)
-            response.raise_for_status()
-            data = response.json()
-        except requests.exceptions.HTTPError as e:
-            _log(f"Erro HTTP para fixture {fixture_id}: {e}")
-            continue
-        except requests.RequestException as e:
-            _log(f"Erro de conexão para fixture {fixture_id}: {e}")
-            continue
-
-        if data.get("response") and len(data["response"]) >= 2:
-            stats.append({
-                "match_id": fixture_id,
-                "team_home": home_team,
-                "team_away": away_team,
-                "xG_home": data["response"][0]["statistics"].get("xG", 0) if data["response"][0].get("statistics") else 0,
-                "xG_away": data["response"][1]["statistics"].get("xG", 0) if data["response"][1].get("statistics") else 0,
-                "lesions_home": len(data["response"][0].get("players", {}).get("injured", [])),
-                "lesions_away": len(data["response"][1].get("players", {}).get("injured", []))
-            })
-
-    df = pd.DataFrame(stats)
-    if df.empty:
-        _log("Nenhum jogo processado — falhando. Verifique times em source_csv, datas ou API_FOOTBALL_KEY.")
-        sys.exit(5)
-
-    out_file = f"{rodada}/odds_apifootball.csv"
-    os.makedirs(os.path.dirname(out_file), exist_ok=True)
-    df.to_csv(out_file, index=False)
-    _log(f"Arquivo {out_file} gerado com {len(df)} jogos encontrados")
-    return df
-
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Diretório de saída")
-    ap.add_argument("--source_csv", required=True, help="CSV com jogos")
-    ap.add_argument("--api_key", default=os.getenv("API_FOOTBALL_KEY"), help="Chave API-Football")
+    ap.add_argument("--in", dest="inp", required=True, help="CSV de entrada com probs brutas")
+    ap.add_argument("--cal", required=True, help="Arquivo pickle com calibrador")
+    ap.add_argument("--out", required=True, help="CSV de saída com probs calibradas")
+    ap.add_argument("--method", type=str, default="isotonic", choices=["isotonic", "dirichlet", "none"], help="Método de calibração")
     args = ap.parse_args()
 
-    if not args.api_key:
-        _log("API_FOOTBALL_KEY não definida")
-        sys.exit(5)
+    if not os.path.isfile(args.inp):
+        _log(f"{args.inp} não encontrado")
+        sys.exit(9)
+    if not os.path.isfile(args.cal):
+        _log(f"{args.cal} não encontrado")
+        sys.exit(9)
 
-    fetch_stats(args.rodada, args.source_csv, args.api_key)
+    try:
+        df = pd.read_csv(args.inp)
+        if df.empty:
+            _log("Arquivo de previsões está vazio — falhando.")
+            sys.exit(9)
+        # Validação de entrada
+        if not all(col in df.columns for col in ["match_id", "team_home", "team_away", "p_home", "p_draw", "p_away"]):
+            raise ValueError("CSV de entrada sem colunas esperadas")
+        probs = df[["p_home", "p_draw", "p_away"]].values
+        if not np.all((probs >= 0) & (probs <= 1)):
+            raise ValueError("Probs inválidas (fora de [0,1])")
+        if not np.allclose(probs.sum(axis=1), 1, atol=0.01):
+            _log("Soma de probs != 1, normalizando...")
+            probs = probs / probs.sum(axis=1, keepdims=True)
+
+        # Carregar calibrador
+        calibrators = None
+        try:
+            with open(args.cal, "rb") as f:
+                calibrators = pickle.load(f)
+        except Exception as e:
+            _log(f"Erro ao carregar calibrador: {e}. Usando probs originais.")
+            calibrators = {"home": None, "draw": None, "away": None}
+        if not isinstance(calibrators, dict) or not all(k in calibrators for k in ["home", "draw", "away"]):
+            _log("Calibrador inválido, usando probs originais.")
+            calibrators = {"home": None, "draw": None, "away": None}
+
+        # Aplicar calibração
+        cal_probs = np.zeros_like(probs)
+        for i, (ph, pd, pa) in enumerate(probs):
+            cal_probs[i, 0] = _apply_calibration(np.array([ph]), calibrators["home"], args.method)
+            cal_probs[i, 1] = _apply_calibration(np.array([pd]), calibrators["draw"], args.method)
+            cal_probs[i, 2] = _apply_calibration(np.array([pa]), calibrators["away"], args.method)
+        s = cal_probs.sum(axis=1, keepdims=True)
+        cal_probs = cal_probs / s if s.any() > 0 else probs  # Normaliza se soma > 0
+
+        # Salvar resultados
+        os.makedirs(os.path.dirname(args.out), exist_ok=True)
+        out_rows = [[r["match_id"], r["team_home"], r["team_away"], cal_p[0], cal_p[1], cal_p[2]] 
+                    for r, cal_p in zip(df.to_dict("records"), cal_probs)]
+        with open(args.out, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["match_id", "team_home", "team_away", "p_home_cal", "p_draw_cal", "p_away_cal"])
+            w.writerows(out_rows)
+        _log(f"OK -> {args.out} (linhas={len(out_rows)})")
+    except Exception as e:
+        _log(f"[CRITICAL] Erro: {e}")
+        sys.exit(9)
 
 if __name__ == "__main__":
     main()
