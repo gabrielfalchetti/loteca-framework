@@ -49,7 +49,7 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
             aliases = json.load(f)
     url_teams = "https://v3.football.api-sports.io/teams"
     headers = {"x-apisports-key": api_key_apifootball}
-    leagues = ["71", "72", "203", "70", "74", "77", "39", "140", "13", "2", "112"]  # Ligas do Concurso 1216
+    leagues = ["71", "72", "203", "70", "74", "77", "39", "140", "13", "2", "112"]
     for league in leagues:
         try:
             response = requests.get(url_teams, headers=headers, params={"league": league, "season": 2025}, timeout=25)
