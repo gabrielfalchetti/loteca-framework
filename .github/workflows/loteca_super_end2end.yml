@@ -108,7 +108,8 @@ jobs:
           set -euo pipefail
           [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
           python -m scripts.update_history --since_days 30 --out "data/history/results.csv"
-          [ -s "data/history/results.csv" ] || { echo "::error::results.csv empty"; exit 1; }
+          L=$(wc -l < "data/history/results.csv" | tr -d ' ')
+          [ "$L" -gt 1 ] || { echo "::error::results.csv empty or contains only stub"; exit 1; }
 
       - name: 10 Update Tactics with LLM
         run: |
@@ -179,12 +180,16 @@ jobs:
           URL="https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}"
           CNT="$(curl -sS --max-time 25 "${URL}" | jq 'length')"
           echo "[preflight] Serie A events=${CNT}"
+          [ "$CNT" -gt 0 ] || { echo "::error::No events from TheOddsAPI for Serie A"; exit 5; }
 
       - name: 19 Ingest TheOddsAPI primary
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
           python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --regions "${REGIONS}" --source_csv "${SOURCE_CSV_NORM}"
+          OUT="${OUT_DIR}/odds_theoddsapi.csv"
+          L=0; [ -s "$OUT" ] && L="$(wc -l < "$OUT" | tr -d ' ')"
+          [ "$L" -gt 1 ] || { echo "::error::No odds generated in odds_theoddsapi.csv"; exit 5; }
 
       - name: 20 Fallback direct fetch if empty
         run: |
@@ -221,12 +226,15 @@ jobs:
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
           python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV_NORM}"
+          OUT="${OUT_DIR}/odds_apifootball.csv"
+          L=0; [ -s "$OUT" ] && L="$(wc -l < "$OUT" | tr -d ' ')"
+          [ "$L" -gt 1 ] || { echo "::error::No games found in odds_apifootball.csv"; exit 5; }
 
       - name: 22 Consensus odds
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
-          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict || true
+          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict
           OUT_FILE="${CONSENSUS_CSV}"
           if [ ! -s "${OUT_FILE}" ]; then
             cp "${OUT_DIR}/odds_theoddsapi.csv" "${OUT_FILE}"
@@ -236,20 +244,24 @@ jobs:
           for c in team_home team_away odds_home odds_draw odds_away; do
             echo "${header}" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
           done
+          L=0; [ -s "$OUT_FILE" ] && L="$(wc -l < "$OUT_FILE" | tr -d ' ')"
+          [ "$L" -gt 1 ] || { echo "::error::No odds in odds_consensus.csv"; exit 6; }
 
       - name: 23 Bivariate estimator
         run: |
           set -euo pipefail
           [ -f scripts/bivariate_estimator.py ] || { echo "::error::scripts/bivariate_estimator.py not found"; exit 7; }
           python -m scripts.bivariate_estimator --history "${FEATURES_PARQUET}" --matches "${SOURCE_CSV_NORM}" --out "${BIVARIATE_CSV}"
-          test -s "${BIVARIATE_CSV}" || { echo "::error::bivariate.csv not generated"; exit 7; }
+          L=0; [ -s "${BIVARIATE_CSV}" ] && L="$(wc -l < "${BIVARIATE_CSV}" | tr -d ' ')"
+          [ "$L" -gt 1 ] || { echo "::error::bivariate.csv empty"; exit 7; }
 
       - name: 24 Predict with dynamic model
         run: |
           set -euo pipefail
           [ -f scripts/predict_dynamic_model.py ] || { echo "::error::scripts/predict_dynamic_model.py not found"; exit 8; }
           python -m scripts.predict_dynamic_model --model "${MODEL_PKL}" --state "${STATE_JSON}" --matches "${SOURCE_CSV_NORM}" --out "${PREDICTIONS_CSV}"
-          test -s "${PREDICTIONS_CSV}" || { echo "::error::predictions.csv not generated"; exit 8; }
+          L=0; [ -s "${PREDICTIONS_CSV}" ] && L="$(wc -l < "${PREDICTIONS_CSV}" | tr -d ' ')"
+          [ "$L" -gt 1 ] || { echo "::error::predictions.csv empty"; exit 8; }
 
       - name: 25 Train calibrator
         run: |
@@ -263,7 +275,8 @@ jobs:
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
           python -m scripts.calibrate_probs --in "${PREDICTIONS_CSV}" --cal "${CALIBRATOR_PKL}" --out "${PREDICTIONS_CALIB_CSV}"
-          test -s "${PREDICTIONS_CALIB_CSV}" || { echo "::error::predictions_calibrated.csv not generated"; exit 9; }
+          L=0; [ -s "${PREDICTIONS_CALIB_CSV}" ] && L="$(wc -l < "${PREDICTIONS_CALIB_CSV}" | tr -d ' ')"
+          [ "$L" -gt 1 ] || { echo "::error::predictions_calibrated.csv empty"; exit 9; }
 
       - name: 27 Kelly staking 1x2
         run: |
@@ -278,14 +291,16 @@ jobs:
             --top_n "${KELLY_TOP_N}" \
             --round_to "${ROUND_TO}" \
             --out "${KELLY_BETS_CSV}"
-          test -s "${KELLY_BETS_CSV}" || { echo "::error::bets_kelly.csv not generated"; exit 10; }
+          L=0; [ -s "${KELLY_BETS_CSV}" ] && L="$(wc -l < "${KELLY_BETS_CSV}" | tr -d ' ')"
+          [ "$L" -gt 1 ] || { echo "::error::bets_kelly.csv empty"; exit 10; }
 
       - name: 28 Loteca card top 14
         run: |
           set -euo pipefail
           [ -f scripts/make_loteca_ticket.py ] || { echo "::error::scripts/make_loteca_ticket.py not found"; exit 11; }
           python -m scripts.make_loteca_ticket --rodada "${OUT_DIR}" --triples 3 --doubles 5
-          test -s "${LOTECA_CARD_CSV}" || { echo "::error::loteca_card.csv not generated"; exit 11; }
+          L=0; [ -s "${LOTECA_CARD_CSV}" ] && L="$(wc -l < "${LOTECA_CARD_CSV}" | tr -d ' ')"
+          [ "$L" -gt 1 ] || { echo "::error::loteca_card.csv empty"; exit 11; }
 
       - name: 29 Final listing
         run: |
