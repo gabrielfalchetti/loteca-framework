@@ -22,11 +22,11 @@ def normalize_team_name(name: str) -> str:
     name = name.replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 50) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 40) -> str:
     api_norm = normalize_team_name(api_name).lower()
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
-        if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])] or fuzz.partial_ratio(api_norm, source_norm) > threshold:
+        if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])] or fuzz.ratio(api_norm, source_norm) > threshold:
             return source_team
     return None
 
@@ -45,11 +45,23 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
 
+    # Aliases explícitos para jogos problemáticos
+    explicit_aliases = {
+        "Internacional": ["Internacional", "INTERNACIONAL/RS", "Internacional RS"],
+        "Sport": ["Sport", "SPORT/PE", "Sport Recife"],
+        "Roma": ["Roma", "ROMA", "AS Roma", "As roma"],
+        "Inter": ["Inter", "INTER DE MILAO", "Inter Milan", "Inter milan"],
+        "Atlético madrid": ["Atlético madrid", "ATLETICO MADRID", "Atlético de Madrid", "Atletico Madrid"],
+        "Osasuna": ["Osasuna", "OSASUNA", "CA Osasuna"],
+        "Getafe": ["Getafe", "GETAFE", "Getafe CF"],
+        "Real madrid": ["Real madrid", "REAL MADRID", "Real Madrid CF"]
+    }
+
     # Gerar aliases automaticamente usando API-Football
-    aliases = {}
+    aliases = explicit_aliases
     if os.path.exists(aliases_file):
         with open(aliases_file, 'r') as f:
-            aliases = json.load(f)
+            aliases.update(json.load(f))
     url_teams = "https://v3.football.api-sports.io/teams"
     headers = {"x-apisports-key": api_key_apifootball}
     leagues = ["71", "72", "203", "70", "74", "77", "39", "140", "13", "2", "112"]
@@ -67,6 +79,7 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
     odds = []
     sports = [
         "soccer_brazil_campeonato",
+        "soccer_brazil_serie_b",
         "soccer_italy_serie_a",
         "soccer_epl",
         "soccer_spain_la_liga",
