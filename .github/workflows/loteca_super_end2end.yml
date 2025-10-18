@@ -34,7 +34,7 @@ jobs:
       - name: 00 Checkout
         uses: actions/checkout@v4
 
-      - name: 01 Prepare .gitignore (segurança)
+      - name: 01 Prepare .gitignore
         run: |
           set -euo pipefail
           echo "data/history/results.csv" >> .gitignore
@@ -186,7 +186,10 @@ jobs:
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
-          python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --regions "${REGIONS}" --source_csv "${SOURCE_CSV_NORM}"
+          python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV_NORM}" --api_key_apifootball "${API_FOOTBALL_KEY}" --aliases_file "${AUTO_ALIASES_JSON}"
+        env:
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+          REGIONS: ${{ env.REGIONS }}
 
       - name: 20 Fallback direct fetch if empty
         run: |
@@ -196,10 +199,12 @@ jobs:
           if [ "$L" -le 1 ]; then
             API="${THEODDS_API_KEY}"
             REG="${REGIONS}"
-            F1="$(mktemp)"; F2="$(mktemp)"; TMP="$(mktemp)"
+            F1="$(mktemp)"; F2="$(mktemp)"; F3="$(mktemp)"; F4="$(mktemp)"; TMP="$(mktemp)"
             curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F1}"
             curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_serie_b/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F2}"
-            jq -s 'add' "${F1}" "${F2}" > "${TMP}"
+            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_italy_serie_a/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F3}"
+            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_spain_la_liga/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F4}"
+            jq -s 'add' "${F1}" "${F2}" "${F3}" "${F4}" > "${TMP}"
             {
               echo "team_home,team_away,odds_home,odds_draw,odds_away"
               jq -r '
@@ -222,9 +227,9 @@ jobs:
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
-          python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV_NORM}"
-          L=0; [ -s "$OUT" ] && L="$(wc -l < "$OUT" | tr -d ' ')"
-          [ "$L" -gt 1 ] || { echo "::error::No games found in odds_apifootball.csv"; exit 5; }
+          python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV_NORM}" --api_key_theodds "${THEODDS_API_KEY}" --regions "${REGIONS}" --aliases_file "${AUTO_ALIASES_JSON}"
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
 
       - name: 22 Consensus odds
         run: |
