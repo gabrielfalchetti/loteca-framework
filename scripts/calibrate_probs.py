@@ -5,9 +5,20 @@ import sys
 import pandas as pd
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
-from sklearn.calibration import CalibratedClassifierCV
+import pickle
 import csv
 from typing import Dict, List
+
+def _log(msg: str) -> None:
+    print(f"[calibrate] {msg}", flush=True)
+
+# Verificação inicial da importação
+try:
+    pd.DataFrame()  # Teste simples para garantir que pandas está disponível
+    _log(f"Versão do pandas: {pd.__version__}")
+except (NameError, ImportError) as e:
+    _log(f"Erro crítico: módulo pandas não importado corretamente: {e}")
+    sys.exit(9)
 
 """
 Calibra probabilidades de previsão de resultados de futebol usando Regressão Isotônica ou Dirichlet.
@@ -18,9 +29,6 @@ Saída: CSV com cabeçalho: match_id,team_home,team_away,p_home_cal,p_draw_cal,p
 Uso:
   python -m scripts.calibrate_probs --in predictions.csv --cal calibrator.pkl --out predictions_calibrated.csv
 """
-
-def _log(msg: str) -> None:
-    print(f"[calibrate] {msg}", flush=True)
 
 def _calculate_brier_score(true_probs: np.ndarray, pred_probs: np.ndarray) -> float:
     """Calcula Brier Score para avaliar calibração."""
@@ -57,6 +65,9 @@ def main() -> None:
 
     try:
         df = pd.read_csv(args.inp)
+        if df.empty:
+            _log("Arquivo de previsões está vazio — falhando.")
+            sys.exit(9)
         # Validação de entrada
         if not all(col in df.columns for col in ["match_id", "team_home", "team_away", "p_home", "p_draw", "p_away"]):
             raise ValueError("CSV de entrada sem colunas esperadas")
@@ -87,10 +98,6 @@ def main() -> None:
             cal_probs[i, 2] = _apply_calibration(np.array([pa]), calibrators["away"], args.method)
         s = cal_probs.sum(axis=1, keepdims=True)
         cal_probs = cal_probs / s if s.any() > 0 else probs  # Normaliza se soma > 0
-
-        # Calcular Brier Score (placeholder, requer verdadeiros)
-        # brier = _calculate_brier_score(np.ones_like(cal_probs) * 0.33, cal_probs)  # Exemplo fictício
-        # _log(f"Brier Score: {brier:.4f}")
 
         # Salvar resultados
         os.makedirs(os.path.dirname(args.out), exist_ok=True)
