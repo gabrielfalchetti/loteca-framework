@@ -1,159 +1,108 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-Gera features a partir de um CSV de resultados no formato:
-
-date,home,away,home_goals,away_goals,xG_home,xG_away,formation_home,formation_away
-
-Saída: Parquet (requer pyarrow ou fastparquet), com features EWMA por time, VAEP, impacto de lesões e táticas.
-Mantém comportamento "fail-safe": lança erro claro se o CSV não tem conteúdo válido.
-
-Uso:
-  python -m scripts.feature_engineer \
-      --history data/history/results.csv \
-      --tactics data/history/tactics.json \
-      --out data/history/features.parquet \
-      --ewma 0.20
-"""
-
-from __future__ import annotations
-
 import argparse
 import sys
-import os
-import json
 import pandas as pd
+import json
+import os
 import numpy as np
-from pandas import DataFrame
-from typing import Optional
 
 def _log(msg: str) -> None:
     print(f"[features] {msg}", flush=True)
 
-def _validate_history(df: DataFrame) -> None:
-    required = ["date", "home", "away", "home_goals", "away_goals", "xG_home", "xG_away", "formation_home", "formation_away"]
-    missing = [c for c in required if c not in df.columns]
+def calculate_features(history_df: pd.DataFrame, tactics_file: str, ewma_alpha: float) -> pd.DataFrame:
+    """Gera features a partir de dados históricos e táticas."""
+    required_cols = ['match_id', 'team_home', 'team_away', 'score_home', 'score_away']
+    missing = [col for col in required_cols if col not in history_df.columns]
     if missing:
-        raise ValueError(f"history sem colunas requeridas: {missing}")
-
-    if len(df) == 0:
-        raise ValueError("history vazio")
-
-    # Tipos mínimos
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    if df["date"].isna().all():
-        raise ValueError("coluna 'date' inválida (nenhum parse possível)")
-
-    for c in ["home_goals", "away_goals", "xG_home", "xG_away"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    if df[["home_goals", "away_goals"]].isna().any().any():
-        df["home_goals"] = df["home_goals"].fillna(0)
-        df["away_goals"] = df["away_goals"].fillna(0)
-    if df[["xG_home", "xG_away"]].isna().any().any():
-        df["xG_home"] = df["xG_home"].fillna(0)
-        df["xG_away"] = df["xG_away"].fillna(0)
-
-    # Checar duplicatas/outliers
-    if df.duplicated(subset=["date", "home", "away"]).any():
-        _log("Duplicatas detectadas, removendo...")
-        df = df.drop_duplicates(subset=["date", "home", "away"])
-    if (df[["home_goals", "away_goals"]] > 10).any().any():
-        _log("Outliers (gols > 10) detectados, ajustando para 10...")
-        df[["home_goals", "away_goals"]] = df[["home_goals", "away_goals"]].clip(upper=10)
-
-def _long_format(df: DataFrame) -> DataFrame:
-    """Duplica linhas, uma por time (home/away), para calcular EWM por time."""
-    home = df[["date", "home", "away", "home_goals", "away_goals", "xG_home", "xG_away", "formation_home", "formation_away"]].copy()
-    home.columns = ["date", "team", "opponent", "gf", "ga", "xG", "xG_opponent", "formation", "formation_opponent"]
-    home["is_home"] = 1
-
-    away = df[["date", "home", "away", "home_goals", "away_goals", "xG_home", "xG_away", "formation_home", "formation_away"]].copy()
-    away.columns = ["date", "opponent", "team", "ga", "gf", "xG_opponent", "xG", "formation_opponent", "formation"]
-    away["is_home"] = 0
-
-    long_df = pd.concat([home, away], ignore_index=True)
-    long_df.sort_values(["team", "date"], inplace=True)
-    return long_df
-
-def _calculate_vaep(df: DataFrame) -> DataFrame:
-    """Calcula VAEP básico (placeholder para modelo completo)."""
-    df['vaep'] = df['xG'] - df['xG_opponent'].shift(1).fillna(0)  # Diferença esperada simplificada
-    return df
-
-def _ewm_features(long_df: DataFrame, alpha: float, tactics: Optional[Dict] = None) -> DataFrame:
-    """Calcula EWM por time para métricas básicas e integra táticas."""
-    def _grp(g: DataFrame) -> DataFrame:
-        g = g.sort_values("date").copy()
-        g["ewm_gf"] = g["gf"].ewm(alpha=alpha, adjust=False).mean()
-        g["ewm_ga"] = g["ga"].ewm(alpha=alpha, adjust=False).mean()
-        g["ewm_gd"] = (g["gf"] - g["ga"]).ewm(alpha=alpha, adjust=False).mean()
-        g["ewm_xG"] = g["xG"].ewm(alpha=alpha, adjust=False).mean()
-        g["ewm_xGA"] = g["xG_opponent"].ewm(alpha=alpha, adjust=False).mean()
-        g["ewm_home_rate"] = g["is_home"].ewm(alpha=alpha, adjust=False).mean()
-        # Impacto de lesões (placeholder: simula redução de forma)
-        g["injury_impact"] = np.where(g["formation"] == "", 0, 0.1)  # Ajustar com dados reais
-        # Táticas (se disponível)
-        if tactics:
-            for date, team_data in tactics.items():
-                mask = (g["date"] == date) & (g["team"] == team_data["team"])
-                if mask.any():
-                    g.loc[mask, "tactic_score"] = team_data.get("tactic_score", 0)
-        return g
-
-    out = long_df.groupby("team", group_keys=False).apply(_grp)
-    cols = ["date", "team", "opponent", "gf", "ga", "is_home", "ewm_gf", "ewm_ga", "ewm_gd", 
-            "ewm_xG", "ewm_xGA", "ewm_home_rate", "injury_impact", "tactic_score", "vaep", "formation", "formation_opponent"]
-    return out[cols].reset_index(drop=True)
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--history", type=str, required=True, help="CSV de histórico (results.csv)")
-    parser.add_argument("--tactics", type=str, default=None, help="JSON com táticas (tactics.json)")
-    parser.add_argument("--out", type=str, required=True, help="arquivo Parquet de saída")
-    parser.add_argument("--ewma", type=float, default=0.20, help="alpha do EWMA (0<alpha<=1)")
-    args = parser.parse_args()
-
-    hist_csv = args.history
-    tactics_json = args.tactics
-    out_parquet = args.out
-    alpha = float(args.ewma)
-    assert 0 < alpha <= 1.0, "--ewma deve estar em (0,1]"
-
-    if not os.path.isfile(hist_csv):
-        _log(f"{hist_csv} não encontrado")
+        _log(f"Colunas obrigatórias ausentes em history: {missing}")
         sys.exit(2)
 
-    df = pd.read_csv(hist_csv)
-    try:
-        _validate_history(df)
-    except Exception as e:
-        _log(f"[CRITICAL] {e}")
+    if history_df.empty:
+        _log("Arquivo de histórico vazio — falhando.")
         sys.exit(2)
 
-    tactics = None
-    if tactics_json and os.path.isfile(tactics_json):
-        with open(tactics_json, "r", encoding="utf-8") as f:
-            tactics = json.load(f)
-
-    long_df = _long_format(df)
-    long_df = _calculate_vaep(long_df)  # Adiciona VAEP básico
-    feats = _ewm_features(long_df, alpha, tactics)
-
-    # Garante diretório
-    os.makedirs(os.path.dirname(out_parquet), exist_ok=True)
-
-    # Tenta salvar via pyarrow / fastparquet
-    try:
-        feats.to_parquet(out_parquet, index=False)
-    except Exception as e:
-        _log(
-            "Falha ao salvar Parquet. Instale pyarrow ou fastparquet em requirements.txt "
-            "(ex.: 'pyarrow>=15.0.0'). Erro: %s" % e
-        )
+    # Carregar táticas
+    if not os.path.isfile(tactics_file):
+        _log(f"{tactics_file} não encontrado")
+        sys.exit(2)
+    
+    with open(tactics_file, 'r') as f:
+        tactics = json.load(f)
+    if not tactics:
+        _log("Arquivo de táticas vazio — falhando.")
         sys.exit(2)
 
-    _log(f"OK — gerado {out_parquet} com {len(feats)} linhas")
+    # Renomear colunas para consistência
+    df = history_df.rename(columns={
+        'team_home': 'home',
+        'team_away': 'away',
+        'score_home': 'home_goals',
+        'score_away': 'away_goals'
+    })
+
+    # Adicionar colunas opcionais se ausentes
+    for col in ['xG_home', 'xG_away', 'formation_home', 'formation_away']:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    # Calcular features simples (exemplo: média de gols, forma recente)
+    teams = set(df['home']).union(set(df['away']))
+    features = []
+    for team in teams:
+        team_matches = df[(df['home'] == team) | (df['away'] == team)]
+        if team_matches.empty:
+            continue
+
+        # Forma recente (EWMA de gols)
+        home_matches = team_matches[team_matches['home'] == team]
+        away_matches = team_matches[team_matches['away'] == team]
+        goals_scored = pd.concat([
+            home_matches[['home_goals']].rename(columns={'home_goals': 'goals'}),
+            away_matches[['away_goals']].rename(columns={'away_goals': 'goals'})
+        ]).sort_index()
+        goals_conceded = pd.concat([
+            home_matches[['away_goals']].rename(columns={'away_goals': 'goals'}),
+            away_matches[['home_goals']].rename(columns={'home_goals': 'goals'})
+        ]).sort_index()
+
+        avg_goals_scored = goals_scored['goals'].ewm(alpha=ewma_alpha).mean().iloc[-1] if not goals_scored.empty else 0
+        avg_goals_conceded = goals_conceded['goals'].ewm(alpha=ewma_alpha).mean().iloc[-1] if not goals_conceded.empty else 0
+
+        # Táticas (exemplo: formação mais comum)
+        formation = tactics.get(team, {}).get('formation', 'unknown')
+
+        features.append({
+            'team': team,
+            'avg_goals_scored': avg_goals_scored,
+            'avg_goals_conceded': avg_goals_conceded,
+            'formation': formation
+        })
+
+    features_df = pd.DataFrame(features)
+    if features_df.empty:
+        _log("Nenhuma feature gerada — falhando.")
+        sys.exit(2)
+
+    return features_df
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--history", required=True, help="Arquivo CSV de histórico")
+    ap.add_argument("--tactics", required=True, help="Arquivo JSON de táticas")
+    ap.add_argument("--out", required=True, help="Arquivo Parquet de saída")
+    ap.add_argument("--ewma", type=float, default=0.2, help="Alpha para EWMA")
+    args = ap.parse_args()
+
+    if not os.path.isfile(args.history):
+        _log(f"{args.history} não encontrado")
+        sys.exit(2)
+
+    history_df = pd.read_csv(args.history)
+    features_df = calculate_features(history_df, args.tactics, args.ewma)
+    
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    features_df.to_parquet(args.out, index=False)
+    _log(f"OK — gerado {args.out} com {len(features_df)} linhas")
 
 if __name__ == "__main__":
     main()
