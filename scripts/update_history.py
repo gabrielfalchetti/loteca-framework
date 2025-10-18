@@ -37,9 +37,9 @@ def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
             data = response.json()
         except requests.exceptions.HTTPError as e:
             if response.status_code == 403:
-                _log(f"Erro 403: Chave API-Football inválida ou limite excedido para liga {league_id}. Verifique API_FOOTBALL_KEY e assinatura no RapidAPI.")
+                _log(f"Erro 403 na API-Football para liga {league_id}: Chave inválida ou limite excedido. Verifique API_FOOTBALL_KEY no RapidAPI.")
             else:
-                _log(f"Erro na API-Football para liga {league_id}: {e}")
+                _log(f"Erro HTTP na API-Football para liga {league_id}: {e}")
             sys.exit(1)
         except requests.RequestException as e:
             _log(f"Erro de conexão na API-Football para liga {league_id}: {e}")
@@ -62,7 +62,7 @@ def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
     
     df = pd.DataFrame(matches)
     if df.empty:
-        _log("Nenhuma partida válida coletada para qualquer liga — falhando. Verifique API_FOOTBALL_KEY e plano da API.")
+        _log("Nenhuma partida válida coletada para qualquer liga — falhando. Verifique API_FOOTBALL_KEY e plano no RapidAPI.")
         sys.exit(1)
     
     _log(f"Coletadas {len(df)} partidas")
