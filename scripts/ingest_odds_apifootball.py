@@ -4,8 +4,13 @@ import sys
 import pandas as pd
 import requests
 import os
+import json  # Added missing import for json.dumps
 from rapidfuzz import fuzz
 from datetime import datetime, timedelta
+
+"""
+Busca estatísticas da API-Football para os jogos da Loteca, usando fuzzy matching para parear times.
+"""
 
 def _log(msg: str) -> None:
     print(f"[apifootball] {msg}", flush=True)
@@ -34,12 +39,12 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     # Buscar fixtures para encontrar match_id válidos
     url_fixtures = "https://v3.football.api-sports.io/fixtures"
     headers = {"x-apisports-key": api_key}
-    since = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+    since = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
     until = (datetime.utcnow() + timedelta(days=60)).strftime("%Y-%m-%d")
     params = {
         "from": since,
         "to": until,
-        "season": 2025,  # Primary season for future games
+        "season": 2024,  # Changed to 2024 as 2025 may not have data yet
         "league": "71,72,203,70,39,140,13,2"  # Série A, Série B, Copa do Brasil, Carioca, Premier League, La Liga, Libertadores, Champions League
     }
     
@@ -56,9 +61,6 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     except requests.RequestException as e:
         _log(f"Erro de conexão ao buscar fixtures: {e}")
         sys.exit(5)
-
-    # Log the full API response for debugging
-    _log(f"Resposta completa da API-Football (fixtures_data): {json.dumps(fixtures_data, indent=2)}")
 
     if not fixtures_data.get("response"):
         _log("Nenhum fixture retornado pela API-Football para ligas 71,72,203,70,39,140,13,2 no período {} a {}".format(since, until))
