@@ -5,9 +5,6 @@ import pandas as pd
 import os
 from unidecode import unidecode
 
-def _log(msg: str) -> None:
-    print(f"[normalize] {msg}", flush=True)
-
 def normalize_team_name(name: str) -> str:
     if not isinstance(name, str):
         return ""
@@ -23,30 +20,22 @@ def main():
     args = ap.parse_args()
 
     if not os.path.isfile(args.in_csv):
-        _log(f"{args.in_csv} não encontrado")
         sys.exit(3)
 
     df = pd.read_csv(args.in_csv)
     if len(df) != 14:
-        _log(f"Arquivo {args.in_csv} contém {len(df)} jogos, esperado 14")
         sys.exit(3)
 
-    home_col = next((col for col in ['team_home', 'home'] if col in df.columns), None)
-    away_col = next((col for col in ['team_away', 'away'] if col in df.columns), None)
-    if not (home_col and away_col):
-        _log("Colunas team_home/team_away ou home/away não encontradas")
+    home_col = 'team_home' if 'team_home' in df.columns else 'home'
+    away_col = 'team_away' if 'team_away' in df.columns else 'away'
+    if home_col not in df.columns or away_col not in df.columns:
         sys.exit(3)
 
-    df = df.rename(columns={home_col: 'team_home', away_col: 'team_away'})
-    if 'match_id' not in df.columns:
-        df['match_id'] = range(1, 15)
-
-    df['team_home'] = df['team_home'].apply(normalize_team_name)
-    df['team_away'] = df['team_away'].apply(normalize_team_name)
+    df[home_col] = df[home_col].apply(normalize_team_name)
+    df[away_col] = df[away_col].apply(normalize_team_name)
 
     os.makedirs(os.path.dirname(args.out_csv), exist_ok=True)
     df.to_csv(args.out_csv, index=False)
-    _log(f"OK — {args.out_csv} gerado com 14 jogos")
 
 if __name__ == "__main__":
     main()
