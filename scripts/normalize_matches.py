@@ -14,6 +14,7 @@ def normalize_team_name(name: str) -> str:
     name = unidecode(name).lower().strip()
     name = name.replace("/rj", "").replace("/sp", "").replace("/mg", "").replace("/rs", "").replace("/ce", "").replace("/ba", "").replace("/pe", "")
     name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd").replace("ldu quito", "ldu")
+    name = name.replace("sport recife", "sport").replace("atletico mineiro", "atlético").replace("bragantino-sp", "bragantino").replace("vasco da gama", "vasco").replace("fluminense", "fluminense").replace("santos", "santos").replace("vitoria", "vitória").replace("mirassol", "mirassol").replace("gremio", "grêmio").replace("juventude", "juventude").replace("roma", "roma").replace("getafe", "getafe").replace("real madrid", "real madrid").replace("liverpool", "liverpool")
     return name.capitalize()
 
 def main():
@@ -30,8 +31,7 @@ def main():
     if df.empty:
         _log("Arquivo de entrada vazio")
         sys.exit(3)
-
-    if len(df) != 14:  # Concurso 1216 tem 14 jogos
+    if len(df) != 14:
         _log(f"Arquivo {args.in_csv} contém {len(df)} jogos, esperado 14")
         sys.exit(3)
 
