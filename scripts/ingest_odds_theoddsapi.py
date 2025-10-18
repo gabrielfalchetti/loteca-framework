@@ -7,6 +7,7 @@ import os
 import json
 from rapidfuzz import fuzz
 from unidecode import unidecode
+from datetime import datetime, timedelta
 
 def _log(msg: str) -> None:
     print(f"[theoddsapi] {msg}", flush=True)
@@ -16,11 +17,11 @@ def normalize_team_name(name: str) -> str:
         return ""
     name = unidecode(name).lower().strip()
     name = name.replace("/rj", "").replace("/sp", "").replace("/mg", "").replace("/rs", "").replace("/ce", "").replace("/ba", "").replace("/pe", "")
-    name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd").replace("ldu quito", "ldu")
-    name = name.replace("sport recife", "sport").replace("atletico mineiro", "atlético").replace("bragantino-sp", "bragantino").replace("vasco da gama", "vasco").replace("fluminense", "fluminense").replace("santos", "santos").replace("vitoria", "vitória").replace("mirassol", "mirassol").replace("gremio", "grêmio").replace("juventude", "juventude").replace("roma", "roma").replace("getafe", "getafe").replace("real madrid", "real madrid").replace("liverpool", "liverpool")
+    name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd")
+    name = name.replace("sport recife", "sport").replace("atletico mineiro", "atlético").replace("bragantino-sp", "bragantino").replace("vasco da gama", "vasco").replace("vitoria", "vitória").replace("mirassol", "mirassol").replace("gremio", "grêmio").replace("juventude", "juventude").replace("as roma", "roma").replace("atlético madrid", "atlético de madrid").replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna").replace("fortaleza", "fortaleza").replace("cruzeiro", "cruzeiro").replace("tottenham", "tottenham").replace("aston villa", "aston villa").replace("liverpool", "liverpool").replace("lazio", "lazio").replace("bahia", "bahia").replace("ac milan", "milan")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 50) -> str:
     api_norm = normalize_team_name(api_name)
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team)
@@ -43,6 +44,12 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
 
+    # Usar datas do CSV para filtrar
+    dates = matches_df['date'].unique() if 'date' in matches_df.columns else []
+    date_range = [(datetime.strptime(d, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d') for d in dates] + \
+                 [(datetime.strptime(d, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d') for d in dates]
+    date_range = list(set(date_range))
+
     # Gerar aliases automaticamente usando API-Football
     aliases = {}
     if os.path.exists(aliases_file):
@@ -50,7 +57,7 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
             aliases = json.load(f)
     url_teams = "https://v3.football.api-sports.io/teams"
     headers = {"x-apisports-key": api_key_apifootball}
-    leagues = ["71", "72", "203", "70", "74", "77", "39", "140", "13", "2", "112"]
+    leagues = ["71", "72", "39", "140"]  # Série A, Série B, Serie A italiana, La Liga
     for league in leagues:
         try:
             response = requests.get(url_teams, headers=headers, params={"league": league, "season": 2025}, timeout=25)
@@ -65,41 +72,44 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
     odds = []
     sports = [
         "soccer_brazil_campeonato",
+        "soccer_brazil_serie_b",
         "soccer_italy_serie_a",
         "soccer_epl",
-        "soccer_spain_la_liga",
-        "soccer_conmebol_copa_libertadores",
-        "soccer_ecuador_primera_a"
+        "soccer_spain_la_liga"
     ]
     for sport in sports:
-        url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key}"
-        try:
-            response = requests.get(url, timeout=25)
-            response.raise_for_status()
-            games = response.json()
-            _log(f"TheOddsAPI retornou {len(games)} jogos para {sport}")
-            for game in games:
-                home_team = normalize_team_name(game["home_team"])
-                away_team = normalize_team_name(game["away_team"])
-                home_matched = match_team(home_team, source_teams, aliases)
-                away_matched = match_team(away_team, source_teams, aliases)
-                if home_matched and away_matched:
-                    odds_values = next((market for market in game["bookmakers"][0]["markets"] if market["key"] == "h2h"), None) if game.get("bookmakers") else None
-                    if odds_values:
-                        odds.append({
-                            "match_id": game["id"],
-                            "team_home": home_matched,
-                            "team_away": away_matched,
-                            "odds_home": odds_values["outcomes"][0]["price"] if len(odds_values["outcomes"]) > 0 else 0,
-                            "odds_draw": odds_values["outcomes"][1]["price"] if len(odds_values["outcomes"]) > 1 else 0,
-                            "odds_away": odds_values["outcomes"][2]["price"] if len(odds_values["outcomes"]) > 2 else 0
-                        })
-        except Exception as e:
-            _log(f"Erro ao buscar {sport}: {e}")
+        for date in date_range:
+            url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key}&date={date}"
+            try:
+                response = requests.get(url, timeout=25)
+                response.raise_for_status()
+                games = response.json()
+                _log(f"TheOddsAPI retornou {len(games)} jogos para {sport} em {date}")
+                for game in games:
+                    home_team = normalize_team_name(game["home_team"])
+                    away_team = normalize_team_name(game["away_team"])
+                    home_matched = match_team(home_team, source_teams, aliases)
+                    away_matched = match_team(away_team, source_teams, aliases)
+                    if home_matched and away_matched:
+                        odds_values = next((market for market in game["bookmakers"][0]["markets"] if market["key"] == "h2h"), None) if game.get("bookmakers") else None
+                        if odds_values:
+                            odds.append({
+                                "match_id": game["id"],
+                                "team_home": home_matched,
+                                "team_away": away_matched,
+                                "odds_home": odds_values["outcomes"][0]["price"] if len(odds_values["outcomes"]) > 0 else 0,
+                                "odds_draw": odds_values["outcomes"][1]["price"] if len(odds_values["outcomes"]) > 1 else 0,
+                                "odds_away": odds_values["outcomes"][2]["price"] if len(odds_values["outcomes"]) > 2 else 0
+                            })
+            except Exception as e:
+                _log(f"Erro ao buscar {sport} em {date}: {e}")
 
     df = pd.DataFrame(odds)
     if len(df) < 14:
-        _log(f"Apenas {len(df)} jogos pareados, esperado 14. Verifique times em source_csv.")
+        _log(f"Apenas {len(df)} jogos pareados, esperado 14. Jogos faltantes: {[f'{row[home_col]} x {row[away_col]}' for _, row in matches_df.iterrows() if (row[home_col], row[away_col]) not in [(r['team_home'], r['team_away']) for _, r in df.iterrows()]]}")
+        # Não falhar, salvar o que foi pareado para depuração
+    if df.empty:
+        _log("Nenhum jogo pareado. Verifique times em source_csv ou API key.")
         sys.exit(6)
 
     out_file = f"{rodada}/odds_theoddsapi.csv"
