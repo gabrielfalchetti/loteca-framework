@@ -10,7 +10,7 @@ def _log(msg: str) -> None:
     print(f"[update_history] {msg}", flush=True)
 
 def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
-    """Busca partidas finalizadas da API-Football."""
+    """Busca partidas finalizadas da API-Football via RapidAPI."""
     since = (datetime.utcnow() - timedelta(days=since_days)).strftime("%Y-%m-%d")
     until = datetime.utcnow().strftime("%Y-%m-%d")
     _log(f"Buscando partidas finalizadas de {since} até {until} (UTC) …")
@@ -32,11 +32,17 @@ def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
             "season": 2025
         }
         try:
-            response = requests.get(url, headers=headers, params=params)
+            response = requests.get(url, headers=headers, params=params, timeout=25)
             response.raise_for_status()
             data = response.json()
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 403:
+                _log(f"Erro 403: Chave API-Football inválida ou limite excedido para liga {league_id}. Verifique API_FOOTBALL_KEY e assinatura no RapidAPI.")
+            else:
+                _log(f"Erro na API-Football para liga {league_id}: {e}")
+            sys.exit(1)
         except requests.RequestException as e:
-            _log(f"Erro na API-Football para liga {league_id}: {e}")
+            _log(f"Erro de conexão na API-Football para liga {league_id}: {e}")
             sys.exit(1)
         
         if not data.get("response"):
@@ -56,7 +62,7 @@ def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
     
     df = pd.DataFrame(matches)
     if df.empty:
-        _log("Nenhuma partida válida coletada para qualquer liga — falhando.")
+        _log("Nenhuma partida válida coletada para qualquer liga — falhando. Verifique API_FOOTBALL_KEY e plano da API.")
         sys.exit(1)
     
     _log(f"Coletadas {len(df)} partidas")
