@@ -39,7 +39,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     params = {
         "from": since,
         "to": until,
-        "season": 2024,  # Changed to 2024 as 2025 may not have data yet
+        "season": 2024,  # Use 2024 as 2025 may not have data yet
         "league": "71,72,203,70"  # Série A, Série B, Copa do Brasil, Carioca
     }
     
