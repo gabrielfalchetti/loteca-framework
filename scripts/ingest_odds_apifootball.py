@@ -21,7 +21,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     """Busca estatísticas da API-Football para os jogos."""
     matches_df = pd.read_csv(source_csv)
     
-    # Verificar colunas
+    # Verificação de colunas
     home_col = 'team_home' if 'team_home' in matches_df.columns else 'home' if 'home' in matches_df.columns else None
     away_col = 'team_away' if 'team_away' in matches_df.columns else 'away' if 'away' in matches_df.columns else None
     if not (home_col and away_col):
@@ -35,12 +35,13 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     url_fixtures = "https://v3.football.api-sports.io/fixtures"
     headers = {"x-apisports-key": api_key}
     since = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
-    until = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%d")  # Ampliado para 30 dias
+    until = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%d")
+    # Ligas ampliadas: Série A (71), Série B (72), Copa do Brasil (203), Paulista (71), Carioca (70)
     params = {
         "from": since,
         "to": until,
-        "season": 2025,
-        "league": "71,72,70,71"  # Série A, Série B, Carioca, Paulista
+        "season": 2024,  # Usar 2024 para dados disponíveis; 2025 pode ser futuro
+        "league": "71,72,203,70"  # Série A, Série B, Copa do Brasil, Carioca
     }
     
     try:
@@ -58,7 +59,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
         sys.exit(5)
 
     if not fixtures_data.get("response"):
-        _log("Nenhum fixture retornado pela API-Football para ligas 71,72,70,71 no período {} a {}".format(since, until))
+        _log("Nenhum fixture retornado pela API-Football para ligas 71,72,203,70 no período {} a {}".format(since, until))
         sys.exit(5)
 
     # Logar fixtures retornados
@@ -126,7 +127,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     out_file = f"{rodada}/odds_apifootball.csv"
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
     df.to_csv(out_file, index=False)
-    _log(f"Arquivo {out_file} gerado com {len(df)} jogos encontrados")
+    _log(f"Arquivo {out_file} gerado com {len(df)} jogos encontrado")
     return df
 
 def main():
