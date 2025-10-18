@@ -17,11 +17,11 @@ def normalize_team_name(name: str) -> str:
         return ""
     name = unidecode(name).lower().strip()
     name = name.replace("/rj", "").replace("/sp", "").replace("/mg", "").replace("/rs", "").replace("/ce", "").replace("/ba", "").replace("/pe", "")
-    name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd")
-    name = name.replace("sport recife", "sport").replace("atletico mineiro", "atlético").replace("bragantino-sp", "bragantino").replace("vasco da gama", "vasco").replace("vitoria", "vitória").replace("mirassol", "mirassol").replace("gremio", "grêmio").replace("juventude", "juventude").replace("as roma", "roma").replace("atlético madrid", "atlético de madrid").replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna").replace("fortaleza", "fortaleza").replace("cruzeiro", "cruzeiro").replace("tottenham", "tottenham").replace("aston villa", "aston villa").replace("liverpool", "liverpool").replace("lazio", "lazio").replace("bahia", "bahia").replace("ac milan", "milan")
+    name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd").replace("ldu quito", "ldu")
+    name = name.replace("sport recife", "sport").replace("atletico mineiro", "atlético").replace("bragantino-sp", "bragantino").replace("vasco da gama", "vasco").replace("fluminense", "fluminense").replace("santos", "santos").replace("vitoria", "vitória").replace("mirassol", "mirassol").replace("gremio", "grêmio").replace("juventude", "juventude").replace("roma", "roma").replace("getafe", "getafe").replace("real madrid", "real madrid").replace("liverpool", "liverpool")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 50) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
     api_norm = normalize_team_name(api_name)
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team)
@@ -44,19 +44,13 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
 
-    # Usar datas do CSV para filtrar
-    dates = matches_df['date'].unique() if 'date' in matches_df.columns else []
-    since = min((datetime.strptime(d, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d') for d in dates) if dates else (datetime.utcnow() - timedelta(days=7)).strftime('%Y-%m-%d')
-    until = max((datetime.strptime(d, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d') for d in dates) if dates else (datetime.utcnow() + timedelta(days=7)).strftime('%Y-%m-%d')
-
-    # Gerar aliases automaticamente
     aliases = {}
     if os.path.exists(aliases_file):
         with open(aliases_file, 'r') as f:
             aliases = json.load(f)
     url_teams = "https://v3.football.api-sports.io/teams"
     headers = {"x-apisports-key": api_key}
-    leagues = ["71", "72", "39", "140"]  # Série A, Série B, Serie A italiana, La Liga
+    leagues = ["71", "72", "203", "70", "74", "77", "39", "140", "13", "2", "112"]
     for league in leagues:
         try:
             response = requests.get(url_teams, headers=headers, params={"league": league, "season": 2025}, timeout=25)
@@ -70,54 +64,58 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
 
     stats = []
     url_fixtures = "https://v3.football.api-sports.io/fixtures"
-    params = {
-        "from": since,
-        "to": until,
-        "season": 2025,
-        "league": ",".join(leagues),
-        "timezone": "America/Sao_Paulo"
-    }
-    
-    fixtures_data = None
-    try:
-        response = requests.get(url_fixtures, headers=headers, params=params, timeout=25)
-        response.raise_for_status()
-        fixtures_data = response.json()
-    except Exception as e:
-        _log(f"Erro ao buscar fixtures: {e}")
+    # Use datas do CSV para buscar apenas jogos de fim de semana
+    dates = matches_df['date'].unique() if 'date' in matches_df.columns else [
+        (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d"),
+        (datetime.utcnow() + timedelta(days=2)).strftime("%Y-%m-%d")
+    ]
+    fixtures = []
+    for date in dates:
+        params = {
+            "date": date,
+            "timezone": "America/Sao_Paulo"
+        }
+        try:
+            response = requests.get(url_fixtures, headers=headers, params=params, timeout=25)
+            response.raise_for_status()
+            fixtures_data = response.json()
+            if fixtures_data.get("response"):
+                fixtures.extend(fixtures_data["response"])
+        except Exception as e:
+            _log(f"Erro ao buscar fixtures para data {date}: {e}")
 
-    if not fixtures_data or not fixtures_data.get("response"):
-        _log(f"Nenhum fixture retornado para ligas {params['league']} no período {since} a {until}")
-        sports = ["soccer_brazil_campeonato", "soccer_brazil_serie_b", "soccer_italy_serie_a", "soccer_epl", "soccer_spain_la_liga"]
-        fixtures = []
+    if not fixtures:
+        _log("Nenhum fixture retornado pela API-Football")
+        # Fallback para TheOddsAPI
+        sports = ["soccer_brazil_campeonato", "soccer_italy_serie_a", "soccer_epl", "soccer_spain_la_liga", "soccer_conmebol_copa_libertadores", "soccer_ecuador_primera_a"]
         for sport in sports:
-            for date in dates:
-                url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key_theodds}&date={date}"
-                try:
-                    response = requests.get(url, timeout=25)
-                    response.raise_for_status()
-                    games = response.json()
-                    _log(f"TheOddsAPI retornou {len(games)} jogos para {sport} em {date}")
-                    fixtures.extend(games)
-                except Exception as e:
-                    _log(f"Erro ao buscar {sport} em {date}: {e}")
-    else:
-        fixtures = fixtures_data["response"]
-        _log(f"Fixtures retornados pela API-Football: {len(fixtures)}")
-        for game in fixtures[:5]:
-            _log(f"Fixture ID: {game['fixture']['id']}, Jogo: {game['teams']['home']['name']} x {game['teams']['away']['name']}")
+            url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key_theodds}"
+            try:
+                response = requests.get(url, timeout=25)
+                response.raise_for_status()
+                games = response.json()
+                _log(f"TheOddsAPI retornou {len(games)} jogos para {sport}")
+                fixtures.extend(games)
+            except Exception as e:
+                _log(f"Erro ao buscar {sport}: {e}")
+        if not fixtures:
+            _log("Nenhum dado de fixtures obtido de nenhuma API")
+            sys.exit(5)
 
+    _log(f"Fixtures retornados: {len(fixtures)}")
     fixture_map = {}
     for game in fixtures:
-        home_team = normalize_team_name(game["home_team"] if isinstance(fixtures, list) else game["teams"]["home"]["name"])
-        away_team = normalize_team_name(game["away_team"] if isinstance(fixtures, list) else game["teams"]["away"]["name"])
-        fixture_id = game["id"] if isinstance(fixtures, list) else game["fixture"]["id"]
+        home_team = normalize_team_name(game["home_team"] if isinstance(game, dict) and "home_team" in game else game["teams"]["home"]["name"])
+        away_team = normalize_team_name(game["away_team"] if isinstance(game, dict) and "away_team" in game else game["teams"]["away"]["name"])
+        fixture_id = game["id"] if isinstance(game, dict) and "id" in game else game["fixture"]["id"]
         home_matched = match_team(home_team, source_teams, aliases)
         away_matched = match_team(away_team, source_teams, aliases)
         if home_matched and away_matched:
             fixture_map[(home_matched, away_matched)] = fixture_id
-        else:
-            _log(f"Não pareado: {home_team} x {away_team}")
+
+    unmatched_csv = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1)) - set(fixture_map.keys())
+    if unmatched_csv:
+        _log(f"Jogos do CSV não pareados: {unmatched_csv}")
 
     url_stats = "https://v3.football.api-sports.io/fixtures/statistics"
     url_injuries = "https://v3.football.api-sports.io/injuries"
@@ -127,36 +125,29 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
         away_team = row[away_col]
         fixture_id = fixture_map.get((home_team, away_team))
         if not fixture_id:
-            _log(f"Fixture não encontrado para {home_team} x {away_team}")
             continue
 
-        stats_data, injuries_data, lineups_data, odds_data = None, None, None, None
-        if fixtures_data and fixtures_data.get("response"):
-            try:
-                response = requests.get(url_stats, headers=headers, params={"fixture": fixture_id}, timeout=25)
-                response.raise_for_status()
-                stats_data = response.json()
-            except Exception as e:
-                _log(f"Erro ao buscar stats para fixture {fixture_id}: {e}")
+        stats_data, injuries_data, lineups_data = None, None, None
+        try:
+            response = requests.get(url_stats, headers=headers, params={"fixture": fixture_id}, timeout=25)
+            response.raise_for_status()
+            stats_data = response.json()
+        except Exception as e:
+            _log(f"Erro ao buscar stats para fixture {fixture_id}: {e}")
 
-            try:
-                response = requests.get(url_injuries, headers=headers, params={"fixture": fixture_id}, timeout=25)
-                response.raise_for_status()
-                injuries_data = response.json()
-            except Exception as e:
-                _log(f"Erro ao buscar injuries para fixture {fixture_id}: {e}")
+        try:
+            response = requests.get(url_injuries, headers=headers, params={"fixture": fixture_id}, timeout=25)
+            response.raise_for_status()
+            injuries_data = response.json()
+        except Exception as e:
+            _log(f"Erro ao buscar injuries para fixture {fixture_id}: {e}")
 
-            try:
-                response = requests.get(url_lineups, headers=headers, params={"fixture": fixture_id}, timeout=25)
-                response.raise_for_status()
-                lineups_data = response.json()
-            except Exception as e:
-                _log(f"Erro ao buscar lineups para fixture {fixture_id}: {e}")
-        else:
-            for game in fixtures:
-                if game["id"] == fixture_id:
-                    odds_data = game.get("bookmakers", [{}])[0].get("markets", [{}])[0].get("outcomes", [])
-                    break
+        try:
+            response = requests.get(url_lineups, headers=headers, params={"fixture": fixture_id}, timeout=25)
+            response.raise_for_status()
+            lineups_data = response.json()
+        except Exception as e:
+            _log(f"Erro ao buscar lineups para fixture {fixture_id}: {e}")
 
         stats.append({
             "match_id": fixture_id,
@@ -167,18 +158,12 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
             "lesions_home": len(injuries_data["response"][0].get("players", {}).get("injured", [])) if injuries_data and injuries_data.get("response") else 0,
             "lesions_away": len(injuries_data["response"][1].get("players", {}).get("injured", [])) if injuries_data and injuries_data.get("response") else 0,
             "formation_home": lineups_data["response"][0].get("formation", "unknown") if lineups_data and lineups_data.get("response") else "unknown",
-            "formation_away": lineups_data["response"][1].get("formation", "unknown") if lineups_data and lineups_data.get("response") else "unknown",
-            "odds_home": odds_data[0]["price"] if odds_data and len(odds_data) > 0 else 0,
-            "odds_draw": odds_data[1]["price"] if odds_data and len(odds_data) > 1 else 0,
-            "odds_away": odds_data[2]["price"] if odds_data and len(odds_data) > 2 else 0
+            "formation_away": lineups_data["response"][1].get("formation", "unknown") if lineups_data and lineups_data.get("response") else "unknown"
         })
 
     df = pd.DataFrame(stats)
     if len(df) < 14:
-        _log(f"Apenas {len(df)} jogos pareados, esperado 14. Jogos faltantes: {[f'{row[home_col]} x {row[away_col]}' for _, row in matches_df.iterrows() if (row[home_col], row[away_col]) not in [(r['team_home'], r['team_away']) for _, r in df.iterrows()]]}")
-        # Não falhar, salvar o que foi pareado para depuração
-    if df.empty:
-        _log("Nenhum jogo pareado. Verifique times em source_csv ou API key.")
+        _log(f"Apenas {len(df)} jogos pareados, esperado 14. Verifique times em source_csv ou API key.")
         sys.exit(5)
 
     out_file = f"{rodada}/odds_apifootball.csv"
