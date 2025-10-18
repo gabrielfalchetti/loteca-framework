@@ -4,6 +4,7 @@ import sys
 import pandas as pd
 import requests
 import os
+import json
 from rapidfuzz import fuzz
 from datetime import datetime, timedelta
 
@@ -17,13 +18,12 @@ def match_team(api_name: str, source_teams: list, threshold: float = 80) -> str:
     return None
 
 def fetch_fallback_theoddsapi(regions: str, api_key_theodds: str) -> list:
-    """Fallback to TheOddsAPI for fixtures if API-Football fails."""
-    url = "https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions={}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={}".format(regions, api_key_theodds)
+    url = f"https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key_theodds}"
     try:
         response = requests.get(url, timeout=25)
         response.raise_for_status()
         data = response.json()
-        _log("Fallback to TheOddsAPI succeeded, returned {} fixtures".format(len(data)))
+        _log(f"Fallback to TheOddsAPI succeeded: {len(data)} fixtures")
         return data
     except Exception as e:
         _log(f"Fallback to TheOddsAPI failed: {e}")
@@ -31,17 +31,16 @@ def fetch_fallback_theoddsapi(regions: str, api_key_theodds: str) -> list:
 
 def fetch_stats(rodada: str, source_csv: str, api_key: str, api_key_theodds: str, regions: str) -> pd.DataFrame:
     matches_df = pd.read_csv(source_csv)
-    
-    home_col = 'team_home' if 'team_home' in matches_df.columns else 'home' if 'home' in matches_df.columns else None
-    away_col = 'team_away' if 'team_away' in matches_df.columns else 'away' if 'away' in matches_df.columns else None
+    home_col = next((col for col in ['team_home', 'home'] if col in matches_df.columns), None)
+    away_col = next((col for col in ['team_away', 'away'] if col in matches_df.columns), None)
     if not (home_col and away_col):
-        _log("Colunas team_home/team_away ou home/away não encontradas em source_csv")
+        _log("Colunas team_home/team_away ou home/away não encontradas")
         sys.exit(5)
 
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
     stats = []
     
-    # Try API-Football for fixtures
+    # Tentar API-Football
     url_fixtures = "https://v3.football.api-sports.io/fixtures"
     headers = {"x-apisports-key": api_key}
     since = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -50,7 +49,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, api_key_theodds: str
         "from": since,
         "to": until,
         "season": 2025,
-        "league": "71,72,203,70,74,77,39,140,13,2",
+        "league": "71,72,203,70,74,77,39,140,13,2",  # Série A, Série B, Copa do Brasil, Carioca, Mineiro, Gaúcho, Premier League, La Liga, Libertadores, Champions
         "timezone": "America/Sao_Paulo"
     }
     
@@ -60,24 +59,38 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, api_key_theodds: str
         response.raise_for_status()
         fixtures_data = response.json()
     except Exception as e:
-        _log(f"API-Football failed: {e}. Falling back to TheOddsAPI.")
-    
+        _log(f"Erro ao buscar fixtures da API-Football: {e}")
+        fixtures_data = None
+
     if not fixtures_data or not fixtures_data.get("response"):
-        _log("No fixtures from API-Football. Falling back to TheOddsAPI.")
+        _log(f"Nenhum fixture retornado pela API-Football para ligas {params['league']} no período {since} a {until}")
+        # Fallback para TheOddsAPI
         fixtures_data = fetch_fallback_theoddsapi(regions, api_key_theodds)
         if not fixtures_data:
-            _log("Fallback failed. No fixtures from either API.")
+            _log("Nenhum dado de fixtures obtido de nenhuma API")
             sys.exit(5)
+        # Adaptar formato do TheOddsAPI
+        fixtures = [
+            {
+                "fixture": {"id": game["id"]},
+                "teams": {
+                    "home": {"name": game["home_team"]},
+                    "away": {"name": game["away_team"]}
+                }
+            } for game in fixtures_data
+        ]
+    else:
+        fixtures = fixtures_data["response"]
+        _log(f"Fixtures retornados pela API-Football: {len(fixtures)}")
+        for game in fixtures[:5]:
+            _log(f"Fixture ID: {game['fixture']['id']}, Jogo: {game['teams']['home']['name']} x {game['teams']['away']['name']}")
 
-    _log(f"Fixtures retornados: {len(fixtures_data)}")
-    for game in fixtures_data[:5]:
-        _log(f"Fixture ID: {game.get('id', game.get('fixture', {}).get('id'))}, Jogo: {game.get('home_team', game.get('teams', {}).get('home', {}).get('name'))} x {game.get('away_team', game.get('teams', {}).get('away', {}).get('name'))}")
-
+    # Mapear match_id por time
     fixture_map = {}
-    for game in fixtures_data:
-        home_team = game.get("home_team", game.get("teams", {}).get("home", {}).get("name"))
-        away_team = game.get("away_team", game.get("teams", {}).get("away", {}).get("name"))
-        fixture_id = game.get("id", game.get("fixture", {}).get("id"))
+    for game in fixtures:
+        home_team = game["teams"]["home"]["name"]
+        away_team = game["teams"]["away"]["name"]
+        fixture_id = game["fixture"]["id"]
         home_matched = match_team(home_team, source_teams)
         away_matched = match_team(away_team, source_teams)
         if home_matched and away_matched:
@@ -85,8 +98,15 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, api_key_theodds: str
         else:
             _log(f"Não pareado: {home_team} x {away_team}")
 
-    # Buscar stats (adapt for fallback if TheOddsAPI)
+    if not fixture_map:
+        _log("Nenhum jogo pareado com source_csv")
+        sys.exit(5)
+
+    # Buscar stats, odds, injuries, lineups
     url_stats = "https://v3.football.api-sports.io/fixtures/statistics"
+    url_odds = "https://v3.football.api-sports.io/odds"
+    url_injuries = "https://v3.football.api-sports.io/injuries"
+    url_lineups = "https://v3.football.api-sports.io/fixtures/lineups"
     for _, row in matches_df.iterrows():
         home_team = row[home_col]
         away_team = row[away_col]
@@ -95,49 +115,83 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, api_key_theodds: str
             _log(f"Fixture não encontrado para {home_team} x {away_team}")
             continue
 
-        params = {"fixture": fixture_id}
+        # Buscar stats
+        stats_data = None
         try:
-            response = requests.get(url_stats, headers=headers, params=params, timeout=25)
+            response = requests.get(url_stats, headers=headers, params={"fixture": fixture_id}, timeout=25)
             response.raise_for_status()
-            data = response.json()
+            stats_data = response.json()
         except Exception as e:
             _log(f"Erro ao buscar stats para fixture {fixture_id}: {e}")
-            continue
 
-        if data.get("response") and len(data["response"]) >= 2:
+        # Buscar odds
+        odds_data = None
+        try:
+            response = requests.get(url_odds, headers=headers, params={"fixture": fixture_id}, timeout=25)
+            response.raise_for_status()
+            odds_data = response.json()
+        except Exception as e:
+            _log(f"Erro ao buscar odds para fixture {fixture_id}: {e}")
+
+        # Buscar injuries
+        injuries_data = None
+        try:
+            response = requests.get(url_injuries, headers=headers, params={"fixture": fixture_id}, timeout=25)
+            response.raise_for_status()
+            injuries_data = response.json()
+        except Exception as e:
+            _log(f"Erro ao buscar injuries para fixture {fixture_id}: {e}")
+
+        # Buscar lineups
+        lineups_data = None
+        try:
+            response = requests.get(url_lineups, headers=headers, params={"fixture": fixture_id}, timeout=25)
+            response.raise_for_status()
+            lineups_data = response.json()
+        except Exception as e:
+            _log(f"Erro ao buscar lineups para fixture {fixture_id}: {e}")
+
+        if stats_data and stats_data.get("response") and len(stats_data["response"]) >= 2:
             stats.append({
                 "match_id": fixture_id,
                 "team_home": home_team,
                 "team_away": away_team,
-                "xG_home": data["response"][0]["statistics"].get("xG", 0) if data["response"][0].get("statistics") else 0,
-                "xG_away": data["response"][1]["statistics"].get("xG", 0) if data["response"][1].get("statistics") else 0,
-                "lesions_home": len(data["response"][0].get("players", {}).get("injured", [])),
-                "lesions_away": len(data["response"][1].get("players", {}).get("injured", []))
+                "xG_home": stats_data["response"][0]["statistics"].get("xG", 0) if stats_data["response"][0].get("statistics") else 0,
+                "xG_away": stats_data["response"][1]["statistics"].get("xG", 0) if stats_data["response"][1].get("statistics") else 0,
+                "lesions_home": len(injuries_data["response"][0].get("players", {}).get("injured", [])) if injuries_data and injuries_data.get("response") else 0,
+                "lesions_away": len(injuries_data["response"][1].get("players", {}).get("injured", [])) if injuries_data and injuries_data.get("response") else 0,
+                "formation_home": lineups_data["response"][0].get("formation", "unknown") if lineups_data and lineups_data.get("response") else "unknown",
+                "formation_away": lineups_data["response"][1].get("formation", "unknown") if lineups_data and lineups_data.get("response") else "unknown",
+                "odds_home": odds_data["response"][0]["bookmakers"][0]["bets"][0]["values"][0]["odd"] if odds_data and odds_data.get("response") and odds_data["response"][0].get("bookmakers") else 0,
+                "odds_draw": odds_data["response"][0]["bookmakers"][0]["bets"][0]["values"][1]["odd"] if odds_data and odds_data.get("response") and odds_data["response"][0].get("bookmakers") else 0,
+                "odds_away": odds_data["response"][0]["bookmakers"][0]["bets"][0]["values"][2]["odd"] if odds_data and odds_data.get("response") and odds_data["response"][0].get("bookmakers") else 0
             })
 
     df = pd.DataFrame(stats)
     if df.empty:
-        _log("Nenhum jogo processado — falhando. Verifique times em source_csv, datas ou API_FOOTBALL_KEY.")
+        _log("Nenhum jogo processado. Verifique times em source_csv ou chaves API.")
         sys.exit(5)
 
     out_file = f"{rodada}/odds_apifootball.csv"
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
     df.to_csv(out_file, index=False)
-    _log(f"Arquivo {out_file} gerado com {len(df)} jogos encontrados")
+    _log(f"Arquivo {out_file} gerado com {len(df)} jogos")
     return df
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True, help="Diretório de saída")
-    ap.add_argument("--source_csv", required=True, help="CSV com jogos")
-    ap.add_argument("--api_key", default=os.getenv("API_FOOTBALL_KEY"), help="Chave API-Football")
+    ap.add_argument("--rodada", required=True)
+    ap.add_argument("--source_csv", required=True)
+    ap.add_argument("--api_key", default=os.getenv("API_FOOTBALL_KEY"))
+    ap.add_argument("--api_key_theodds", default=os.getenv("THEODDS_API_KEY"))
+    ap.add_argument("--regions", default="uk,eu,us,au")
     args = ap.parse_args()
 
-    if not args.api_key:
-        _log("API_FOOTBALL_KEY não definida")
+    if not args.api_key or not args.api_key_theodds:
+        _log("API_FOOTBALL_KEY ou THEODDS_API_KEY não definida")
         sys.exit(5)
 
-    fetch_stats(args.rodada, args.source_csv, args.api_key)
+    fetch_stats(args.rodada, args.source_csv, args.api_key, args.api_key_theodds, args.regions)
 
 if __name__ == "__main__":
     main()
