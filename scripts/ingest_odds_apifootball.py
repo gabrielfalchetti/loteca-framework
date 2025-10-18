@@ -35,7 +35,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     url_fixtures = "https://v3.football.api-sports.io/fixtures"
     headers = {"x-apisports-key": api_key}
     since = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
-    until = (datetime.utcnow() + timedelta(days=3)).strftime("%Y-%m-%d")
+    until = (datetime.utcnow() + timedelta(days=7)).strftime("%Y-%m-%d")  # Ampliado para 7 dias
     params = {
         "from": since,
         "to": until,
@@ -58,8 +58,13 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
         sys.exit(5)
 
     if not fixtures_data.get("response"):
-        _log("Nenhum fixture retornado pela API-Football")
+        _log("Nenhum fixture retornado pela API-Football para ligas 71,72 no período {} a {}".format(since, until))
         sys.exit(5)
+
+    # Logar fixtures retornados
+    _log(f"Fixtures retornados: {len(fixtures_data['response'])}")
+    for game in fixtures_data["response"][:5]:  # Logar primeiros 5 para depuração
+        _log(f"Fixture ID: {game['fixture']['id']}, Jogo: {game['teams']['home']['name']} x {game['teams']['away']['name']}")
 
     # Mapear match_id por time
     fixture_map = {}
@@ -71,6 +76,8 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
         away_matched = match_team(away_team, source_teams)
         if home_matched and away_matched:
             fixture_map[(home_matched, away_matched)] = fixture_id
+        else:
+            _log(f"Não pareado: {home_team} x {away_team}")
 
     # Buscar stats para cada jogo
     url_stats = "https://v3.football.api-sports.io/fixtures/statistics"
@@ -113,7 +120,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
 
     df = pd.DataFrame(stats)
     if df.empty:
-        _log("Nenhum jogo processado — falhando. Verifique times em source_csv ou API_FOOTBALL_KEY.")
+        _log("Nenhum jogo processado — falhando. Verifique times em source_csv, datas ou API_FOOTBALL_KEY.")
         sys.exit(5)
 
     out_file = f"{rodada}/odds_apifootball.csv"
