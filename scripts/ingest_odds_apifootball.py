@@ -4,6 +4,7 @@ import sys
 import pandas as pd
 import requests
 import os
+import json
 from rapidfuzz import fuzz
 from datetime import datetime, timedelta
 
@@ -34,50 +35,58 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
     # Buscar fixtures para encontrar match_id válidos
     url_fixtures = "https://v3.football.api-sports.io/fixtures"
     headers = {"x-apisports-key": api_key}
-    since = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
-    until = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%d")
-    params = {
-        "from": since,
-        "to": until,
-        "season": 2024,  # Use 2024 as 2025 may not have data yet
-        "league": "71,72,203,70"  # Série A, Série B, Copa do Brasil, Carioca
-    }
+    since = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")  # Ampliado para 7 dias atrás
+    until = (datetime.utcnow() + timedelta(days=60)).strftime("%Y-%m-%d")  # Ampliado para 60 dias à frente
+    seasons = [2024, 2025]  # Tentar 2024 e 2025
+    leagues = "71,72,203,70,39,140"  # Série A, Série B, Copa do Brasil, Carioca, Premier League, La Liga
     
-    try:
-        response = requests.get(url_fixtures, headers=headers, params=params, timeout=25)
-        response.raise_for_status()
-        fixtures_data = response.json()
-    except requests.exceptions.HTTPError as e:
-        if response.status_code == 403:
-            _log(f"Erro 403: Chave API-Football inválida ou limite excedido. Verifique API_FOOTBALL_KEY.")
-        else:
-            _log(f"Erro HTTP ao buscar fixtures: {e}")
-        sys.exit(5)
-    except requests.RequestException as e:
-        _log(f"Erro de conexão ao buscar fixtures: {e}")
-        sys.exit(5)
-
-    if not fixtures_data.get("response"):
-        _log("Nenhum fixture retornado pela API-Football para ligas 71,72,203,70 no período {} a {}".format(since, until))
-        sys.exit(5)
-
-    # Logar fixtures retornados
-    _log(f"Fixtures retornados: {len(fixtures_data['response'])}")
-    for game in fixtures_data["response"][:5]:  # Logar primeiros 5 para depuração
-        _log(f"Fixture ID: {game['fixture']['id']}, Jogo: {game['teams']['home']['name']} x {game['teams']['away']['name']}")
-
-    # Mapear match_id por time
     fixture_map = {}
-    for game in fixtures_data["response"]:
-        home_team = game["teams"]["home"]["name"]
-        away_team = game["teams"]["away"]["name"]
-        fixture_id = game["fixture"]["id"]
-        home_matched = match_team(home_team, source_teams)
-        away_matched = match_team(away_team, source_teams)
-        if home_matched and away_matched:
-            fixture_map[(home_matched, away_matched)] = fixture_id
-        else:
-            _log(f"Não pareado: {home_team} x {away_team}")
+    for season in seasons:
+        params = {
+            "from": since,
+            "to": until,
+            "season": season,
+            "league": leagues,
+            "timezone": "America/Sao_Paulo"
+        }
+        try:
+            response = requests.get(url_fixtures, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            fixtures_data = response.json()
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 403:
+                _log(f"Erro 403: Chave API-Football inválida ou limite excedido para season {season}. Verifique API_FOOTBALL_KEY.")
+            else:
+                _log(f"Erro HTTP ao buscar fixtures para season {season}: {e}")
+            continue
+        except requests.RequestException as e:
+            _log(f"Erro de conexão ao buscar fixtures para season {season}: {e}")
+            continue
+
+        if not fixtures_data.get("response"):
+            _log(f"Nenhum fixture retornado pela API-Football para ligas {leagues} no período {since} a {until}, season {season}")
+            continue
+
+        # Logar fixtures retornados
+        _log(f"Fixtures retornados para season {season}: {len(fixtures_data['response'])}")
+        for game in fixtures_data["response"][:5]:  # Logar primeiros 5 para depuração
+            _log(f"Fixture ID: {game['fixture']['id']}, Jogo: {game['teams']['home']['name']} x {game['teams']['away']['name']}")
+
+        # Mapear match_id por time
+        for game in fixtures_data["response"]:
+            home_team = game["teams"]["home"]["name"]
+            away_team = game["teams"]["away"]["name"]
+            fixture_id = game["fixture"]["id"]
+            home_matched = match_team(home_team, source_teams)
+            away_matched = match_team(away_team, source_teams)
+            if home_matched and away_matched:
+                fixture_map[(home_matched, away_matched)] = fixture_id
+            else:
+                _log(f"Não pareado: {home_team} x {away_team}")
+
+    if not fixture_map:
+        _log("Nenhum jogo pareado com source_csv. Verifique times em source_csv ou API_FOOTBALL_KEY.")
+        sys.exit(5)
 
     # Buscar stats para cada jogo
     url_stats = "https://v3.football.api-sports.io/fixtures/statistics"
@@ -91,7 +100,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
 
         params = {"fixture": fixture_id}
         try:
-            response = requests.get(url_stats, headers=headers, params=params, timeout=25)
+            response = requests.get(url_stats, headers=headers, params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.HTTPError as e:
