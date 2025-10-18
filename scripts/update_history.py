@@ -10,7 +10,7 @@ def _log(msg: str) -> None:
     print(f"[update_history] {msg}", flush=True)
 
 def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
-    """Busca partidas finalizadas da API-Football via RapidAPI."""
+    """Busca partidas finalizadas diretamente do API-Football (api-sports.io)."""
     since = (datetime.utcnow() - timedelta(days=since_days)).strftime("%Y-%m-%d")
     until = datetime.utcnow().strftime("%Y-%m-%d")
     _log(f"Buscando partidas finalizadas de {since} até {until} (UTC) …")
@@ -19,10 +19,9 @@ def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
     leagues = [71, 72]
     matches = []
     for league_id in leagues:
-        url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
+        url = "https://v3.football.api-sports.io/fixtures"
         headers = {
-            "X-RapidAPI-Key": api_key,
-            "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"
+            "x-apisports-key": api_key
         }
         params = {
             "from": since,
@@ -37,7 +36,7 @@ def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
             data = response.json()
         except requests.exceptions.HTTPError as e:
             if response.status_code == 403:
-                _log(f"Erro 403 na API-Football para liga {league_id}: Chave inválida ou limite excedido. Verifique API_FOOTBALL_KEY no RapidAPI.")
+                _log(f"Erro 403: Chave API-Football inválida ou limite excedido para liga {league_id}. Verifique API_FOOTBALL_KEY.")
             else:
                 _log(f"Erro HTTP na API-Football para liga {league_id}: {e}")
             sys.exit(1)
@@ -62,7 +61,7 @@ def fetch_matches(since_days: int, api_key: str) -> pd.DataFrame:
     
     df = pd.DataFrame(matches)
     if df.empty:
-        _log("Nenhuma partida válida coletada para qualquer liga — falhando. Verifique API_FOOTBALL_KEY e plano no RapidAPI.")
+        _log("Nenhuma partida válida coletada para qualquer liga — falhando. Verifique API_FOOTBALL_KEY e plano da API.")
         sys.exit(1)
     
     _log(f"Coletadas {len(df)} partidas")
