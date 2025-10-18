@@ -23,7 +23,15 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
         "x-apisports-key": api_key
     }
     matches_df = pd.read_csv(source_csv)
-    source_teams = set(matches_df["team_home"].tolist() + matches_df["team_away"].tolist())
+    
+    # Verificar colunas disponíveis
+    home_col = 'team_home' if 'team_home' in matches_df.columns else 'home' if 'home' in matches_df.columns else None
+    away_col = 'team_away' if 'team_away' in matches_df.columns else 'away' if 'away' in matches_df.columns else None
+    if not (home_col and away_col):
+        _log("Colunas team_home/team_away ou home/away não encontradas em source_csv")
+        sys.exit(5)
+    
+    source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
     stats = []
     for _, row in matches_df.iterrows():
         params = {
@@ -44,7 +52,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
             _log(f"Erro de conexão para fixture {row['match_id']}: {e}")
             continue
 
-        if data.get("response"):
+        if data.get("response") and len(data["response"]) >= 2:
             home_team = match_team(data["response"][0]["team"]["name"], source_teams)
             away_team = match_team(data["response"][1]["team"]["name"], source_teams)
             if home_team and away_team:
@@ -54,8 +62,8 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str) -> pd.DataFrame:
                     "team_away": away_team,
                     "xG_home": data["response"][0]["statistics"].get("xG", 0) if data["response"][0].get("statistics") else 0,
                     "xG_away": data["response"][1]["statistics"].get("xG", 0) if data["response"][1].get("statistics") else 0,
-                    "lesions_home": len(data["response"][0].get("injuries", [])),
-                    "lesions_away": len(data["response"][1].get("injuries", []))
+                    "lesions_home": len(data["response"][0].get("players", {}).get("injured", [])),
+                    "lesions_away": len(data["response"][1].get("players", {}).get("injured", []))
                 })
 
     df = pd.DataFrame(stats)
