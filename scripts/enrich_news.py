@@ -29,6 +29,13 @@ def main():
         _log("Arquivo de features vazio")
         sys.exit(2)
 
+    # Verificar colunas disponíveis
+    home_col = 'team_home' if 'team_home' in df.columns else 'home' if 'home' in df.columns else None
+    away_col = 'team_away' if 'team_away' in df.columns else 'away' if 'away' in df.columns else None
+    if home_col is None or away_col is None:
+        _log(f"Colunas de times não encontradas no DataFrame. Colunas disponíveis: {list(df.columns)}")
+        sys.exit(2)
+
     # Adicionar colunas para sentiment e lesões
     df['home_sentiment'] = 0.0
     df['away_sentiment'] = 0.0
@@ -36,8 +43,8 @@ def main():
     df['away_injuries'] = 0
 
     for idx, row in df.iterrows():
-        home_team = row['team_home'] if 'team_home' in df.columns else row['home']
-        away_team = row['team_away'] if 'team_away' in df.columns else row['away']
+        home_team = row[home_col]
+        away_team = row[away_col]
         match_date = datetime.strptime(row['date'], '%Y-%m-%d') if 'date' in df.columns else datetime.now()
 
         # Buscar notícias para home team
