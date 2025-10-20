@@ -18,16 +18,24 @@ def normalize_team_name(name: str) -> str:
     name = unidecode(name).lower().strip()
     name = name.replace("/rj", "").replace("/sp", "").replace("/mg", "").replace("/rs", "").replace("/ce", "").replace("/ba", "").replace("/pe", "")
     name = name.replace("atletico", "atlético").replace("sao paulo", "são paulo").replace("inter de milao", "inter").replace("manchester united", "manchester utd")
-    name = name.replace("sport recife", "sport").replace("atletico mineiro", "atlético").replace("bragantino-sp", "bragantino").replace("vasco da gama", "vasco").replace("fluminense", "fluminense").replace("santos", "santos").replace("vitoria", "vitória").replace("mirassol", "mirassol").replace("gremio", "grêmio").replace("juventude", "juventude").replace("roma", "roma").replace("getafe", "getafe").replace("real madrid", "real madrid").replace("liverpool", "liverpool")
+    name = name.replace("sport recife", "sport").replace("atletico mineiro", "atlético").replace("bragantino-sp", "bragantino").replace("vasco da gama", "vasco")
+    name = name.replace("fluminense", "fluminense").replace("santos", "santos").replace("vitoria", "vitória").replace("mirassol", "mirassol").replace("gremio", "grêmio")
+    name = name.replace("juventude", "juventude").replace("roma", "roma").replace("getafe", "getafe").replace("real madrid", "real madrid").replace("liverpool", "liverpool")
     name = name.replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 40) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
     api_norm = normalize_team_name(api_name).lower()
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
-        if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])] or fuzz.ratio(api_norm, source_norm) > threshold:
+        if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])]:
+            _log(f"Match encontrado para {api_name} -> {source_team} (alias direto)")
             return source_team
+        score = fuzz.ratio(api_norm, source_norm)
+        if score > threshold:
+            _log(f"Match encontrado para {api_name} -> {source_team} (score={score})")
+            return source_team
+    _log(f"Sem match para {api_name}")
     return None
 
 def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases_file: str, api_key_apifootball: str) -> pd.DataFrame:
@@ -44,37 +52,15 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
     matches_df[home_col] = matches_df[home_col].apply(normalize_team_name)
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
+    _log(f"Times no CSV após normalização: {source_teams}")
 
-    # Aliases explícitos para jogos problemáticos
-    explicit_aliases = {
-        "Internacional": ["Internacional", "INTERNACIONAL/RS", "Internacional RS"],
-        "Sport": ["Sport", "SPORT/PE", "Sport Recife"],
-        "Roma": ["Roma", "ROMA", "AS Roma", "As roma"],
-        "Inter": ["Inter", "INTER DE MILAO", "Inter Milan", "Inter milan"],
-        "Atlético madrid": ["Atlético madrid", "ATLETICO MADRID", "Atlético de Madrid", "Atletico Madrid"],
-        "Osasuna": ["Osasuna", "OSASUNA", "CA Osasuna"],
-        "Getafe": ["Getafe", "GETAFE", "Getafe CF"],
-        "Real madrid": ["Real madrid", "REAL MADRID", "Real Madrid CF"]
-    }
-
-    # Gerar aliases automaticamente usando API-Football
-    aliases = explicit_aliases
+    aliases = {}
     if os.path.exists(aliases_file):
         with open(aliases_file, 'r') as f:
-            aliases.update(json.load(f))
-    url_teams = "https://v3.football.api-sports.io/teams"
-    headers = {"x-apisports-key": api_key_apifootball}
-    leagues = ["71", "72", "203", "70", "74", "77", "39", "140", "13", "2", "112"]
-    for league in leagues:
-        try:
-            response = requests.get(url_teams, headers=headers, params={"league": league, "season": 2025}, timeout=25)
-            response.raise_for_status()
-            teams_data = response.json().get("response", [])
-            for team in teams_data:
-                team_name = normalize_team_name(team["team"]["name"])
-                aliases[team_name] = [team_name, normalize_team_name(team["team"].get("code", team_name))]
-        except Exception as e:
-            _log(f"Erro ao buscar times da liga {league}: {e}")
+            aliases = json.load(f)
+    else:
+        _log(f"Arquivo de aliases {aliases_file} não encontrado")
+        sys.exit(6)
 
     odds = []
     sports = [
@@ -97,7 +83,7 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
                 away_team = normalize_team_name(game["away_team"])
                 home_matched = match_team(home_team, source_teams, aliases)
                 away_matched = match_team(away_team, source_teams, aliases)
-                if home_matched and away_matched:
+                if home_matched and away_matched and (home_matched, away_matched) in matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist():
                     odds_values = next((market for market in game["bookmakers"][0]["markets"] if market["key"] == "h2h"), None) if game.get("bookmakers") else None
                     if odds_values:
                         odds.append({
@@ -108,12 +94,13 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
                             "odds_draw": odds_values["outcomes"][1]["price"] if len(odds_values["outcomes"]) > 1 else 0,
                             "odds_away": odds_values["outcomes"][2]["price"] if len(odds_values["outcomes"]) > 2 else 0
                         })
+                        _log(f"Jogo pareado: {home_matched} x {away_matched} (match_id={game['id']})")
         except Exception as e:
             _log(f"Erro ao buscar {sport}: {e}")
 
     df = pd.DataFrame(odds)
     if len(df) < 14:
-        unmatched_csv = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1)) - set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1))
+        unmatched_csv = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist()) - set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).tolist())
         _log(f"Jogos do CSV não pareados: {unmatched_csv}")
         sys.exit(6)
 
