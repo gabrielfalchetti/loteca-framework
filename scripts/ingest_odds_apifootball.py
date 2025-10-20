@@ -24,7 +24,7 @@ def normalize_team_name(name: str) -> str:
     name = name.replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 75) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 70) -> str:
     api_norm = normalize_team_name(api_name).lower()
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
