@@ -24,7 +24,7 @@ def normalize_team_name(name: str) -> str:
     name = name.replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 70) -> str:
     api_norm = normalize_team_name(api_name).lower()
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
@@ -83,7 +83,7 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
                 away_team = normalize_team_name(game["away_team"])
                 home_matched = match_team(home_team, source_teams, aliases)
                 away_matched = match_team(away_team, source_teams, aliases)
-                if home_matched and away_matched and (home_matched, away_matched) in matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist():
+                if home_matched and away_matched and (home_matched, away_matched) in matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).to_list():
                     odds_values = next((market for market in game["bookmakers"][0]["markets"] if market["key"] == "h2h"), None) if game.get("bookmakers") else None
                     if odds_values:
                         odds.append({
@@ -100,7 +100,7 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
 
     df = pd.DataFrame(odds)
     if len(df) < 14:
-        unmatched_csv = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist()) - set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).tolist())
+        unmatched_csv = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).to_list()) - set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).to_list())
         _log(f"Jogos do CSV não pareados: {unmatched_csv}")
         sys.exit(6)
 
