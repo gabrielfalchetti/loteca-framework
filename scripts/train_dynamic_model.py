@@ -2,83 +2,64 @@
 import argparse
 import sys
 import pandas as pd
-import pickle
 import os
-import json
-import numpy as np
-from pykalman import KalmanFilter
+import wandb
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import log_loss
+import pickle
 
 def _log(msg: str) -> None:
-    print(f"[train_dynamic] {msg}", flush=True)
+    print(f"[train_dynamic_model] {msg}", flush=True)
 
-def fit_states(feats: pd.DataFrame, model_type: str = 'kalman') -> dict:
-    """Ajusta estados para o modelo dinâmico."""
-    required_cols = ['team', 'avg_goals_scored', 'avg_goals_conceded']
-    missing = [col for col in required_cols if col not in feats.columns]
-    if missing:
-        _log(f"features sem colunas obrigatórias: {missing}")
+def train_model(features_path: str, out_state: str, out_model: str):
+    # Initialize W&B
+    wandb.login(key=os.getenv("WANDB_API_KEY"))
+    wandb.init(project="loteca-model", config={"season": 2025, "ewma": 0.20})
+
+    # Load features
+    df = pd.read_parquet(features_path)
+    if df.empty:
+        _log("Arquivo de features vazio")
         sys.exit(2)
 
-    if feats.empty:
-        _log("Arquivo de features vazio — falhando.")
+    # Example features and target (adjust as per your data)
+    X = df[['xG_home', 'xG_away', 'lesions_home', 'lesions_away']].fillna(0)
+    y = df['result'] if 'result' in df.columns else None  # Assume 'result' is 1 (home win), 0 (draw), -1 (away win)
+
+    if y is None:
+        _log("Coluna 'result' não encontrada nos dados")
         sys.exit(2)
 
-    states = {}
-    for _, row in feats.iterrows():
-        team = row['team']
-        # Estado inicial: ataque (avg_goals_scored), defesa (avg_goals_conceded)
-        states[team] = {
-            'attack': row['avg_goals_scored'],
-            'defense': row['avg_goals_conceded'],
-            'formation': row.get('formation', 'unknown')
-        }
+    # Train model
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X, y)
 
-    return states
+    # Log metrics to W&B
+    y_pred_proba = model.predict_proba(X)
+    loss = log_loss(y, y_pred_proba)
+    wandb.log({"log_loss": loss})
 
-def train_model(feats: pd.DataFrame, states: dict, model_type: str = 'kalman'):
-    """Treina o modelo dinâmico."""
-    if model_type == 'kalman':
-        # Placeholder para modelo Kalman
-        kf = KalmanFilter(
-            initial_state_mean=np.array([1.0, 1.0]),  # Ataque e defesa iniciais
-            initial_state_covariance=np.eye(2),
-            observation_matrices=np.eye(2),
-            transition_matrices=np.eye(2),
-            observation_covariance=np.eye(2),
-            transition_covariance=np.eye(2) * 0.1
-        )
-        return kf
-    else:
-        _log(f"Tipo de modelo {model_type} não suportado")
-        sys.exit(2)
+    # Save model
+    with open(out_model, 'wb') as f:
+        pickle.dump(model, f)
+    _log(f"Modelo salvo em {out_model}")
+
+    # Save state (example: hyperparameters)
+    state = {"model_type": "LogisticRegression", "max_iter": 1000}
+    with open(out_state, 'w') as f:
+        json.dump(state, f)
+    _log(f"Estado salvo em {out_state}")
+
+    wandb.finish()
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--features", required=True, help="Arquivo Parquet de features")
-    ap.add_argument("--out_state", required=True, help="Arquivo JSON de estados")
-    ap.add_argument("--out_model", required=True, help="Arquivo PKL do modelo")
-    ap.add_argument("--model_type", default="kalman", choices=["kalman"], help="Tipo de modelo")
+    ap.add_argument("--features", required=True)
+    ap.add_argument("--out_state", required=True)
+    ap.add_argument("--out_model", required=True)
     args = ap.parse_args()
 
-    if not os.path.isfile(args.features):
-        _log(f"{args.features} não encontrado")
-        sys.exit(2)
-
-    feats = pd.read_parquet(args.features)
-    states = fit_states(feats, model_type=args.model_type)
-    model = train_model(feats, states, model_type=args.model_type)
-
-    # Salvar estados
-    os.makedirs(os.path.dirname(args.out_state), exist_ok=True)
-    with open(args.out_state, 'w') as f:
-        json.dump(states, f, ensure_ascii=False, indent=2)
-    _log(f"OK — estados salvos em {args.out_state}")
-
-    # Salvar modelo
-    os.makedirs(os.path.dirname(args.out_model), exist_ok=True)
-    with open(args.out_model, 'wb') as f:
-        pickle.dump(model, f)
-    _log(f"OK — modelo salvo em {args.out_model}")
+    train_model(args.features, args.out_state, args.out_model)
 
 if __name__ == "__main__":
     main()
