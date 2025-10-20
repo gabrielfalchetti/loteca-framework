@@ -33,7 +33,7 @@ jobs:
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       WANDB_DISABLED: false
 
-    steps:
+steps:
       - name: 00 Checkout
         uses: actions/checkout@v4
 
@@ -176,7 +176,7 @@ jobs:
           test -s "${STATE_JSON}" || { echo "::error::state_params.json not generated"; exit 2; }
           test -s "${MODEL_PKL}" || { echo "::error::dynamic_model.pkl not generated"; exit 2; }
 
-      - name: 18 Normalize matches
+      - name: 19 Normalize matches
         run: |
           set -euo pipefail
           [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 3; }
