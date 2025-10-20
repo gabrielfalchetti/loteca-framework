@@ -14,7 +14,6 @@ jobs:
     defaults:
       run:
         shell: bash
-
     env:
       SEASON: 2025
       LOOKAHEAD_DAYS: 3
@@ -32,8 +31,7 @@ jobs:
       WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       WANDB_DISABLED: false
-
-steps:
+    steps:
       - name: 00 Checkout
         uses: actions/checkout@v4
 
@@ -148,12 +146,14 @@ steps:
           python -m scripts.enrich_api_football --features_in "${FEATURES_PARQUET}" --features_out "${FEATURES_PARQUET}"
 
       - name: 14 Enrich features with News
+        if: env.NEWSAPI_KEY != ''
         run: |
           set -euo pipefail
           [ -f scripts/enrich_news.py ] || { echo "::error::scripts/enrich_news.py not found"; exit 2; }
           python -m scripts.enrich_news --features_in "${FEATURES_PARQUET}" --features_out "${FEATURES_PARQUET}" --newsapi_key "${NEWSAPI_KEY}"
 
       - name: 15 Enrich features with Weather
+        if: env.WEATHERAPI_KEY != ''
         run: |
           set -euo pipefail
           [ -f scripts/enrich_weather.py ] || { echo "::error::scripts/enrich_weather.py not found"; exit 2; }
@@ -176,7 +176,7 @@ steps:
           test -s "${STATE_JSON}" || { echo "::error::state_params.json not generated"; exit 2; }
           test -s "${MODEL_PKL}" || { echo "::error::dynamic_model.pkl not generated"; exit 2; }
 
-      - name: 19 Normalize matches
+      - name: 18 Normalize matches
         run: |
           set -euo pipefail
           [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 3; }
@@ -228,7 +228,7 @@ steps:
             REG="${REGIONS}"
             F1="$(mktemp)"; F2="$(mktemp)"; TMP="$(mktemp)"
             curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F1}"
-            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_serie_b/odds?regions={REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F2}"
+            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_serie_b/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F2}"
             jq -s 'add' "${F1}" "${F2}" > "${TMP}"
             {
               echo "team_home,team_away,odds_home,odds_draw,odds_away"
