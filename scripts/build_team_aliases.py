@@ -3,6 +3,7 @@ import argparse
 import sys
 import requests
 import json
+import os
 from unidecode import unidecode
 from datetime import datetime
 
