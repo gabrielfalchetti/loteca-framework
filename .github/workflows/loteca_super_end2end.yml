@@ -165,14 +165,26 @@ jobs:
           python -m scripts.normalize_matches --in_csv "${SOURCE_CSV}" --out_csv "${SOURCE_CSV_NORM}"
           test -s "${SOURCE_CSV_NORM}" || { echo "::error::matches_norm.csv not generated"; exit 3; }
 
-      - name: 17 Auto aliases harvest
+      - name: 17 Debug matches_norm.csv
+        run: |
+          set -euo pipefail
+          cat "${SOURCE_CSV_NORM}"
+
+      - name: 18 Build team aliases
+        run: |
+          set -euo pipefail
+          [ -f scripts/build_team_aliases.py ] || { echo "::error::scripts/build_team_aliases.py not found"; exit 3; }
+          python -m scripts.build_team_aliases --out_json "${AUTO_ALIASES_JSON}"
+          test -s "${AUTO_ALIASES_JSON}" || { echo "::error::auto_aliases.json empty"; exit 3; }
+
+      - name: 19 Auto aliases harvest
         run: |
           set -euo pipefail
           [ -f scripts/harvest_aliases.py ] || { echo "::error::scripts/harvest_aliases.py not found"; exit 3; }
           python -m scripts.harvest_aliases --source_csv "${SOURCE_CSV_NORM}" --lookahead_hours 72 --out_json "${AUTO_ALIASES_JSON}"
           test -s "${AUTO_ALIASES_JSON}" || { echo "::error::auto_aliases.json empty"; exit 3; }
 
-      - name: 18 Preflight TheOddsAPI Serie A
+      - name: 20 Preflight TheOddsAPI Serie A
         run: |
           set -euo pipefail
           API="${THEODDS_API_KEY}"
@@ -182,13 +194,13 @@ jobs:
           echo "[preflight] Serie A events=${CNT}"
           [ "$CNT" -gt 0 ] || { echo "::error::No events from TheOddsAPI for Serie A"; exit 5; }
 
-      - name: 19 Ingest TheOddsAPI primary
+      - name: 21 Ingest TheOddsAPI primary
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
           python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV_NORM}" --api_key_apifootball "${API_FOOTBALL_KEY}" --aliases_file "${AUTO_ALIASES_JSON}" --regions "${REGIONS}"
 
-      - name: 20 Fallback direct fetch if empty
+      - name: 22 Fallback direct fetch if empty
         run: |
           set -euo pipefail
           OUT="${OUT_DIR}/odds_theoddsapi.csv"
@@ -218,7 +230,7 @@ jobs:
           fi
           [ -s "$OUT" ] && [ "$(wc -l < "$OUT" | tr -d ' ')" -gt 1 ] || { echo "::error::No odds from TheOddsAPI (primary and fallback)"; exit 5; }
 
-      - name: 21 Ingest API Football complementary
+      - name: 23 Ingest API Football complementary
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
@@ -227,7 +239,7 @@ jobs:
           L=0; [ -s "$OUT" ] && L="$(wc -l < "$OUT" | tr -d ' ')"
           [ "$L" -gt 1 ] || { echo "::error::No games found in odds_apifootball.csv"; exit 5; }
 
-      - name: 22 Consensus odds
+      - name: 24 Consensus odds
         run: |
           set -euo pipefail
           [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
@@ -244,7 +256,7 @@ jobs:
           L=0; [ -s "$OUT_FILE" ] && L="$(wc -l < "$OUT_FILE" | tr -d ' ')"
           [ "$L" -gt 1 ] || { echo "::error::No odds in odds_consensus.csv"; exit 6; }
 
-      - name: 23 Bivariate estimator
+      - name: 25 Bivariate estimator
         run: |
           set -euo pipefail
           [ -f scripts/bivariate_estimator.py ] || { echo "::error::scripts/bivariate_estimator.py not found"; exit 7; }
@@ -252,7 +264,7 @@ jobs:
           L=0; [ -s "${BIVARIATE_CSV}" ] && L="$(wc -l < "${BIVARIATE_CSV}" | tr -d ' ')"
           [ "$L" -gt 1 ] || { echo "::error::bivariate.csv empty"; exit 7; }
 
-      - name: 24 Predict with dynamic model
+      - name: 26 Predict with dynamic model
         run: |
           set -euo pipefail
           [ -f scripts/predict_dynamic_model.py ] || { echo "::error::scripts/predict_dynamic_model.py not found"; exit 8; }
@@ -260,14 +272,14 @@ jobs:
           L=0; [ -s "${PREDICTIONS_CSV}" ] && L="$(wc -l < "${PREDICTIONS_CSV}" | tr -d ' ')"
           [ "$L" -gt 1 ] || { echo "::error::predictions.csv empty"; exit 8; }
 
-      - name: 25 Train calibrator
+      - name: 27 Train calibrator
         run: |
           set -euo pipefail
           [ -f scripts/calibrator_train.py ] || { echo "::error::scripts/calibrator_train.py not found"; exit 9; }
           python -m scripts.calibrator_train --history "${FEATURES_PARQUET}" --out "${CALIBRATOR_PKL}"
           test -s "${CALIBRATOR_PKL}" || { echo "::error::calibrator.pkl not generated"; exit 9; }
 
-      - name: 26 Apply calibration
+      - name: 28 Apply calibration
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
@@ -275,7 +287,7 @@ jobs:
           L=0; [ -s "${PREDICTIONS_CALIB_CSV}" ] && L="$(wc -l < "${PREDICTIONS_CALIB_CSV}" | tr -d ' ')"
           [ "$L" -gt 1 ] || { echo "::error::predictions_calibrated.csv empty"; exit 9; }
 
-      - name: 27 Kelly staking 1x2
+      - name: 29 Kelly staking 1x2
         run: |
           set -euo pipefail
           [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 10; }
@@ -291,14 +303,14 @@ jobs:
           L=0; [ -s "${KELLY_BETS_CSV}" ] && L="$(wc -l < "${KELLY_BETS_CSV}" | tr -d ' ')"
           [ "$L" -gt 1 ] || { echo "::error::bets_kelly.csv empty"; exit 10; }
 
-      - name: 28 Loteca card top 14
+      - name: 30 Loteca card top 14
         run: |
           set -euo pipefail
           [ -f scripts/make_loteca_ticket.py ] || { echo "::error::scripts/make_loteca_ticket.py not found"; exit 11; }
           python -m scripts.make_loteca_ticket --rodada "${OUT_DIR}" --triples 3 --doubles 5
           test -s "${LOTECA_CARD_CSV}" || { echo "::error::loteca_card.csv not generated"; exit 11; }
 
-      - name: 29 Final listing
+      - name: 31 Final listing
         run: |
           set -euo pipefail
           ls -lh "${OUT_DIR}"
