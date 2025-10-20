@@ -29,59 +29,42 @@ def main():
         _log("Arquivo de features vazio")
         sys.exit(2)
 
+    # Logar colunas disponíveis
+    _log(f"Colunas disponíveis no DataFrame: {list(df.columns)}")
+
     # Verificar colunas disponíveis
-    home_col = 'team_home' if 'team_home' in df.columns else 'home' if 'home' in df.columns else None
-    away_col = 'team_away' if 'team_away' in df.columns else 'away' if 'away' in df.columns else None
-    if home_col is None or away_col is None:
-        _log(f"Colunas de times não encontradas no DataFrame. Colunas disponíveis: {list(df.columns)}")
+    team_col = 'team_home' if 'team_home' in df.columns else 'team' if 'team' in df.columns else None
+    opponent_col = 'team_away' if 'team_away' in df.columns else None
+    if team_col is None:
+        _log(f"Coluna 'team_home' ou 'team' não encontrada no DataFrame. Colunas disponíveis: {list(df.columns)}")
         sys.exit(2)
 
     # Adicionar colunas para sentiment e lesões
-    df['home_sentiment'] = 0.0
-    df['away_sentiment'] = 0.0
-    df['home_injuries'] = 0
-    df['away_injuries'] = 0
+    df['sentiment'] = 0.0
+    df['injuries'] = 0
 
     for idx, row in df.iterrows():
-        home_team = row[home_col]
-        away_team = row[away_col]
+        team = row[team_col]
         match_date = datetime.strptime(row['date'], '%Y-%m-%d') if 'date' in df.columns else datetime.now()
 
-        # Buscar notícias para home team
+        # Buscar notícias para o time
         from_date = (match_date - timedelta(days=7)).strftime('%Y-%m-%d')
         to_date = match_date.strftime('%Y-%m-%d')
         try:
-            home_news = newsapi.get_everything(q=home_team, from_param=from_date, to=to_date, language='en', sort_by='relevancy')
-            home_articles = home_news['articles']
-            home_sentiment = 0.0
-            home_injuries = 0
-            for article in home_articles[:5]:  # Limitar a 5 artigos para eficiência
+            news = newsapi.get_everything(q=team, from_param=from_date, to=to_date, language='en', sort_by='relevancy')
+            articles = news['articles']
+            sentiment = 0.0
+            injuries = 0
+            for article in articles[:5]:  # Limitar a 5 artigos para eficiência
                 title = article['title']
-                sentiment = sentiment_pipeline(title)[0]
-                home_sentiment += sentiment['score'] if sentiment['label'] == 'POSITIVE' else -sentiment['score']
+                sent = sentiment_pipeline(title)[0]
+                sentiment += sent['score'] if sent['label'] == 'POSITIVE' else -sent['score']
                 if 'injury' in title.lower() or 'lesão' in title.lower():
-                    home_injuries += 1
-            df.at[idx, 'home_sentiment'] = home_sentiment / max(len(home_articles), 1)
-            df.at[idx, 'home_injuries'] = home_injuries
+                    injuries += 1
+            df.at[idx, 'sentiment'] = sentiment / max(len(articles), 1)
+            df.at[idx, 'injuries'] = injuries
         except Exception as e:
-            _log(f"Erro ao buscar notícias para {home_team}: {e}")
-
-        # Buscar notícias para away team
-        try:
-            away_news = newsapi.get_everything(q=away_team, from_param=from_date, to=to_date, language='en', sort_by='relevancy')
-            away_articles = away_news['articles']
-            away_sentiment = 0.0
-            away_injuries = 0
-            for article in away_articles[:5]:
-                title = article['title']
-                sentiment = sentiment_pipeline(title)[0]
-                away_sentiment += sentiment['score'] if sentiment['label'] == 'POSITIVE' else -sentiment['score']
-                if 'injury' in title.lower() or 'lesão' in title.lower():
-                    away_injuries += 1
-            df.at[idx, 'away_sentiment'] = away_sentiment / max(len(away_articles), 1)
-            df.at[idx, 'away_injuries'] = away_injuries
-        except Exception as e:
-            _log(f"Erro ao buscar notícias para {away_team}: {e}")
+            _log(f"Erro ao buscar notícias para {team}: {e}")
 
     df.to_parquet(args.features_out, index=False)
     _log(f"Features enriquecidas com notícias salvas em {args.features_out}")
