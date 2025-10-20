@@ -62,7 +62,10 @@ def main():
     df['temperature'] = 0.0
 
     for idx, row in df.iterrows():
-        home_team = row['team_home'] if 'team_home' in df.columns else row['home']
+        home_team = row['team_home'] if 'team_home' in df.columns else row['home'] if 'home' in df.columns else None
+        if home_team is None:
+            _log(f"Coluna 'team_home' ou 'home' não encontrada no DataFrame. Colunas disponíveis: {list(df.columns)}")
+            continue
         city = TEAM_CITY_MAP.get(home_team, "Unknown")
         if city == "Unknown":
             _log(f"Cidade não mapeada para {home_team}")
