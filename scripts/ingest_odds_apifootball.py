@@ -28,11 +28,9 @@ def match_team(api_name: str, source_teams: list, aliases: dict, threshold: floa
     api_norm = normalize_team_name(api_name).lower()
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
-        # Priorizar aliases explícitos
         if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])]:
             _log(f"Match encontrado para {api_name} -> {source_team} (alias direto)")
             return source_team
-        # Usar fuzz.ratio apenas se não houver alias direto
         score = fuzz.ratio(api_norm, source_norm)
         if score > threshold:
             _log(f"Match encontrado para {api_name} -> {source_team} (score={score})")
@@ -56,56 +54,13 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
     _log(f"Times no CSV após normalização: {source_teams}")
 
-    # Aliases explícitos para todos os times do Concurso 1216
-    explicit_aliases = {
-        "Flamengo": ["Flamengo", "Flamengo/RJ", "Flamengo RJ", "Flamengo-rj"],
-        "Palmeiras": ["Palmeiras", "Palmeiras/SP", "Palmeiras SP", "Palmeiras-sp"],
-        "Internacional": ["Internacional", "INTERNACIONAL/RS", "Internacional RS"],
-        "Sport": ["Sport", "SPORT/PE", "Sport Recife"],
-        "Corinthians": ["Corinthians", "CORINTHIANS/SP", "Corinthians SP"],
-        "Atlético": ["Atlético", "ATLETICO/MG", "Atlético Mineiro", "Atletico Mineiro"],
-        "Roma": ["Roma", "ROMA", "AS Roma", "As roma", "A.S. Roma"],
-        "Inter": ["Inter", "INTER DE MILAO", "Inter Milan", "Inter milan"],
-        "Atlético madrid": ["Atlético madrid", "ATLETICO MADRID", "Atlético de Madrid", "Atletico Madrid"],
-        "Osasuna": ["Osasuna", "OSASUNA", "CA Osasuna", "Osasuna CA"],
-        "Cruzeiro": ["Cruzeiro", "CRUZEIRO/MG", "Cruzeiro MG"],
-        "Fortaleza": ["Fortaleza", "FORTALEZA/CE", "Fortaleza CE"],
-        "Tottenham": ["Tottenham", "TOTTENHAM", "Tottenham Hotspur"],
-        "Aston villa": ["Aston villa", "ASTON VILLA", "Aston Villa"],
-        "Mirassol": ["Mirassol", "MIRASSOL/SP", "Mirassol SP"],
-        "São paulo": ["São paulo", "SAO PAULO/SP", "São Paulo SP"],
-        "Ceara": ["Ceara", "CEARA/CE", "Ceará CE"],
-        "Botafogo": ["Botafogo", "BOTAFOGO/RJ", "Botafogo RJ"],
-        "Liverpool": ["Liverpool", "LIVERPOOL", "Liverpool FC"],
-        "Manchester utd": ["Manchester utd", "MANCHESTER UNITED", "Manchester United"],
-        "Atalanta": ["Atalanta", "ATALANTA BERGAMAS", "Atalanta BC"],
-        "Lazio": ["Lazio", "LAZIO", "SS Lazio"],
-        "Bahia": ["Bahia", "BAHIA/BA", "Bahia BA"],
-        "Grêmio": ["Grêmio", "GREMIO/RS", "Grêmio RS"],
-        "Milan": ["Milan", "MILAN", "AC Milan"],
-        "Fiorentina": ["Fiorentina", "FIORENTINA", "AC Fiorentina"],
-        "Getafe": ["Getafe", "GETAFE", "Getafe CF", "Getafe C.F."],
-        "Real madrid": ["Real madrid", "REAL MADRID", "Real Madrid CF", "Real Madrid C.F."]
-    }
-
-    # Gerar aliases automaticamente usando API-Football
-    aliases = explicit_aliases
+    aliases = {}
     if os.path.exists(aliases_file):
         with open(aliases_file, 'r') as f:
-            aliases.update(json.load(f))
-    url_teams = "https://v3.football.api-sports.io/teams"
-    headers = {"x-apisports-key": api_key}
-    leagues = ["71", "72", "203", "70", "74", "77", "39", "140", "13", "2", "112"]
-    for league in leagues:
-        try:
-            response = requests.get(url_teams, headers=headers, params={"league": league, "season": 2025}, timeout=25)
-            response.raise_for_status()
-            teams_data = response.json().get("response", [])
-            for team in teams_data:
-                team_name = normalize_team_name(team["team"]["name"])
-                aliases[team_name] = [team_name, normalize_team_name(team["team"].get("code", team_name))]
-        except Exception as e:
-            _log(f"Erro ao buscar times da liga {league}: {e}")
+            aliases = json.load(f)
+    else:
+        _log(f"Arquivo de aliases {aliases_file} não encontrado")
+        sys.exit(5)
 
     stats = []
     url_fixtures = "https://v3.football.api-sports.io/fixtures"
@@ -125,9 +80,10 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
         params = {
             "date": date,
             "season": 2025,
-            "league": ",".join(leagues),
+            "league": ",".join(["71", "72", "203", "70", "74", "77", "39", "140", "13", "2", "112"]),
             "timezone": "America/Sao_Paulo"
         }
+        headers = {"x-apisports-key": api_key}
         try:
             response = requests.get(url_fixtures, headers=headers, params=params, timeout=25)
             response.raise_for_status()
@@ -167,8 +123,6 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
         if home_matched and away_matched and (home_matched, away_matched) in matches_set:
             fixture_map[(home_matched, away_matched)] = fixture_id
             _log(f"Jogo pareado: {home_matched} x {away_matched} (fixture_id={fixture_id})")
-        elif home_matched or away_matched:
-            _log(f"Tentativa de pareamento falhou: {home_team} x {away_team} -> {home_matched} x {away_matched}")
 
     unmatched_csv = matches_set - set(fixture_map.keys())
     if unmatched_csv:
@@ -185,6 +139,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
             continue
 
         stats_data, injuries_data, lineups_data, odds_data = None, None, None, None
+        headers = {"x-apisports-key": api_key}
         try:
             response = requests.get(url_stats, headers=headers, params={"fixture": fixture_id}, timeout=25)
             response.raise_for_status()
