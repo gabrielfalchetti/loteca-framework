@@ -24,7 +24,7 @@ def normalize_team_name(name: str) -> str:
     name = name.replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 70) -> str:
     api_norm = normalize_team_name(api_name).lower()
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
@@ -113,7 +113,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
 
     _log(f"Total de fixtures retornados: {len(fixtures)}")
     fixture_map = {}
-    matches_set = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist())
+    matches_set = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).to_list())
     for game in fixtures:
         home_team = normalize_team_name(game["home_team"] if isinstance(game, dict) and "home_team" in game else game["teams"]["home"]["name"])
         away_team = normalize_team_name(game["away_team"] if isinstance(game, dict) and "away_team" in game else game["teams"]["away"]["name"])
@@ -184,7 +184,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
 
     df = pd.DataFrame(stats)
     if len(df) < 14:
-        unmatched_csv = matches_set - set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).tolist())
+        unmatched_csv = matches_set - set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).to_list())
         _log(f"Jogos do CSV não pareados: {unmatched_csv}")
         sys.exit(5)
 
