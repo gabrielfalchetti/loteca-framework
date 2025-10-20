@@ -28,7 +28,9 @@ jobs:
       SOURCE_CSV: data/in/matches_source.csv
       THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-      WANDB_DISABLED: true
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+      WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
 
     steps:
       - name: 00 Checkout
@@ -58,7 +60,7 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install --upgrade pandas numpy requests python-dateutil unidecode rapidfuzz pyarrow scikit-learn pyyaml pytest pykalman statsmodels torch huggingface_hub transformers
+          pip install --upgrade pandas numpy requests python-dateutil unidecode rapidfuzz pyarrow scikit-learn pyyaml pytest pykalman statsmodels torch huggingface_hub transformers wandb
 
       - name: 05 Install jq
         run: |
@@ -71,6 +73,9 @@ jobs:
           set -euo pipefail
           [ -n "${THEODDS_API_KEY:-}" ] || { echo "::error::Missing THEODDS_API_KEY secret"; exit 1; }
           [ -n "${API_FOOTBALL_KEY:-}" ] || { echo "::error::Missing API_FOOTBALL_KEY secret"; exit 1; }
+          [ -n "${NEWSAPI_KEY:-}" ] || { echo "::error::Missing NEWSAPI_KEY secret"; exit 1; }
+          [ -n "${WEATHERAPI_KEY:-}" ] || { echo "::error::Missing WEATHERAPI_KEY secret"; exit 1; }
+          [ -n "${WANDB_API_KEY:-}" ] || { echo "::error::Missing WANDB_API_KEY secret"; exit 1; }
 
       - name: 07 Prepare data folders
         run: |
@@ -140,6 +145,17 @@ jobs:
           set -euo pipefail
           [ -f scripts/enrich_api_football.py ] || { echo "::error::scripts/enrich_api_football.py not found"; exit 2; }
           python -m scripts.enrich_api_football --features_in "${FEATURES_PARQUET}" --features_out "${FEATURES_PARQUET}"
+
+      - name: 13.5 Enrich features with News and Weather
+        run: |
+          set -euo pipefail
+          [ -f scripts/enrich_features.py ] || { echo "::error::scripts/enrich_features.py not found"; exit 2; }
+          python -m scripts.enrich_features \
+            --features_in "${FEATURES_PARQUET}" \
+            --features_out "${FEATURES_PARQUET}" \
+            --matches "${SOURCE_CSV_NORM}" \
+            --newsapi_key "${NEWSAPI_KEY}" \
+            --weatherapi_key "${WEATHERAPI_KEY}"
 
       - name: 14 Run Unit Tests
         run: |
