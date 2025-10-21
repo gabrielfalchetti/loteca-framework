@@ -24,37 +24,44 @@ def normalize_team_name(name: str) -> str:
     name = name.replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 70) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 80) -> str:
     api_norm = normalize_team_name(api_name).lower()
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
-        if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])]:
+        if api_norm == source_norm or api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])]:
             _log(f"Match encontrado para {api_name} -> {source_team} (alias direto)")
             return source_team
         score = fuzz.ratio(api_norm, source_norm)
-        if score > threshold:
+        if score >= threshold:
             _log(f"Match encontrado para {api_name} -> {source_team} (score={score})")
             return source_team
     _log(f"Sem match para {api_name}")
     return None
 
 def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, api_key_theodds: str, regions: str) -> pd.DataFrame:
-    matches_df = pd.read_csv(source_csv)
+    # Carregar CSV
+    try:
+        matches_df = pd.read_csv(source_csv)
+    except Exception as e:
+        _log(f"Erro ao ler {source_csv}: {e}")
+        sys.exit(5)
+
+    # Verificar colunas
     home_col = next((col for col in ['team_home', 'home'] if col in matches_df.columns), None)
     away_col = next((col for col in ['team_away', 'away'] if col in matches_df.columns), None)
     if not (home_col and away_col):
         _log("Colunas team_home/team_away ou home/away não encontradas")
         sys.exit(5)
-    if len(matches_df) != 14:
-        _log(f"Arquivo {source_csv} contém {len(matches_df)} jogos, esperado 14")
+    if len(matches_df) < 1:
+        _log(f"Arquivo {source_csv} está vazio, esperado pelo menos 1 jogo")
         sys.exit(5)
 
     matches_df[home_col] = matches_df[home_col].apply(normalize_team_name)
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
-    _log(f"Times no CSV após normalização: {source_teams}")
+    _log(f"Times no CSV após normalização: {source_teams} ({len(matches_df)} jogos)")
 
-    aliases = {}
+    # Carregar aliases
     if os.path.exists(aliases_file):
         with open(aliases_file, 'r') as f:
             aliases = json.load(f)
@@ -95,7 +102,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
             _log(f"Erro ao buscar fixtures para data {date}: {e}")
 
     if not fixtures:
-        _log("Nenhum fixture retornado pela API-Football")
+        _log("Nenhum fixture retornado pela API-Football, tentando TheOddsAPI")
         sports = ["soccer_brazil_campeonato", "soccer_brazil_serie_b", "soccer_italy_serie_a", "soccer_epl", "soccer_spain_la_liga", "soccer_conmebol_copa_libertadores"]
         for sport in sports:
             url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds?regions={regions}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey={api_key_theodds}"
@@ -113,7 +120,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
 
     _log(f"Total de fixtures retornados: {len(fixtures)}")
     fixture_map = {}
-    matches_set = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).to_list())
+    matches_set = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist())
     for game in fixtures:
         home_team = normalize_team_name(game["home_team"] if isinstance(game, dict) and "home_team" in game else game["teams"]["home"]["name"])
         away_team = normalize_team_name(game["away_team"] if isinstance(game, dict) and "away_team" in game else game["teams"]["away"]["name"])
@@ -127,6 +134,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
     unmatched_csv = matches_set - set(fixture_map.keys())
     if unmatched_csv:
         _log(f"Jogos do CSV não pareados: {unmatched_csv}")
+        _log(f"{len(fixture_map)} de {len(matches_df)} jogos pareados com sucesso")
 
     url_stats = "https://v3.football.api-sports.io/fixtures/statistics"
     url_injuries = "https://v3.football.api-sports.io/injuries"
@@ -163,7 +171,7 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
 
         if not stats_data or not stats_data.get("response"):
             for game in fixtures:
-                if game["id"] == fixture_id:
+                if game.get("id") == fixture_id:
                     odds_data = game.get("bookmakers", [{}])[0].get("markets", [{}])[0].get("outcomes", [])
                     break
 
@@ -183,10 +191,8 @@ def fetch_stats(rodada: str, source_csv: str, api_key: str, aliases_file: str, a
         })
 
     df = pd.DataFrame(stats)
-    if len(df) < 14:
-        unmatched_csv = matches_set - set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).to_list())
-        _log(f"Jogos do CSV não pareados: {unmatched_csv}")
-        sys.exit(5)
+    if df.empty:
+        _log("Nenhum jogo pareado encontrado, prosseguindo com DataFrame vazio")
 
     out_file = f"{rodada}/odds_apifootball.csv"
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
