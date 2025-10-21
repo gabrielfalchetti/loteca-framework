@@ -120,7 +120,6 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
     df = pd.DataFrame(odds)
     if df.empty:
         _log("Nenhum jogo pareado encontrado, prosseguindo com DataFrame vazio")
-        # Não sai, apenas avisa e continua
 
     # Verificar jogos não pareados
     matches_set = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist())
