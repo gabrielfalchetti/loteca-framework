@@ -24,7 +24,7 @@ def normalize_team_name(name: str) -> str:
     name = name.replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 70) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
     api_norm = normalize_team_name(api_name).lower()
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
@@ -39,22 +39,30 @@ def match_team(api_name: str, source_teams: list, aliases: dict, threshold: floa
     return None
 
 def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases_file: str, api_key_apifootball: str) -> pd.DataFrame:
-    matches_df = pd.read_csv(source_csv)
+    # Carregar CSV
+    try:
+        matches_df = pd.read_csv(source_csv)
+    except Exception as e:
+        _log(f"Erro ao ler {source_csv}: {e}")
+        sys.exit(6)
+
+    # Verificar colunas
     home_col = next((col for col in ['team_home', 'home'] if col in matches_df.columns), None)
     away_col = next((col for col in ['team_away', 'away'] if col in matches_df.columns), None)
     if not (home_col and away_col):
-        _log("Colunas team_home/team_away ou home/away não encontradas")
+        _log("Colunas team_home/team_away ou home/away não encontradas em matches_norm.csv")
         sys.exit(6)
-    if len(matches_df) != 14:
-        _log(f"Arquivo {source_csv} contém {len(matches_df)} jogos, esperado 14")
+    if len(matches_df) < 1:
+        _log(f"Arquivo {source_csv} está vazio, esperado pelo menos 1 jogo")
         sys.exit(6)
 
+    # Normalizar nomes dos times
     matches_df[home_col] = matches_df[home_col].apply(normalize_team_name)
     matches_df[away_col] = matches_df[away_col].apply(normalize_team_name)
     source_teams = set(matches_df[home_col].tolist() + matches_df[away_col].tolist())
-    _log(f"Times no CSV após normalização: {source_teams}")
+    _log(f"Times no CSV após normalização: {source_teams} ({len(matches_df)} jogos)")
 
-    aliases = {}
+    # Carregar aliases
     if os.path.exists(aliases_file):
         with open(aliases_file, 'r') as f:
             aliases = json.load(f)
@@ -79,17 +87,14 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
             games = response.json()
             _log(f"TheOddsAPI retornou {len(games)} jogos para {sport}")
             for game in games:
-                home_team = normalize_team_name(game["home_team"])
-                away_team = normalize_team_name(game["away_team"])
+                home_team = normalize_team_name(game.get("home_team", ""))
+                away_team = normalize_team_name(game.get("away_team", ""))
                 home_matched = match_team(home_team, source_teams, aliases)
                 away_matched = match_team(away_team, source_teams, aliases)
-                
-                # Verificar se o jogo pareado existe no CSV original
                 if home_matched and away_matched:
                     game_tuple = (home_matched, away_matched)
                     csv_tuples = matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist()
                     if game_tuple in csv_tuples:
-                        # Extrair odds do primeiro bookmaker com mercado h2h
                         odds_values = None
                         if game.get("bookmakers"):
                             for bookmaker in game["bookmakers"]:
@@ -99,7 +104,6 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
                                         break
                                 if odds_values:
                                     break
-                        
                         if odds_values and len(odds_values) >= 3:
                             odds.append({
                                 "match_id": game["id"],
@@ -114,17 +118,19 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
             _log(f"Erro ao buscar {sport}: {e}")
 
     df = pd.DataFrame(odds)
-    if len(df) == 0:
+    if df.empty:
         _log("Nenhum jogo pareado encontrado")
         sys.exit(6)
 
-    # CORREÇÃO: Usar .tolist() em vez de .to_list()
+    # Verificar jogos não pareados
     matches_set = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist())
     df_set = set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).tolist())
-    
-    if len(df) < 14:
-        unmatched_csv = matches_set - df_set
+    unmatched_csv = matches_set - df_set
+    if unmatched_csv:
         _log(f"Jogos do CSV não pareados: {unmatched_csv}")
+        if len(df) < len(matches_df):
+            _log(f"Número insuficiente de jogos pareados: {len(df)} pareados, esperado {len(matches_df)}")
+            sys.exit(6)
 
     out_file = f"{rodada}/odds_theoddsapi.csv"
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
@@ -142,8 +148,8 @@ def main():
     ap.add_argument("--api_key_apifootball", default=os.getenv("API_FOOTBALL_KEY"))
     args = ap.parse_args()
 
-    if not args.api_key:
-        _log("THEODDS_API_KEY não definida")
+    if not args.api_key or not args.api_key_apifootball:
+        _log("THEODDS_API_KEY ou API_FOOTBALL_KEY não definida")
         sys.exit(6)
 
     fetch_odds(args.rodada, args.source_csv, args.api_key, args.regions, args.aliases_file, args.api_key_apifootball)
