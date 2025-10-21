@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -
 import argparse
 import sys
 import pandas as pd
@@ -29,14 +29,11 @@ def main():
         _log("Arquivo de features vazio")
         sys.exit(2)
 
-    # Logar colunas disponíveis
     _log(f"Colunas disponíveis no DataFrame: {list(df.columns)}")
 
-    # Verificar colunas disponíveis
-    team_col = 'team_home' if 'team_home' in df.columns else 'team' if 'team' in df.columns else None
-    opponent_col = 'team_away' if 'team_away' in df.columns else None
-    if team_col is None:
-        _log(f"Coluna 'team_home' ou 'team' não encontrada no DataFrame. Colunas disponíveis: {list(df.columns)}")
+    # Verificar coluna 'team'
+    if 'team' not in df.columns:
+        _log(f"Coluna 'team' não encontrada no DataFrame. Colunas disponíveis: {list(df.columns)}")
         sys.exit(2)
 
     # Adicionar colunas para sentiment e lesões
@@ -44,7 +41,7 @@ def main():
     df['injuries'] = 0
 
     for idx, row in df.iterrows():
-        team = row[team_col]
+        team = row['team']
         match_date = datetime.strptime(row['date'], '%Y-%m-%d') if 'date' in df.columns else datetime.now()
 
         # Buscar notícias para o time
@@ -63,6 +60,7 @@ def main():
                     injuries += 1
             df.at[idx, 'sentiment'] = sentiment / max(len(articles), 1)
             df.at[idx, 'injuries'] = injuries
+            _log(f"Sucesso para {team}")
         except Exception as e:
             _log(f"Erro ao buscar notícias para {team}: {e}")
 
