@@ -36,7 +36,8 @@ def main():
         sys.exit(3)
     if len(df) != 14:
         _log(f"Arquivo {args.in_csv} contém {len(df)} jogos, esperado 14")
-        sys.exit(3)
+        # Removido sys.exit(3) para permitir execução mesmo com menos jogos
+        # sys.exit(3)
 
     home_col = 'team_home' if 'team_home' in df.columns else 'home'
     away_col = 'team_away' if 'team_away' in df.columns else 'away'
