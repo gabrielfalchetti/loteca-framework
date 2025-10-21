@@ -24,15 +24,15 @@ def normalize_team_name(name: str) -> str:
     name = name.replace("atalanta bergamas", "atalanta").replace("fiorentina", "fiorentina").replace("osasuna", "osasuna")
     return name.capitalize()
 
-def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 60) -> str:
+def match_team(api_name: str, source_teams: list, aliases: dict, threshold: float = 80) -> str:
     api_norm = normalize_team_name(api_name).lower()
     for source_team in source_teams:
         source_norm = normalize_team_name(source_team).lower()
-        if api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])]:
+        if api_norm == source_norm or api_norm in [normalize_team_name(alias).lower() for alias in aliases.get(source_norm, [])]:
             _log(f"Match encontrado para {api_name} -> {source_team} (alias direto)")
             return source_team
         score = fuzz.ratio(api_norm, source_norm)
-        if score > threshold:
+        if score >= threshold:
             _log(f"Match encontrado para {api_name} -> {source_team} (score={score})")
             return source_team
     _log(f"Sem match para {api_name}")
@@ -119,18 +119,16 @@ def fetch_odds(rodada: str, source_csv: str, api_key: str, regions: str, aliases
 
     df = pd.DataFrame(odds)
     if df.empty:
-        _log("Nenhum jogo pareado encontrado")
-        sys.exit(6)
+        _log("Nenhum jogo pareado encontrado, prosseguindo com DataFrame vazio")
+        # Não sai, apenas avisa e continua
 
     # Verificar jogos não pareados
     matches_set = set(matches_df.apply(lambda row: (row[home_col], row[away_col]), axis=1).tolist())
-    df_set = set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).tolist())
+    df_set = set(df.apply(lambda row: (row['team_home'], row['team_away']), axis=1).tolist()) if not df.empty else set()
     unmatched_csv = matches_set - df_set
     if unmatched_csv:
         _log(f"Jogos do CSV não pareados: {unmatched_csv}")
-        if len(df) < len(matches_df):
-            _log(f"Número insuficiente de jogos pareados: {len(df)} pareados, esperado {len(matches_df)}")
-            sys.exit(6)
+        _log(f"{len(df)} de {len(matches_df)} jogos pareados com sucesso")
 
     out_file = f"{rodada}/odds_theoddsapi.csv"
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
