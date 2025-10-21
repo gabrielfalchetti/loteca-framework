@@ -16,7 +16,7 @@ def predict_matches(model, state: dict, matches_df: pd.DataFrame) -> pd.DataFram
     home_col = next((col for col in ['team_home', 'home'] if col in matches_df.columns), None)
     away_col = next((col for col in ['team_away', 'away'] if col in matches_df.columns), None)
     if not (home_col and away_col):
-        _log("Colunas team_home/team_away ou home/away não encontradas em matches_norm.csv")
+        _log("Colunas team_home/team_away ou home/away não encontradas")
         sys.exit(8)
 
     _log(f"Processando {len(matches_df)} jogos do matches_norm.csv")
@@ -41,7 +41,8 @@ def predict_matches(model, state: dict, matches_df: pd.DataFrame) -> pd.DataFram
                 if len(probs) == 3:
                     prob_home, prob_draw, prob_away = probs
             except Exception as e:
-                _log(f"Erro ao prever para {home_team} x {away_team}: {e}, usando valores padrão")
+                _log(f"Erro ao prever para {home_team} x {away_team}: {str(e)}, usando valores padrão")
+                prob_home, prob_draw, prob_away = 0.33, 0.33, 0.34
 
         results.append({
             'team_home': home_team,
