@@ -54,7 +54,7 @@ def calibrate_probs(predictions_df: pd.DataFrame, calibrator) -> pd.DataFrame:
                 else:
                     prob_home, prob_draw, prob_away = 0.33, 0.33, 0.34
             except Exception as e:
-                _log(f"Erro ao calibrar para {home_team} x {away_team}: {e}, usando valores padrão")
+                _log(f"Erro ao calibrar para {home_team} x {away_team}: {str(e)}, usando valores padrão")
                 prob_home, prob_draw, prob_away = 0.33, 0.33, 0.34
         else:
             _log(f"Calibrador não disponível para {home_team} x {away_team}, usando valores padrão")
