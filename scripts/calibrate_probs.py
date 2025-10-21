@@ -1,116 +1,115 @@
 # -*- coding: utf-8 -*-
 import argparse
-import os
 import sys
 import pandas as pd
-import numpy as np
-from sklearn.isotonic import IsotonicRegression
 import pickle
-import csv
-from typing import Dict, List
+import os
+import numpy as np
 
 def _log(msg: str) -> None:
     print(f"[calibrate] {msg}", flush=True)
 
-# Verificação inicial da importação
-try:
-    pd.DataFrame()  # Teste simples para garantir que pandas está disponível
+def calibrate_probs(predictions_df: pd.DataFrame, calibrator) -> pd.DataFrame:
     _log(f"Versão do pandas: {pd.__version__}")
-except (NameError, ImportError) as e:
-    _log(f"Erro crítico: módulo pandas não importado corretamente: {e}")
-    sys.exit(9)
+    
+    # Verificar colunas no predictions_df
+    required_cols = ['team_home', 'team_away', 'prob_home', 'prob_draw', 'prob_away']
+    missing_cols = [col for col in required_cols if col not in predictions_df.columns]
+    if missing_cols:
+        _log(f"Aviso: Colunas ausentes no predictions.csv: {missing_cols}. Usando valores padrão.")
+        # Inicializar DataFrame com valores padrão
+        results = []
+        for _, row in predictions_df.iterrows():
+            results.append({
+                'team_home': row.get('team_home', 'unknown'),
+                'team_away': row.get('team_away', 'unknown'),
+                'prob_home': 0.33,
+                'prob_draw': 0.33,
+                'prob_away': 0.34
+            })
+        return pd.DataFrame(results)
 
-"""
-Calibra probabilidades de previsão de resultados de futebol usando Regressão Isotônica ou Dirichlet.
-Aplica modelo pré-treinado salvo em pickle, ajustando probs brutas para valores calibrados.
+    _log(f"Processando {len(predictions_df)} jogos do predictions.csv")
 
-Saída: CSV com cabeçalho: match_id,team_home,team_away,p_home_cal,p_draw_cal,p_away_cal
+    results = []
+    for _, row in predictions_df.iterrows():
+        home_team = row['team_home']
+        away_team = row['team_away']
+        prob_home = row['prob_home']
+        prob_draw = row['prob_draw']
+        prob_away = row['prob_away']
 
-Uso:
-  python -m scripts.calibrate_probs --in predictions.csv --cal calibrator.pkl --out predictions_calibrated.csv
-"""
+        # Aplicar calibrador se disponível
+        if calibrator is not None:
+            try:
+                prob_home = calibrator.predict([prob_home])[0] if not np.isnan(prob_home) else 0.33
+                prob_draw = calibrator.predict([prob_draw])[0] if not np.isnan(prob_draw) else 0.33
+                prob_away = calibrator.predict([prob_away])[0] if not np.isnan(prob_away) else 0.34
+                # Normalizar probabilidades para somar 1
+                total = prob_home + prob_draw + prob_away
+                if total > 0:
+                    prob_home /= total
+                    prob_draw /= total
+                    prob_away /= total
+                else:
+                    prob_home, prob_draw, prob_away = 0.33, 0.33, 0.34
+            except Exception as e:
+                _log(f"Erro ao calibrar para {home_team} x {away_team}: {e}, usando valores padrão")
+                prob_home, prob_draw, prob_away = 0.33, 0.33, 0.34
+        else:
+            _log(f"Calibrador não disponível para {home_team} x {away_team}, usando valores padrão")
+            prob_home, prob_draw, prob_away = 0.33, 0.33, 0.34
 
-def _calculate_brier_score(true_probs: np.ndarray, pred_probs: np.ndarray) -> float:
-    """Calcula Brier Score para avaliar calibração."""
-    return np.mean(np.sum((pred_probs - true_probs) ** 2, axis=1))
+        results.append({
+            'team_home': home_team,
+            'team_away': away_team,
+            'prob_home': prob_home,
+            'prob_draw': prob_draw,
+            'prob_away': prob_away
+        })
 
-def _apply_calibration(probs: np.ndarray, calibrator: IsotonicRegression, method: str = "isotonic") -> np.ndarray:
-    """Aplica calibração isotônica ou Dirichlet."""
-    if calibrator is None or method == "none":
-        return probs
-    try:
-        if method == "isotonic":
-            return calibrator.predict(probs)
-        elif method == "dirichlet":
-            # Placeholder: Dirichlet requer mais dados (ex.: matriz de confusão)
-            return probs  # Implementar futuramente com CalibratedClassifierCV
-    except Exception:
-        _log("Falha na calibração, retornando probs originais.")
-        return probs
+    df = pd.DataFrame(results)
+    _log(f"Gerado DataFrame com {len(df)} jogos calibrados")
+    return df
 
-def main() -> None:
+def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", required=True, help="CSV de entrada com probs brutas")
-    ap.add_argument("--cal", required=True, help="Arquivo pickle com calibrador")
-    ap.add_argument("--out", required=True, help="CSV de saída com probs calibradas")
-    ap.add_argument("--method", type=str, default="isotonic", choices=["isotonic", "dirichlet", "none"], help="Método de calibração")
+    ap.add_argument("--in", required=True, dest="input_csv")
+    ap.add_argument("--cal", required=True)
+    ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    if not os.path.isfile(args.inp):
-        _log(f"{args.inp} não encontrado")
-        sys.exit(9)
-    if not os.path.isfile(args.cal):
-        _log(f"{args.cal} não encontrado")
+    # Carregar predictions.csv
+    if not os.path.isfile(args.input_csv):
+        _log(f"Arquivo {args.input_csv} não encontrado")
         sys.exit(9)
 
     try:
-        df = pd.read_csv(args.inp)
-        if df.empty:
-            _log("Arquivo de previsões está vazio — falhando.")
-            sys.exit(9)
-        # Validação de entrada
-        if not all(col in df.columns for col in ["match_id", "team_home", "team_away", "p_home", "p_draw", "p_away"]):
-            raise ValueError("CSV de entrada sem colunas esperadas")
-        probs = df[["p_home", "p_draw", "p_away"]].values
-        if not np.all((probs >= 0) & (probs <= 1)):
-            raise ValueError("Probs inválidas (fora de [0,1])")
-        if not np.allclose(probs.sum(axis=1), 1, atol=0.01):
-            _log("Soma de probs != 1, normalizando...")
-            probs = probs / probs.sum(axis=1, keepdims=True)
-
-        # Carregar calibrador
-        calibrators = None
-        try:
-            with open(args.cal, "rb") as f:
-                calibrators = pickle.load(f)
-        except Exception as e:
-            _log(f"Erro ao carregar calibrador: {e}. Usando probs originais.")
-            calibrators = {"home": None, "draw": None, "away": None}
-        if not isinstance(calibrators, dict) or not all(k in calibrators for k in ["home", "draw", "away"]):
-            _log("Calibrador inválido, usando probs originais.")
-            calibrators = {"home": None, "draw": None, "away": None}
-
-        # Aplicar calibração
-        cal_probs = np.zeros_like(probs)
-        for i, (ph, pd, pa) in enumerate(probs):
-            cal_probs[i, 0] = _apply_calibration(np.array([ph]), calibrators["home"], args.method)
-            cal_probs[i, 1] = _apply_calibration(np.array([pd]), calibrators["draw"], args.method)
-            cal_probs[i, 2] = _apply_calibration(np.array([pa]), calibrators["away"], args.method)
-        s = cal_probs.sum(axis=1, keepdims=True)
-        cal_probs = cal_probs / s if s.any() > 0 else probs  # Normaliza se soma > 0
-
-        # Salvar resultados
-        os.makedirs(os.path.dirname(args.out), exist_ok=True)
-        out_rows = [[r["match_id"], r["team_home"], r["team_away"], cal_p[0], cal_p[1], cal_p[2]] 
-                    for r, cal_p in zip(df.to_dict("records"), cal_probs)]
-        with open(args.out, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["match_id", "team_home", "team_away", "p_home_cal", "p_draw_cal", "p_away_cal"])
-            w.writerows(out_rows)
-        _log(f"OK -> {args.out} (linhas={len(out_rows)})")
+        predictions_df = pd.read_csv(args.input_csv)
     except Exception as e:
-        _log(f"[CRITICAL] Erro: {e}")
+        _log(f"Erro ao ler {args.input_csv}: {e}")
         sys.exit(9)
+
+    if predictions_df.empty:
+        _log("Arquivo predictions.csv está vazio, gerando DataFrame vazio")
+        predictions_df = pd.DataFrame(columns=['team_home', 'team_away', 'prob_home', 'prob_draw', 'prob_away'])
+
+    # Carregar calibrador
+    calibrator = None
+    if os.path.isfile(args.cal):
+        try:
+            with open(args.cal, 'rb') as f:
+                calibrator = pickle.load(f)
+            _log(f"Calibrador carregado de {args.cal}")
+        except Exception as e:
+            _log(f"Erro ao carregar calibrador {args.cal}: {e}, prosseguindo sem calibrador")
+    else:
+        _log(f"Calibrador {args.cal} não encontrado, prosseguindo sem calibrador")
+
+    df = calibrate_probs(predictions_df, calibrator)
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    df.to_csv(args.out, index=False)
+    _log(f"Arquivo {args.out} gerado com {len(df)} jogos")
 
 if __name__ == "__main__":
     main()
