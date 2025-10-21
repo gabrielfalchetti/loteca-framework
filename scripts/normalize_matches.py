@@ -30,14 +30,15 @@ def main():
         _log(f"{args.in_csv} não encontrado")
         sys.exit(3)
 
-    df = pd.read_csv(args.in_csv)
+    try:
+        df = pd.read_csv(args.in_csv)
+    except Exception as e:
+        _log(f"Erro ao ler {args.in_csv}: {e}")
+        sys.exit(3)
+
     if df.empty:
         _log("Arquivo de entrada vazio")
         sys.exit(3)
-    if len(df) != 14:
-        _log(f"Arquivo {args.in_csv} contém {len(df)} jogos, esperado 14")
-        # Removido sys.exit(3) para permitir execução mesmo com menos jogos
-        # sys.exit(3)
 
     home_col = 'team_home' if 'team_home' in df.columns else 'home'
     away_col = 'team_away' if 'team_away' in df.columns else 'away'
