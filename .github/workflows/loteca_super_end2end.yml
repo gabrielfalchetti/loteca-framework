@@ -195,11 +195,3 @@ jobs:
       CONSENSUS_CSV: data/out/${{ github.run_id }}/odds_consensus.csv
       KELLY_BETS_CSV: data/out/${{ github.run_id }}/bets_kelly.csv
       LOTECA_CARD_CSV: data/out/${{ github.run_id }}/loteca_card.csv
-     EOF
-     git add .github/workflows/loteca-super-end2end.yml
-     git commit -m "Corrigir sintaxe YAML na linha 13 (bloco schedule)"
-     git push origin main
-     ```
-
-### Análise da Linha 13
-- No YAML fornecido, a linha 13 é:
