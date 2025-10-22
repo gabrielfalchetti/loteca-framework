@@ -1,11 +1,14 @@
+cat > .github/workflows/loteca-super-end2end.yml << 'EOF'
 name: Loteca Super End-to-End
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Para acionamento manual
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  schedule:
+    - cron: '0 0 * * *'  # Executa diariamente à meia-noite UTC
 
 jobs:
   loteca:
@@ -201,3 +204,4 @@ jobs:
       CONSENSUS_CSV: data/out/${{ github.run_id }}/odds_consensus.csv
       KELLY_BETS_CSV: data/out/${{ github.run_id }}/bets_kelly.csv
       LOTECA_CARD_CSV: data/out/${{ github.run_id }}/loteca_card.csv
+EOF
