@@ -1,13 +1,11 @@
 name: Loteca Super End-to-End
 
 on:
-  workflow_dispatch:  # Para acionamento manual
+  workflow_dispatch:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  schedule:
-    - cron: '0 0 * * *'  # Executa diariamente à meia-noite UTC
 
 jobs:
   loteca:
