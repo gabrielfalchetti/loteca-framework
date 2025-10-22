@@ -15,7 +15,6 @@ def train_calibrator(history_df: pd.DataFrame) -> IsotonicRegression:
     missing_cols = [col for col in required_cols if col not in history_df.columns]
     if missing_cols:
         _log(f"Aviso: Colunas ausentes no history: {missing_cols}. Usando calibrador padrão.")
-        # Retornar um calibrador dummy
         return IsotonicRegression(out_of_bounds='clip')
 
     _log(f"Colunas no history: {list(history_df.columns)}")
