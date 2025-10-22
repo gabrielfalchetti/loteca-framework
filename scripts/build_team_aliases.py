@@ -1,3 +1,5 @@
+mkdir -p scripts
+cat > scripts/build_team_aliases.py << 'EOF'
 # -*- coding: utf-8 -*-
 import argparse
 import sys
@@ -44,3 +46,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+EOF
