@@ -6,6 +6,7 @@ import pickle
 import os
 import json
 from sklearn.ensemble import RandomForestClassifier
+from datetime import datetime
 
 def _log(msg: str) -> None:
     print(f"[train_dynamic_model] {msg}", flush=True)
@@ -66,9 +67,9 @@ def train_dynamic_model(features_file, out_state, out_model):
     else:
         merged = pd.DataFrame()
 
-    # Treinar modelo (exemplo simplificado)
+    # Treinar modelo
     if not merged.empty and 'result' in merged.columns:
-        X = merged[['avg_goals_scored_home', 'avg_goals_conceded_home', 'avg_goals_scored_away', 'avg_goals_conceded_away']].fillna(0)
+        X = merged[['avg_goals_scored_home', 'avg_goals_conceded_home', 'avg_goals_scored_away', 'avg_goals_conceded_away', 'sentiment_home', 'injuries_home', 'rain_prob_home', 'temperature_home', 'sentiment_away', 'injuries_away', 'rain_prob_away', 'temperature_away']].fillna(0)
         y = merged['result']
         if len(X) > 0 and len(y) > 0:
             model = RandomForestClassifier(n_estimators=100, random_state=42)
