@@ -28,27 +28,44 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
         home_aliases = aliases.get(norm_home, [home_team])
         away_aliases = aliases.get(norm_away, [away_team])
 
-        url = f"https://api.theoddsapi.com/v4/sports/soccer_brazil_serie_a/odds/?apiKey={api_key}&regions={regions}"
-        try:
-            response = requests.get(url, timeout=10, verify=True)
-            response.raise_for_status()
-            data = response.json()
-            odds_data.append({
-                'team_home': home_team,
-                'team_away': away_team,
-                'odds_home': 2.0,
-                'odds_draw': 3.0,
-                'odds_away': 2.5
-            })
-        except Exception as e:
-            _log(f"Erro ao buscar odds para {home_team} x {away_team}: {e}")
-            odds_data.append({
-                'team_home': home_team,
-                'team_away': away_team,
-                'odds_home': 2.0,
-                'odds_draw': 3.0,
-                'odds_away': 2.5
-            })
+        # Tentar múltiplos sport keys
+        sport_keys = ['soccer_brazil_serie_a', 'soccer_brazil_serie_b', 'soccer_brazil_copa_do_brasil']
+        for sport_key in sport_keys:
+            url = f"https://api.theoddsapi.com/v4/sports/{sport_key}/odds/?apiKey={api_key}&regions={regions}"
+            try:
+                response = requests.get(url, timeout=10, verify=False)  # Desativar SSL temporariamente
+                response.raise_for_status()
+                data = response.json()
+                # Buscar odds correspondentes
+                for game in data:
+                    if any(h in game.get('home_team', '') for h in home_aliases) and any(a in game.get('away_team', '') for a in away_aliases):
+                        odds_data.append({
+                            'team_home': home_team,
+                            'team_away': away_team,
+                            'odds_home': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[0].get('price', 2.0),
+                            'odds_draw': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[1].get('price', 3.0),
+                            'odds_away': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[2].get('price', 2.5)
+                        })
+                        break
+                else:
+                    _log(f"Sem odds para {home_team} x {away_team} em {sport_key}")
+                    odds_data.append({
+                        'team_home': home_team,
+                        'team_away': away_team,
+                        'odds_home': 2.0,
+                        'odds_draw': 3.0,
+                        'odds_away': 2.5
+                    })
+                break
+            except Exception as e:
+                _log(f"Erro ao buscar odds para {home_team} x {away_team} em {sport_key}: {e}")
+                odds_data.append({
+                    'team_home': home_team,
+                    'team_away': away_team,
+                    'odds_home': 2.0,
+                    'odds_draw': 3.0,
+                    'odds_away': 2.5
+                })
 
     output_file = os.path.join(rodada, 'odds_theoddsapi.csv')
     pd.DataFrame(odds_data).to_csv(output_file, index=False)
