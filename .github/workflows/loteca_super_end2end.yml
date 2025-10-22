@@ -31,6 +31,13 @@ jobs:
             --out "${FEATURES_PARQUET}" \
             --ewma 0.20
           test -s "${FEATURES_PARQUET}" || { echo "::error::features.parquet not generated"; exit 2; }
+      - name: 18 Normalize matches
+        run: |
+          set -euo pipefail
+          [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 3; }
+          python -m scripts.normalize_matches \
+            --in_csv "${SOURCE_CSV}" \
+            --out_csv "${SOURCE_CSV_NORM}"
       - name: 14 Enrich features with News
         run: |
           set -euo pipefail
@@ -53,13 +60,6 @@ jobs:
             --matches_csv "${SOURCE_CSV_NORM}"
         env:
           WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
-      - name: 18 Normalize matches
-        run: |
-          set -euo pipefail
-          [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 3; }
-          python -m scripts.normalize_matches \
-            --in_csv "${SOURCE_CSV}" \
-            --out_csv "${SOURCE_CSV_NORM}"
       - name: 6 Ingest odds from TheOddsAPI
         run: |
           set -euo pipefail
