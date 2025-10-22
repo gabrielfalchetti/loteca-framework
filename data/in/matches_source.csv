@@ -1,7 +1,13 @@
 match_id,home,away,date
-1,Fluminense,Internacional,2025-10-21
-2,Sport,Mirassol,2025-10-21
-3,Bahia,Internacional,2025-10-22
-4,Atlético Mineiro,Ceará,2025-10-22
-5,Ferroviária,Paysandu,2025-10-21
-6,Novorizontino,Botafogo SP,2025-10-21
+1,Bahia,Internacional,2025-10-22
+2,Novorizontino,Botafogo-SP,2025-10-24
+3,Cuiabá,Remo,2025-10-24
+4,Vitória,Corinthians,2025-10-25
+5,Atlético-MG,Ceará,2025-10-25
+6,Volta Redonda,Coritiba,2025-10-25
+7,Athletic Club,América-MG,2025-10-25
+8,Ponte Preta,Londrina,2025-10-25
+9,Fluminense,Internacional,2025-10-25
+10,Sport Recife,Mirassol,2025-10-25
+11,Paysandu,Avaí,2025-10-25
+12,Fortaleza,Flamengo,2025-10-25
