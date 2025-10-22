@@ -26,9 +26,16 @@ def train_dynamic_model(features, out_state, out_model):
         _log("Histórico vazio, usando labels padrão")
         model = RandomForestClassifier()
     else:
+        # Ajustar para usar 'team' em vez de 'team_home'/'team_away'
+        features_df['team_home'] = features_df['team']
+        features_df['team_away'] = features_df['team']
         merged_df = features_df.merge(history, on=['team_home', 'team_away'], how='left', suffixes=('', '_hist'))
         model = RandomForestClassifier()
-        model.fit(merged_df[['avg_goals_scored', 'avg_goals_conceded']], merged_df['score_home'])
+        try:
+            model.fit(merged_df[['avg_goals_scored', 'avg_goals_conceded']], merged_df['score_home'].fillna(0))
+        except Exception as e:
+            _log(f"Erro ao treinar modelo: {e}, usando modelo padrão")
+            model = RandomForestClassifier()
 
     os.makedirs(os.path.dirname(out_model), exist_ok=True)
     with open(out_model, 'wb') as f:
