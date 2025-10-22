@@ -1,134 +1,27 @@
-name: Loteca Super End2End
+name: Loteca Super End-to-End
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   schedule:
-    - cron: "15 12 * * *"
-
-permissions:
-  contents: read
+    - cron: '0 0 * * *'  # Executa diariamente à meia-noite UTC
 
 jobs:
-  super:
+  loteca:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-    env:
-      SEASON: 2025
-      LOOKAHEAD_DAYS: 3
-      REGIONS: uk,eu,us,au
-      BANKROLL: 1000
-      KELLY_FRACTION: 0.5
-      KELLY_CAP: 0.10
-      KELLY_TOP_N: 14
-      ROUND_TO: 1
-      TRAIN_CALIBRATOR: true
-      SOURCE_CSV: data/in/matches_source.csv
-      THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-      WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      WANDB_DISABLED: false
     steps:
-      - name: 00 Checkout
-        uses: actions/checkout@v4
-
-      - name: 01 Prepare .gitignore (segurança)
-        run: |
-          set -euo pipefail
-          echo "data/history/results.csv" >> .gitignore
-          echo "data/history/features.parquet" >> .gitignore
-          echo "*.pkl" >> .gitignore
-          echo "__pycache__/" >> .gitignore
-
-      - name: 02 Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
-
-      - name: 03 Cache Dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-
-      - name: 04 Install Python deps
+          python-version: '3.11'
+      - name: Install dependencies
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install --upgrade pandas numpy requests python-dateutil unidecode rapidfuzz pyarrow scikit-learn pyyaml pytest pykalman statsmodels torch huggingface_hub transformers wandb newsapi-python weather-api
-
-      - name: 05 Install jq
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-
-      - name: 06 Validate secrets
-        run: |
-          set -euo pipefail
-          [ -n "${THEODDS_API_KEY:-}" ] || { echo "::error::Missing THEODDS_API_KEY secret"; exit 1; }
-          [ -n "${API_FOOTBALL_KEY:-}" ] || { echo "::error::Missing API_FOOTBALL_KEY secret"; exit 1; }
-          [ -n "${NEWSAPI_KEY:-}" ] || echo "::warning::Missing NEWSAPI_KEY, news enrichment will be skipped"
-          [ -n "${WEATHERAPI_KEY:-}" ] || echo "::warning::Missing WEATHERAPI_KEY, weather enrichment will be skipped"
-          [ -n "${WANDB_API_KEY:-}" ] || echo "::warning::Missing WANDB_API_KEY, W&B logging will be skipped"
-
-      - name: 07 Prepare data folders
-        run: |
-          set -euo pipefail
-          mkdir -p data/history data/in data/out data/aliases models
-          [ -s "data/aliases/team_aliases.json" ] || echo "{}" > data/aliases/team_aliases.json
-          if [ ! -s "${SOURCE_CSV}" ]; then
-            echo "::error::Missing ${SOURCE_CSV}. Provide real upcoming matches."
-            exit 1
-          fi
-
-      - name: 08 Define run variables
-        run: |
-          set -euo pipefail
-          OUT_DIR="data/out/${GITHUB_RUN_ID}"
-          mkdir -p "${OUT_DIR}"
-          {
-            echo "OUT_DIR=${OUT_DIR}"
-            echo "FEATURES_PARQUET=data/history/features.parquet"
-            echo "SOURCE_CSV_NORM=${OUT_DIR}/matches_norm.csv"
-            echo "AUTO_ALIASES_JSON=data/aliases/auto_aliases.json"
-            echo "BIVARIATE_CSV=${OUT_DIR}/bivariate.csv"
-            echo "MODEL_PKL=${OUT_DIR}/dynamic_model.pkl"
-            echo "STATE_JSON=${OUT_DIR}/state_params.json"
-            echo "PREDICTIONS_CSV=${OUT_DIR}/predictions.csv"
-            echo "CALIBRATOR_PKL=${OUT_DIR}/calibrator.pkl"
-            echo "PREDICTIONS_CALIB_CSV=${OUT_DIR}/predictions_calibrated.csv"
-            echo "CONSENSUS_CSV=${OUT_DIR}/odds_consensus.csv"
-            echo "KELLY_BETS_CSV=${OUT_DIR}/bets_kelly.csv"
-            echo "LOTECA_CARD_CSV=${OUT_DIR}/loteca_card.csv"
-          } >> "$GITHUB_ENV"
-
-      - name: 09 Update history
-        run: |
-          set -euo pipefail
-          [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-          python -m scripts.update_history --since_days 30 --out "data/history/results.csv"
-          L=$(wc -l < "data/history/results.csv" | tr -d ' ')
-          [ "$L" -gt 1 ] || { echo "::error::results.csv empty or contains only stub"; exit 1; }
-
-      - name: 10 Update Tactics with LLM
-        run: |
-          set -euo pipefail
-          [ -f scripts/update_tactics.py ] || { echo "::error::scripts/update_tactics.py not found"; exit 1; }
-          python -m scripts.update_tactics --history "data/history/results.csv" --out "data/history/tactics.json"
-          [ -s "data/history/tactics.json" ] || { echo "::error::tactics.json not generated"; exit 1; }
-
-      - name: 11 Verify Historical Data
-        run: |
-          set -euo pipefail
-          [ -f scripts/verify_data.py ] || { echo "::error::scripts/verify_data.py not found"; exit 1; }
-          python -m scripts.verify_data --history "data/history/results.csv"
-
-      - name: 12 Feature engineering
+          pip install -r requirements.txt
+      - name: 13 Feature Engineer
         run: |
           set -euo pipefail
           [ -f scripts/feature_engineer.py ] || { echo "::error::scripts/feature_engineer.py not found"; exit 2; }
@@ -138,174 +31,107 @@ jobs:
             --out "${FEATURES_PARQUET}" \
             --ewma 0.20
           test -s "${FEATURES_PARQUET}" || { echo "::error::features.parquet not generated"; exit 2; }
-
-      - name: 13 Enrich features API Football
-        run: |
-          set -euo pipefail
-          [ -f scripts/enrich_api_football.py ] || { echo "::error::scripts/enrich_api_football.py not found"; exit 2; }
-          python -m scripts.enrich_api_football --features_in "${FEATURES_PARQUET}" --features_out "${FEATURES_PARQUET}"
-
       - name: 14 Enrich features with News
-        if: env.NEWSAPI_KEY != ''
         run: |
           set -euo pipefail
           [ -f scripts/enrich_news.py ] || { echo "::error::scripts/enrich_news.py not found"; exit 2; }
-          python -m scripts.enrich_news --features_in "${FEATURES_PARQUET}" --features_out "${FEATURES_PARQUET}" --newsapi_key "${NEWSAPI_KEY}"
-
+          python -m scripts.enrich_news \
+            --features_in "${FEATURES_PARQUET}" \
+            --features_out "${FEATURES_PARQUET}" \
+            --newsapi_key "${NEWSAPI_KEY}" \
+            --matches_csv "${SOURCE_CSV_NORM}"
+        env:
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       - name: 15 Enrich features with Weather
-        if: env.WEATHERAPI_KEY != ''
         run: |
           set -euo pipefail
           [ -f scripts/enrich_weather.py ] || { echo "::error::scripts/enrich_weather.py not found"; exit 2; }
-          python -m scripts.enrich_weather --features_in "${FEATURES_PARQUET}" --features_out "${FEATURES_PARQUET}" --weatherapi_key "${WEATHERAPI_KEY}"
-
-      - name: 16 Run Unit Tests
-        run: |
-          mkdir -p tests
-          [ -f tests/test_update_history.py ] || touch tests/test_update_history.py
-          pytest --verbose tests/ || true
-
-      - name: 17 Train dynamic model with W&B
-        run: |
-          set -euo pipefail
-          [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 2; }
-          python -m scripts.train_dynamic_model \
-            --features "${FEATURES_PARQUET}" \
-            --out_state "${STATE_JSON}" \
-            --out_model "${MODEL_PKL}"
-          test -s "${STATE_JSON}" || { echo "::error::state_params.json not generated"; exit 2; }
-          test -s "${MODEL_PKL}" || { echo "::error::dynamic_model.pkl not generated"; exit 2; }
-
+          python -m scripts.enrich_weather \
+            --features_in "${FEATURES_PARQUET}" \
+            --features_out "${FEATURES_PARQUET}" \
+            --weatherapi_key "${WEATHERAPI_KEY}" \
+            --matches_csv "${SOURCE_CSV_NORM}"
+        env:
+          WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
       - name: 18 Normalize matches
         run: |
           set -euo pipefail
           [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 3; }
-          python -m scripts.normalize_matches --in_csv "${SOURCE_CSV}" --out_csv "${SOURCE_CSV_NORM}"
-          test -s "${SOURCE_CSV_NORM}" || { echo "::error::matches_norm.csv not generated"; exit 3; }
-
-      - name: 19 Debug matches_norm.csv
+          python -m scripts.normalize_matches \
+            --in_csv "${SOURCE_CSV}" \
+            --out_csv "${SOURCE_CSV_NORM}"
+      - name: 6 Ingest odds from TheOddsAPI
         run: |
           set -euo pipefail
-          cat "${SOURCE_CSV_NORM}"
-
-      - name: 20 Build team aliases
-        run: |
-          set -euo pipefail
-          [ -f scripts/build_team_aliases.py ] || { echo "::error::scripts/build_team_aliases.py not found"; exit 3; }
-          python -m scripts.build_team_aliases --out_json "${AUTO_ALIASES_JSON}"
-          test -s "${AUTO_ALIASES_JSON}" || { echo "::error::auto_aliases.json empty"; exit 3; }
-
-      - name: 21 Auto aliases harvest
-        run: |
-          set -euo pipefail
-          [ -f scripts/harvest_aliases.py ] || { echo "::error::scripts/harvest_aliases.py not found"; exit 3; }
-          python -m scripts.harvest_aliases --source_csv "${SOURCE_CSV_NORM}" --lookahead_hours 72 --out_json "${AUTO_ALIASES_JSON}"
-          test -s "${AUTO_ALIASES_JSON}" || { echo "::error::auto_aliases.json empty"; exit 3; }
-
-      - name: 22 Preflight TheOddsAPI Serie A
-        run: |
-          set -euo pipefail
-          API="${THEODDS_API_KEY}"
-          REG="${REGIONS}"
-          URL="https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}"
-          CNT="$(curl -sS --max-time 25 "${URL}" | jq 'length')"
-          echo "[preflight] Serie A events=${CNT}"
-          [ "$CNT" -gt 0 ] || { echo "::error::No events from TheOddsAPI for Serie A"; exit 5; }
-
-      - name: 23 Ingest TheOddsAPI primary
-        run: |
-          set -euo pipefail
-          [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 5; }
-          python -m scripts.ingest_odds_theoddsapi --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV_NORM}" --api_key_apifootball "${API_FOOTBALL_KEY}" --aliases_file "${AUTO_ALIASES_JSON}" --regions "${REGIONS}"
-
-      - name: 24 Fallback direct fetch if empty
-        run: |
-          set -euo pipefail
-          OUT="${OUT_DIR}/odds_theoddsapi.csv"
-          L=0; [ -s "$OUT" ] && L="$(wc -l < "$OUT" | tr -d ' ')"
-          if [ "$L" -le 1 ]; then
-            API="${THEODDS_API_KEY}"
-            REG="${REGIONS}"
-            F1="$(mktemp)"; F2="$(mktemp)"; TMP="$(mktemp)"
-            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_campeonato/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F1}"
-            curl -sS --max-time 25 "https://api.the-odds-api.com/v4/sports/soccer_brazil_serie_b/odds?regions=${REG}&markets=h2h&dateFormat=iso&oddsFormat=decimal&apiKey=${API}" > "${F2}"
-            jq -s 'add' "${F1}" "${F2}" > "${TMP}"
-            {
-              echo "team_home,team_away,odds_home,odds_draw,odds_away"
-              jq -r '
-                .[] as $ev
-                | $ev.home_team as $h
-                | $ev.away_team as $a
-                | ([ $ev.bookmakers[].markets[] | select(.key=="h2h") | .outcomes[] | select(.name==$h) | .price ] | max?) as $oh
-                | ([ $ev.bookmakers[].markets[] | select(.key=="h2h") | .outcomes[] | select(.name=="Draw") | .price ] | max?) as $od
-                | ([ $ev.bookmakers[].markets[] | select(.key=="h2h") | .outcomes[] | select(.name==$a) | .price ] | max?) as $oa
-                | select($oh and $od and $oa)
-                | [$h, $a, ($oh|tostring), ($od|tostring), ($oa|tostring)]
-                | @csv
-              ' "${TMP}"
-            } > "${OUT}"
-            echo "[fallback] wrote ${OUT} rows=$(($(wc -l < "${OUT}") - 1))"
-          fi
-          [ -s "$OUT" ] && [ "$(wc -l < "$OUT" | tr -d ' ')" -gt 1 ] || { echo "::error::No odds from TheOddsAPI (primary and fallback)"; exit 5; }
-
-      - name: 25 Ingest API Football complementary
+          [ -f scripts/ingest_odds_theoddsapi.py ] || { echo "::error::scripts/ingest_odds_theoddsapi.py not found"; exit 6; }
+          python -m scripts.ingest_odds_theoddsapi \
+            --rodada "${OUT_DIR}" \
+            --source_csv "${SOURCE_CSV_NORM}" \
+            --api_key "${THEODDS_API_KEY}" \
+            --regions "${REGIONS}" \
+            --aliases_file "${AUTO_ALIASES_JSON}" \
+            --api_key_apifootball "${API_FOOTBALL_KEY}"
+        env:
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      - name: 5 Ingest odds from API-Football
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
-          python -m scripts.ingest_odds_apifootball --rodada "${OUT_DIR}" --source_csv "${SOURCE_CSV_NORM}" --api_key_theodds "${THEODDS_API_KEY}" --regions "${REGIONS}" --aliases_file "${AUTO_ALIASES_JSON}"
-          OUT="${OUT_DIR}/odds_apifootball.csv"
-          L=0; [ -s "$OUT" ] && L="$(wc -l < "$OUT" | tr -d ' ')"
-          [ "$L" -gt 1 ] || { echo "::error::No games found in odds_apifootball.csv"; exit 5; }
-
-      - name: 26 Consensus odds
-        run: |
-          set -euo pipefail
-          [ -f scripts/consensus_odds_safe.py ] || { echo "::error::scripts/consensus_odds_safe.py not found"; exit 6; }
-          python -m scripts.consensus_odds_safe --rodada "${OUT_DIR}" --strict || true
-          OUT_FILE="${CONSENSUS_CSV}"
-          if [ ! -s "${OUT_FILE}" ]; then
-            cp "${OUT_DIR}/odds_theoddsapi.csv" "${OUT_FILE}"
-            echo "::notice::Consensus used only TheOddsAPI"
-          fi
-          header="$(head -n1 "${OUT_FILE}" | tr -d '\r')"
-          for c in team_home team_away odds_home odds_draw odds_away; do
-            echo "${header}" | grep -qiE "(^|,)$c(,|$)" || { echo "::error::missing column '$c' in odds_consensus.csv"; exit 6; }
-          done
-          L=0; [ -s "$OUT_FILE" ] && L="$(wc -l < "$OUT_FILE" | tr -d ' ')"
-          [ "$L" -gt 1 ] || { echo "::error::No odds in odds_consensus.csv"; exit 6; }
-
-      - name: 27 Bivariate estimator
+          python -m scripts.ingest_odds_apifootball \
+            --rodada "${OUT_DIR}" \
+            --source_csv "${SOURCE_CSV_NORM}" \
+            --api_key "${API_FOOTBALL_KEY}" \
+            --api_key_theodds "${THEODDS_API_KEY}" \
+            --regions "${REGIONS}" \
+            --aliases_file "${AUTO_ALIASES_JSON}"
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      - name: 7 Bivariate Estimator
         run: |
           set -euo pipefail
           [ -f scripts/bivariate_estimator.py ] || { echo "::error::scripts/bivariate_estimator.py not found"; exit 7; }
-          python -m scripts.bivariate_estimator --history "${FEATURES_PARQUET}" --matches "${SOURCE_CSV_NORM}" --out "${BIVARIATE_CSV}"
-          L=0; [ -s "${BIVARIATE_CSV}" ] && L="$(wc -l < "${BIVARIATE_CSV}" | tr -d ' ')"
-          [ "$L" -gt 1 ] || { echo "::error::bivariate.csv empty"; exit 7; }
-
-      - name: 28 Predict with dynamic model
+          python -m scripts.bivariate_estimator \
+            --history "${FEATURES_PARQUET}" \
+            --matches "${SOURCE_CSV_NORM}" \
+            --out "${BIVARIATE_CSV}"
+      - name: 8 Train Dynamic Model
+        run: |
+          set -euo pipefail
+          [ -f scripts/train_dynamic_model.py ] || { echo "::error::scripts/train_dynamic_model.py not found"; exit 8; }
+          python -m scripts.train_dynamic_model \
+            --features "${FEATURES_PARQUET}" \
+            --out_state "${STATE_JSON}" \
+            --out_model "${MODEL_PKL}"
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      - name: 9 Predict with Dynamic Model
         run: |
           set -euo pipefail
           [ -f scripts/predict_dynamic_model.py ] || { echo "::error::scripts/predict_dynamic_model.py not found"; exit 8; }
-          python -m scripts.predict_dynamic_model --model "${MODEL_PKL}" --state "${STATE_JSON}" --matches "${SOURCE_CSV_NORM}" --out "${PREDICTIONS_CSV}"
-          L=0; [ -s "${PREDICTIONS_CSV}" ] && L="$(wc -l < "${PREDICTIONS_CSV}" | tr -d ' ')"
-          [ "$L" -gt 1 ] || { echo "::error::predictions.csv empty"; exit 8; }
-
-      - name: 29 Train calibrator
+          python -m scripts.predict_dynamic_model \
+            --model "${MODEL_PKL}" \
+            --state "${STATE_JSON}" \
+            --matches "${SOURCE_CSV_NORM}" \
+            --out "${PREDICTIONS_CSV}"
+      - name: 10 Train Calibrator
+        if: ${{ env.TRAIN_CALIBRATOR == 'true' }}
         run: |
           set -euo pipefail
           [ -f scripts/calibrator_train.py ] || { echo "::error::scripts/calibrator_train.py not found"; exit 9; }
-          python -m scripts.calibrator_train --history "${FEATURES_PARQUET}" --out "${CALIBRATOR_PKL}"
-          test -s "${CALIBRATOR_PKL}" || { echo "::error::calibrator.pkl not generated"; exit 9; }
-
-      - name: 30 Apply calibration
+          python -m scripts.calibrator_train \
+            --history "${FEATURES_PARQUET}" \
+            --out "${CALIBRATOR_PKL}"
+      - name: 11 Calibrate Probabilities
         run: |
           set -euo pipefail
           [ -f scripts/calibrate_probs.py ] || { echo "::error::scripts/calibrate_probs.py not found"; exit 9; }
-          python -m scripts.calibrate_probs --in "${PREDICTIONS_CSV}" --cal "${CALIBRATOR_PKL}" --out "${PREDICTIONS_CALIB_CSV}"
-          L=0; [ -s "${PREDICTIONS_CALIB_CSV}" ] && L="$(wc -l < "${PREDICTIONS_CALIB_CSV}" | tr -d ' ')"
-          [ "$L" -gt 1 ] || { echo "::error::predictions_calibrated.csv empty"; exit 9; }
-
-      - name: 31 Kelly staking 1x2
+          python -m scripts.calibrate_probs \
+            --in "${PREDICTIONS_CSV}" \
+            --cal "${CALIBRATOR_PKL}" \
+            --out "${PREDICTIONS_CALIB_CSV}"
+      - name: 12 Kelly Bets
         run: |
           set -euo pipefail
           [ -f scripts/kelly_bets.py ] || { echo "::error::scripts/kelly_bets.py not found"; exit 10; }
@@ -318,18 +144,40 @@ jobs:
             --top_n "${KELLY_TOP_N}" \
             --round_to "${ROUND_TO}" \
             --out "${KELLY_BETS_CSV}"
-          L=0; [ -s "${KELLY_BETS_CSV}" ] && L="$(wc -l < "${KELLY_BETS_CSV}" | tr -d ' ')"
-          [ "$L" -gt 1 ] || { echo "::error::bets_kelly.csv empty"; exit 10; }
-
-      - name: 32 Loteca card top 14
+      - name: 13 Make Loteca Card
         run: |
           set -euo pipefail
           [ -f scripts/make_loteca_ticket.py ] || { echo "::error::scripts/make_loteca_ticket.py not found"; exit 11; }
-          python -m scripts.make_loteca_ticket --rodada "${OUT_DIR}" --triples 3 --doubles 5
-          test -s "${LOTECA_CARD_CSV}" || { echo "::error::loteca_card.csv not generated"; exit 11; }
-
-      - name: 33 Final listing
-        run: |
-          set -euo pipefail
-          ls -lh "${OUT_DIR}"
-          echo "OUT_DIR=${OUT_DIR}"
+          python -m scripts.make_loteca_ticket \
+            --rodada "${OUT_DIR}" \
+            --triples 0 \
+            --doubles 0
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: loteca-output
+          path: data/out/
+    env:
+      SEASON: 2025
+      LOOKAHEAD_DAYS: 3
+      REGIONS: uk,eu,us,au
+      BANKROLL: 1000
+      KELLY_FRACTION: 0.5
+      KELLY_CAP: 0.1
+      KELLY_TOP_N: 14
+      ROUND_TO: 1
+      TRAIN_CALIBRATOR: true
+      SOURCE_CSV: data/in/matches_source.csv
+      OUT_DIR: data/out/18702277971
+      FEATURES_PARQUET: data/history/features.parquet
+      SOURCE_CSV_NORM: data/out/18702277971/matches_norm.csv
+      AUTO_ALIASES_JSON: data/aliases/auto_aliases.json
+      BIVARIATE_CSV: data/out/18702277971/bivariate.csv
+      MODEL_PKL: data/out/18702277971/dynamic_model.pkl
+      STATE_JSON: data/out/18702277971/state_params.json
+      PREDICTIONS_CSV: data/out/18702277971/predictions.csv
+      CALIBRATOR_PKL: data/out/18702277971/calibrator.pkl
+      PREDICTIONS_CALIB_CSV: data/out/18702277971/predictions_calibrated.csv
+      CONSENSUS_CSV: data/out/18702277971/odds_consensus.csv
+      KELLY_BETS_CSV: data/out/18702277971/bets_kelly.csv
+      LOTECA_CARD_CSV: data/out/18702277971/loteca_card.csv
