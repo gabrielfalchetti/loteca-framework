@@ -35,6 +35,13 @@ def feature_engineer(history_csv, tactics_json, out_parquet, ewma):
             _log(f"Erro ao ler {tactics_json}: {e}, usando táticas padrão")
             tactics = {}
 
+    # Verificar colunas necessárias no history
+    required_cols = ['team_home', 'team_away', 'score_home', 'score_away']
+    missing_cols = [col for col in required_cols if col not in history.columns]
+    if missing_cols:
+        _log(f"Colunas ausentes no history.csv: {missing_cols}")
+        sys.exit(12)
+
     # Inicializar DataFrame de features
     teams = pd.concat([history['team_home'], history['team_away']]).unique()
     features = pd.DataFrame({'team': teams})
