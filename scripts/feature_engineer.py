@@ -51,4 +51,19 @@ def feature_engineer(history_csv, tactics_json, out_parquet, ewma):
         features['avg_goals_scored'] = features['avg_goals_scored'].ewm(alpha=ewma).mean()
         features['avg_goals_conceded'] = features['avg_goals_conceded'].ewm(alpha=ewma).mean()
 
-    os.makedirs(os.path.dirname(out_parquet),
+    os.makedirs(os.path.dirname(out_parquet), exist_ok=True)
+    features.to_parquet(out_parquet, index=False)
+    _log(f"OK — gerado {out_parquet} com {len(features)} linhas")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--history", required=True)
+    ap.add_argument("--tactics", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--ewma", type=float, default=0.20)
+    args = ap.parse_args()
+
+    feature_engineer(args.history, args.tactics, args.out, args.ewma)
+
+if __name__ == "__main__":
+    main()
