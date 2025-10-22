@@ -1,3 +1,4 @@
+cat > .github/workflows/loteca-super-end2end.yml << 'EOF'
 name: Loteca Super End-to-End
 
 on:
@@ -43,14 +44,14 @@ jobs:
         run: |
           set -euo pipefail
           [ -f scripts/build_team_aliases.py ] || { echo "::error::scripts/build_team_aliases.py not found"; exit 4; }
-          python -m scripts/build_team_aliases \
+          python scripts/build_team_aliases.py \
             --matches "${SOURCE_CSV_NORM}" \
             --out "${AUTO_ALIASES_JSON}"
       - name: 21 Auto aliases harvest
         run: |
           set -euo pipefail
           [ -f scripts/auto_aliases_harvest.py ] || { echo "::error::scripts/auto_aliases_harvest.py not found"; exit 4; }
-          python -m scripts/auto_aliases_harvest \
+          python scripts/auto_aliases_harvest.py \
             --aliases "${AUTO_ALIASES_JSON}"
       - name: 14 Enrich features with News
         run: |
@@ -171,27 +172,31 @@ jobs:
         with:
           name: loteca-output
           path: data/out/
-    env:
-      SEASON: 2025
-      LOOKAHEAD_DAYS: 3
-      REGIONS: uk,eu,us,au
-      BANKROLL: 1000
-      KELLY_FRACTION: 0.5
-      KELLY_CAP: 0.1
-      KELLY_TOP_N: 14
-      ROUND_TO: 1
-      TRAIN_CALIBRATOR: true
-      SOURCE_CSV: data/in/matches_source.csv
-      OUT_DIR: data/out/${{ github.run_id }}
-      FEATURES_PARQUET: data/history/features.parquet
-      SOURCE_CSV_NORM: data/out/${{ github.run_id }}/matches_norm.csv
-      AUTO_ALIASES_JSON: data/aliases/auto_aliases.json
-      BIVARIATE_CSV: data/out/${{ github.run_id }}/bivariate.csv
-      MODEL_PKL: data/out/${{ github.run_id }}/dynamic_model.pkl
-      STATE_JSON: data/out/${{ github.run_id }}/state_params.json
-      PREDICTIONS_CSV: data/out/${{ github.run_id }}/predictions.csv
-      CALIBRATOR_PKL: data/out/${{ github.run_id }}/calibrator.pkl
-      PREDICTIONS_CALIB_CSV: data/out/${{ github.run_id }}/predictions_calibrated.csv
-      CONSENSUS_CSV: data/out/${{ github.run_id }}/odds_consensus.csv
-      KELLY_BETS_CSV: data/out/${{ github.run_id }}/bets_kelly.csv
-      LOTECA_CARD_CSV: data/out/${{ github.run_id }}/loteca_card.csv
+env:
+  SEASON: 2025
+  LOOKAHEAD_DAYS: 3
+  REGIONS: uk,eu,us,au
+  BANKROLL: 1000
+  KELLY_FRACTION: 0.5
+  KELLY_CAP: 0.1
+  KELLY_TOP_N: 14
+  ROUND_TO: 1
+  TRAIN_CALIBRATOR: true
+  SOURCE_CSV: data/in/matches_source.csv
+  OUT_DIR: data/out/${{ github.run_id }}
+  FEATURES_PARQUET: data/history/features.parquet
+  SOURCE_CSV_NORM: data/out/${{ github.run_id }}/matches_norm.csv
+  AUTO_ALIASES_JSON: data/aliases/auto_aliases.json
+  BIVARIATE_CSV: data/out/${{ github.run_id }}/bivariate.csv
+  MODEL_PKL: data/out/${{ github.run_id }}/dynamic_model.pkl
+  STATE_JSON: data/out/${{ github.run_id }}/state_params.json
+  PREDICTIONS_CSV: data/out/${{ github.run_id }}/predictions.csv
+  CALIBRATOR_PKL: data/out/${{ github.run_id }}/calibrator.pkl
+  PREDICTIONS_CALIB_CSV: data/out/${{ github.run_id }}/predictions_calibrated.csv
+  CONSENSUS_CSV: data/out/${{ github.run_id }}/odds_consensus.csv
+  KELLY_BETS_CSV: data/out/${{ github.run_id }}/bets_kelly.csv
+  LOTECA_CARD_CSV: data/out/${{ github.run_id }}/loteca_card.csv
+EOF
+git add .github/workflows/loteca-super-end2end.yml
+git commit -m "Atualizar YAML para execução direta dos scripts de aliases"
+git push origin main
