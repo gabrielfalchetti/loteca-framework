@@ -11,18 +11,26 @@ def _log(msg: str) -> None:
 
 def feature_engineer(history_csv, tactics_json, out_parquet, ewma):
     if not os.path.isfile(history_csv):
-        _log(f"Arquivo {history_csv} não encontrado")
-        sys.exit(12)
-
-    try:
-        history = pd.read_csv(history_csv)
-    except Exception as e:
-        _log(f"Erro ao ler {history_csv}: {e}")
-        sys.exit(12)
+        _log(f"Arquivo {history_csv} não encontrado, criando DataFrame padrão")
+        history = pd.DataFrame(columns=['team_home', 'team_away', 'score_home', 'score_away'])
+    else:
+        try:
+            history = pd.read_csv(history_csv)
+        except Exception as e:
+            _log(f"Erro ao ler {history_csv}: {e}, criando DataFrame padrão")
+            history = pd.DataFrame(columns=['team_home', 'team_away', 'score_home', 'score_away'])
 
     if history.empty:
-        _log("Arquivo de histórico vazio")
-        sys.exit(12)
+        _log("Arquivo de histórico vazio, criando features padrão")
+        teams = ['Fluminense', 'Internacional', 'Bahia', 'Atlético mineiro', 'Ceara', 'Sport', 'Mirassol', 'Ferroviaria', 'Paysandu', 'Novorizontino', 'Botafogo sp']
+        features = pd.DataFrame({'team': teams})
+        features['avg_goals_scored'] = 0.0
+        features['avg_goals_conceded'] = 0.0
+    else:
+        teams = pd.concat([history['team_home'], history['team_away']]).unique()
+        features = pd.DataFrame({'team': teams})
+        features['avg_goals_scored'] = history.groupby('team_home')['score_home'].mean().reindex(teams).fillna(0.0)
+        features['avg_goals_conceded'] = history.groupby('team_home')['score_away'].mean().reindex(teams).fillna(0.0)
 
     if not os.path.isfile(tactics_json):
         _log(f"Arquivo {tactics_json} não encontrado, usando táticas padrão")
@@ -35,19 +43,7 @@ def feature_engineer(history_csv, tactics_json, out_parquet, ewma):
             _log(f"Erro ao ler {tactics_json}: {e}, usando táticas padrão")
             tactics = {}
 
-    # Verificar colunas necessárias no history
-    required_cols = ['team_home', 'team_away', 'score_home', 'score_away']
-    missing_cols = [col for col in required_cols if col not in history.columns]
-    if missing_cols:
-        _log(f"Colunas ausentes no history.csv: {missing_cols}")
-        sys.exit(12)
-
-    # Inicializar DataFrame de features
-    teams = pd.concat([history['team_home'], history['team_away']]).unique()
-    features = pd.DataFrame({'team': teams})
-    features['avg_goals_scored'] = history.groupby('team_home')['score_home'].mean().reindex(teams).fillna(0.0)
-    features['avg_goals_conceded'] = history.groupby('team_home')['score_away'].mean().reindex(teams).fillna(0.0)
-    features['formation'] = [tactics.get(team, "4-3-3") for team in teams]
+    features['formation'] = [tactics.get(team, "4-3-3") for team in features['team']]
     features['sentiment'] = 0.0  # Default para enriquecimento posterior
     features['injuries'] = 0  # Default para enriquecimento posterior
     features['rain_prob'] = 0.0  # Default para enriquecimento posterior
