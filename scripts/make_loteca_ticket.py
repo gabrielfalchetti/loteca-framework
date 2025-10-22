@@ -3,27 +3,23 @@ import argparse
 import sys
 import pandas as pd
 import os
-import numpy as np
-from itertools import product
 
 def _log(msg: str) -> None:
     print(f"[loteca] {msg}", flush=True)
 
-def generate_loteca_card(rodada: str, triples: int, doubles: int) -> pd.DataFrame:
-    # Carregar bets_kelly.csv
+def generate_loteca_card(rodada, triples, doubles):
     bets_file = f"{rodada}/bets_kelly.csv"
     if not os.path.isfile(bets_file):
         _log(f"Arquivo {bets_file} não encontrado, prosseguindo com matches_norm.csv")
-        bets_df = pd.DataFrame(columns=['team_home', 'team_away', 'bet_home', 'bet_draw', 'bet_away'])
+        bets_df = pd.DataFrame(columns=['home_team', 'away_team', 'home_bet', 'draw_bet', 'away_bet'])
     else:
         try:
             bets_df = pd.read_csv(bets_file)
             _log(f"Carregado {bets_file} com {len(bets_df)} jogos")
         except Exception as e:
             _log(f"Erro ao ler {bets_file}: {e}, prosseguindo com DataFrame vazio")
-            bets_df = pd.DataFrame(columns=['team_home', 'team_away', 'bet_home', 'bet_draw', 'bet_away'])
+            bets_df = pd.DataFrame(columns=['home_team', 'away_team', 'home_bet', 'draw_bet', 'away_bet'])
 
-    # Carregar matches_norm.csv
     matches_file = f"{rodada}/matches_norm.csv"
     if not os.path.isfile(matches_file):
         _log(f"Arquivo {matches_file} não encontrado")
@@ -61,11 +57,11 @@ def generate_loteca_card(rodada: str, triples: int, doubles: int) -> pd.DataFram
         away_team = row[away_col]
         
         # Obter apostas do bets_kelly.csv, se disponível
-        bet_row = bets_df[(bets_df['team_home'] == home_team) & (bets_df['team_away'] == away_team)] if not bets_df.empty else pd.DataFrame()
+        bet_row = bets_df[(bets_df['home_team'] == home_team) & (bets_df['away_team'] == away_team)] if not bets_df.empty else pd.DataFrame()
         if not bet_row.empty:
-            bet_home = bet_row['bet_home'].iloc[0]
-            bet_draw = bet_row['bet_draw'].iloc[0]
-            bet_away = bet_row['bet_away'].iloc[0]
+            bet_home = bet_row['home_bet'].iloc[0]
+            bet_draw = bet_row['draw_bet'].iloc[0]
+            bet_away = bet_row['away_bet'].iloc[0]
         else:
             bet_home = bet_draw = bet_away = 0.0
 
