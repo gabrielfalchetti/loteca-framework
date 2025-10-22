@@ -102,6 +102,14 @@ jobs:
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
+      - name: 6.5 Generate Odds Consensus
+        run: |
+          set -euo pipefail
+          [ -f scripts/generate_consensus.py ] || { echo "::error::scripts/generate_consensus.py not found"; exit 6; }
+          python -m scripts.generate_consensus \
+            --theodds_file "${OUT_DIR}/odds_theoddsapi.csv" \
+            --apifootball_file "${OUT_DIR}/odds_apifootball.csv" \
+            --output_file "${CONSENSUS_CSV}"
       - name: 7 Bivariate Estimator
         run: |
           set -euo pipefail
