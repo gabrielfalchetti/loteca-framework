@@ -197,9 +197,9 @@ jobs:
       LOTECA_CARD_CSV: data/out/${{ github.run_id }}/loteca_card.csv
      EOF
      git add .github/workflows/loteca-super-end2end.yml
-     git commit -m "Corrigir sintaxe YAML na linha 2 e garantir formatação válida"
+     git commit -m "Corrigir sintaxe YAML na linha 13 (bloco schedule)"
      git push origin main
      ```
 
-### Análise da Linha 2
-- A linha 2 no YAML original era:
+### Análise da Linha 13
+- No YAML anterior, a linha 13 é:
