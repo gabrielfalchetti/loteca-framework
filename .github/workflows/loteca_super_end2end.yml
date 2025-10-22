@@ -22,14 +22,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Update History
-        run: |
-          set -euo pipefail
-          [ -f scripts/update_history.py ] || { echo "::error::scripts/update_history.py not found"; exit 1; }
-          python scripts/update_history.py \
-            --source_csv "${SOURCE_CSV}" \
-            --results_csv "data/history/results.csv" \
-            --tactics_json "data/history/tactics.json"
       - name: 13 Feature Engineer
         run: |
           set -euo pipefail
@@ -90,9 +82,9 @@ jobs:
             --rodada "${OUT_DIR}" \
             --source_csv "${SOURCE_CSV_NORM}" \
             --api_key "${THEODDS_API_KEY}" \
+            --api_key_theodds "${API_FOOTBALL_KEY}" \
             --regions "${REGIONS}" \
-            --aliases_file "${AUTO_ALIASES_JSON}" \
-            --api_key_apifootball "${API_FOOTBALL_KEY}"
+            --aliases_file "${AUTO_ALIASES_JSON}"
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
