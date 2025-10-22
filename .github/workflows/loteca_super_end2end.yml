@@ -7,6 +7,7 @@ on:
     branches: [ main ]
   schedule:
     - cron: '0 0 * * *'  # Executa diariamente à meia-noite UTC
+  workflow_dispatch:  # Adicione esta linha para acionamento manual
 
 jobs:
   loteca:
