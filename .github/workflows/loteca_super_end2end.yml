@@ -1,13 +1,13 @@
 name: Loteca Super End-to-End
 
 on:
+  workflow_dispatch:  # Para acionamento manual
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
   schedule:
     - cron: '0 0 * * *'  # Executa diariamente à meia-noite UTC
-  workflow_dispatch:  # Adicione esta linha para acionamento manual
 
 jobs:
   loteca:
@@ -39,6 +39,19 @@ jobs:
           python -m scripts.normalize_matches \
             --in_csv "${SOURCE_CSV}" \
             --out_csv "${SOURCE_CSV_NORM}"
+      - name: 20 Build team aliases
+        run: |
+          set -euo pipefail
+          [ -f scripts/build_team_aliases.py ] || { echo "::error::scripts/build_team_aliases.py not found"; exit 4; }
+          python -m scripts/build_team_aliases \
+            --matches "${SOURCE_CSV_NORM}" \
+            --out "${AUTO_ALIASES_JSON}"
+      - name: 21 Auto aliases harvest
+        run: |
+          set -euo pipefail
+          [ -f scripts/auto_aliases_harvest.py ] || { echo "::error::scripts/auto_aliases_harvest.py not found"; exit 4; }
+          python -m scripts/auto_aliases_harvest \
+            --aliases "${AUTO_ALIASES_JSON}"
       - name: 14 Enrich features with News
         run: |
           set -euo pipefail
