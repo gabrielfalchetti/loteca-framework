@@ -12,7 +12,7 @@ jobs:
   loteca:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -153,7 +153,7 @@ jobs:
             --triples 0 \
             --doubles 0
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: loteca-output
           path: data/out/
@@ -168,16 +168,16 @@ jobs:
       ROUND_TO: 1
       TRAIN_CALIBRATOR: true
       SOURCE_CSV: data/in/matches_source.csv
-      OUT_DIR: data/out/18702277971
+      OUT_DIR: data/out/${{ github.run_id }}
       FEATURES_PARQUET: data/history/features.parquet
-      SOURCE_CSV_NORM: data/out/18702277971/matches_norm.csv
+      SOURCE_CSV_NORM: data/out/${{ github.run_id }}/matches_norm.csv
       AUTO_ALIASES_JSON: data/aliases/auto_aliases.json
-      BIVARIATE_CSV: data/out/18702277971/bivariate.csv
-      MODEL_PKL: data/out/18702277971/dynamic_model.pkl
-      STATE_JSON: data/out/18702277971/state_params.json
-      PREDICTIONS_CSV: data/out/18702277971/predictions.csv
-      CALIBRATOR_PKL: data/out/18702277971/calibrator.pkl
-      PREDICTIONS_CALIB_CSV: data/out/18702277971/predictions_calibrated.csv
-      CONSENSUS_CSV: data/out/18702277971/odds_consensus.csv
-      KELLY_BETS_CSV: data/out/18702277971/bets_kelly.csv
-      LOTECA_CARD_CSV: data/out/18702277971/loteca_card.csv
+      BIVARIATE_CSV: data/out/${{ github.run_id }}/bivariate.csv
+      MODEL_PKL: data/out/${{ github.run_id }}/dynamic_model.pkl
+      STATE_JSON: data/out/${{ github.run_id }}/state_params.json
+      PREDICTIONS_CSV: data/out/${{ github.run_id }}/predictions.csv
+      CALIBRATOR_PKL: data/out/${{ github.run_id }}/calibrator.pkl
+      PREDICTIONS_CALIB_CSV: data/out/${{ github.run_id }}/predictions_calibrated.csv
+      CONSENSUS_CSV: data/out/${{ github.run_id }}/odds_consensus.csv
+      KELLY_BETS_CSV: data/out/${{ github.run_id }}/bets_kelly.csv
+      LOTECA_CARD_CSV: data/out/${{ github.run_id }}/loteca_card.csv
