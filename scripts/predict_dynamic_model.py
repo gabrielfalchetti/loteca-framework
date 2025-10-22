@@ -5,56 +5,94 @@ import pandas as pd
 import pickle
 import os
 import json
-import numpy as np
-from sklearn.ensemble import RandomForestClassifier
 
 def _log(msg: str) -> None:
     print(f"[predict_dynamic_model] {msg}", flush=True)
 
-def predict_matches(model, state: dict, matches_df: pd.DataFrame) -> pd.DataFrame:
-    # Verificar colunas no matches_df
-    home_col = next((col for col in ['team_home', 'home'] if col in matches_df.columns), None)
-    away_col = next((col for col in ['team_away', 'away'] if col in matches_df.columns), None)
-    if not (home_col and away_col):
-        _log("Colunas team_home/team_away ou home/away não encontradas")
+def predict_dynamic_model(model_file, state_file, matches_file, out_csv):
+    if not os.path.isfile(model_file):
+        _log(f"Arquivo {model_file} não encontrado")
         sys.exit(8)
 
-    _log(f"Processando {len(matches_df)} jogos do matches_norm.csv")
+    if not os.path.isfile(state_file):
+        _log(f"Arquivo {state_file} não encontrado")
+        sys.exit(8)
 
-    # Inicializar DataFrame de predições
-    results = []
-    for _, row in matches_df.iterrows():
-        home_team = row[home_col]
-        away_team = row[away_col]
+    if not os.path.isfile(matches_file):
+        _log(f"Arquivo {matches_file} não encontrado")
+        sys.exit(8)
 
-        # Inicializar valores padrão
-        prob_home = 0.33
-        prob_draw = 0.33
-        prob_away = 0.34
+    try:
+        with open(model_file, 'rb') as f:
+            model = pickle.load(f)
+    except Exception as e:
+        _log(f"Erro ao ler {model_file}: {e}")
+        sys.exit(8)
 
-        # Se o modelo estiver disponível, usar para predição
-        if model is not None:
-            try:
-                # Criar features dummy para predição (ajustar conforme necessário)
-                features = np.array([[state.get('home_strength', 1.0), state.get('away_strength', 1.0)]])
-                probs = model.predict_proba(features)[0]
-                if len(probs) == 3:
-                    prob_home, prob_draw, prob_away = probs
-            except Exception as e:
-                _log(f"Erro ao prever para {home_team} x {away_team}: {str(e)}, usando valores padrão")
-                prob_home, prob_draw, prob_away = 0.33, 0.33, 0.34
+    try:
+        with open(state_file, 'r') as f:
+            state = json.load(f)
+    except Exception as e:
+        _log(f"Erro ao ler {state_file}: {e}")
+        sys.exit(8)
 
-        results.append({
-            'team_home': home_team,
-            'team_away': away_team,
-            'prob_home': prob_home,
-            'prob_draw': prob_draw,
-            'prob_away': prob_away
+    try:
+        matches = pd.read_csv(matches_file)
+    except Exception as e:
+        _log(f"Erro ao ler {matches_file}: {e}")
+        sys.exit(8)
+
+    home_col = 'team_home' if 'team_home' in matches.columns else 'home'
+    away_col = 'team_away' if 'team_away' in matches.columns else 'away'
+
+    # Carregar features para predição
+    features = pd.read_parquet('data/history/features.parquet')
+    predictions = []
+    for _, match in matches.iterrows():
+        match_id = match.get('match_id', 0)  # Preservar match_id
+        home_team = match[home_col]
+        away_team = match[away_col]
+        home_stats = features[features['team'] == home_team]
+        away_stats = features[features['team'] == away_team]
+        X = pd.DataFrame({
+            'avg_goals_scored_home': [home_stats['avg_goals_scored'].iloc[0] if not home_stats.empty else 1.0],
+            'avg_goals_conceded_home': [home_stats['avg_goals_conceded'].iloc[0] if not home_stats.empty else 1.0],
+            'avg_goals_scored_away': [away_stats['avg_goals_scored'].iloc[0] if not away_stats.empty else 1.0],
+            'avg_goals_conceded_away': [away_stats['avg_goals_conceded'].iloc[0] if not away_stats.empty else 1.0],
+            'sentiment_home': [home_stats['sentiment'].iloc[0] if not home_stats.empty else 0.0],
+            'injuries_home': [home_stats['injuries'].iloc[0] if not home_stats.empty else 0],
+            'rain_prob_home': [home_stats['rain_prob'].iloc[0] if not home_stats.empty else 0.0],
+            'temperature_home': [home_stats['temperature'].iloc[0] if not home_stats.empty else 0.0],
+            'sentiment_away': [away_stats['sentiment'].iloc[0] if not away_stats.empty else 0.0],
+            'injuries_away': [away_stats['injuries'].iloc[0] if not away_stats.empty else 0],
+            'rain_prob_away': [away_stats['rain_prob'].iloc[0] if not away_stats.empty else 0.0],
+            'temperature_away': [away_stats['temperature'].iloc[0] if not away_stats.empty else 0.0]
         })
+        try:
+            probs = model.predict_proba(X)
+            predictions.append({
+                'match_id': match_id,  # Incluir match_id
+                'home_team': home_team,
+                'away_team': away_team,
+                'home_prob': probs[0][2] if len(probs[0]) > 2 else 0.33,
+                'draw_prob': probs[0][1] if len(probs[0]) > 1 else 0.33,
+                'away_prob': probs[0][0] if len(probs[0]) > 0 else 0.34
+            })
+        except Exception as e:
+            _log(f"Erro ao prever para {home_team} x {away_team}: {e}")
+            predictions.append({
+                'match_id': match_id,  # Incluir match_id
+                'home_team': home_team,
+                'away_team': away_team,
+                'home_prob': 0.33,
+                'draw_prob': 0.33,
+                'away_prob': 0.34
+            })
 
-    df = pd.DataFrame(results)
-    _log(f"Gerado DataFrame com {len(df)} predições")
-    return df
+    df_predictions = pd.DataFrame(predictions)
+    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+    df_predictions.to_csv(out_csv, index=False)
+    _log(f"Predições salvas em {out_csv}")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -64,49 +102,7 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    # Carregar modelo
-    model = None
-    if os.path.isfile(args.model):
-        try:
-            with open(args.model, 'rb') as f:
-                model = pickle.load(f)
-            _log(f"Modelo carregado de {args.model}")
-        except Exception as e:
-            _log(f"Erro ao carregar modelo {args.model}: {e}, prosseguindo com valores padrão")
-    else:
-        _log(f"Modelo {args.model} não encontrado, prosseguindo com valores padrão")
-
-    # Carregar estado
-    state = {}
-    if os.path.isfile(args.state):
-        try:
-            with open(args.state, 'r') as f:
-                state = json.load(f)
-            _log(f"Estado carregado de {args.state}")
-        except Exception as e:
-            _log(f"Erro ao carregar estado {args.state}: {e}, prosseguindo com estado vazio")
-    else:
-        _log(f"Estado {args.state} não encontrado, prosseguindo com estado vazio")
-
-    # Carregar jogos
-    if not os.path.isfile(args.matches):
-        _log(f"Arquivo {args.matches} não encontrado")
-        sys.exit(8)
-
-    try:
-        matches_df = pd.read_csv(args.matches)
-    except Exception as e:
-        _log(f"Erro ao ler {args.matches}: {e}")
-        sys.exit(8)
-
-    if matches_df.empty:
-        _log("Arquivo de jogos está vazio")
-        sys.exit(8)
-
-    df = predict_matches(model, state, matches_df)
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    df.to_csv(args.out, index=False)
-    _log(f"Arquivo {args.out} gerado com {len(df)} predições")
+    predict_dynamic_model(args.model, args.state, args.matches, args.out)
 
 if __name__ == "__main__":
     main()
