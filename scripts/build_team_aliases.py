@@ -1,4 +1,3 @@
-mkdir -p scripts
 cat > scripts/build_team_aliases.py << 'EOF'
 # -*- coding: utf-8 -*-
 import argparse
