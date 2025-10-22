@@ -1,0 +1,18 @@
+cat > data/history/tactics.json << 'EOF'
+{
+  "Fluminense": "4-2-3-1",
+  "Internacional": "4-3-3",
+  "Bahia": "4-4-2",
+  "Atlético mineiro": "4-3-3",
+  "Ceara": "4-2-3-1",
+  "Sport": "4-4-2",
+  "Mirassol": "4-3-3",
+  "Ferroviaria": "4-4-2",
+  "Paysandu": "4-2-3-1",
+  "Novorizontino": "4-3-3",
+  "Botafogo sp": "4-4-2"
+}
+EOF
+git add data/history/tactics.json
+git commit -m "Adicionar tactics.json para feature_engineer"
+git push origin main
