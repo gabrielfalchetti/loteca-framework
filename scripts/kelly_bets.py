@@ -28,17 +28,21 @@ def kelly_bets(probs_csv, odds_source, bankroll, fraction, cap, top_n, round_to,
     else:
         _log(f"Arquivo {odds_source} não encontrado, usando odds padrão")
         # Criar odds padrão com base em probs
-        odds = probs[['match_id', 'home_team', 'away_team']].copy()
-        odds['home_odds'] = 2.0
-        odds['draw_odds'] = 3.0
-        odds['away_odds'] = 2.5
+        odds = pd.DataFrame({
+            'match_id': probs.get('match_id', range(len(probs))),
+            'home_team': probs.get('home_team', probs.get('team_home', pd.Series(['unknown']*len(probs)))),
+            'away_team': probs.get('away_team', probs.get('team_away', pd.Series(['unknown']*len(probs)))),
+            'home_odds': 2.0,
+            'draw_odds': 3.0,
+            'away_odds': 2.5
+        })
 
     # Alinhar probs e odds por match_id ou teams
     bets = []
     for _, prob_row in probs.iterrows():
         match_id = prob_row.get('match_id', 0)
-        home_team = prob_row['home_team']
-        away_team = prob_row['away_team']
+        home_team = prob_row.get('home_team', prob_row.get('team_home', 'unknown'))
+        away_team = prob_row.get('away_team', prob_row.get('team_away', 'unknown'))
         home_prob = prob_row.get('home_prob_calibrated', prob_row.get('home_prob', 0.33))
         draw_prob = prob_row.get('draw_prob_calibrated', prob_row.get('draw_prob', 0.33))
         away_prob = prob_row.get('away_prob_calibrated', prob_row.get('away_prob', 0.34))
@@ -65,13 +69,13 @@ def kelly_bets(probs_csv, odds_source, bankroll, fraction, cap, top_n, round_to,
             'match_id': match_id,
             'home_team': home_team,
             'away_team': away_team,
-            'home_bet': round(bankroll * kelly_home, round_to),
-            'draw_bet': round(bankroll * kelly_draw, round_to),
-            'away_bet': round(bankroll * kelly_away, round_to)
+            'bet_home': round(bankroll * kelly_home, round_to),
+            'bet_draw': round(bankroll * kelly_draw, round_to),
+            'bet_away': round(bankroll * kelly_away, round_to)
         })
 
     df_bets = pd.DataFrame(bets)
-    df_bets = df_bets.sort_values(by=['home_bet', 'draw_bet', 'away_bet'], ascending=False).head(top_n)
+    df_bets = df_bets.sort_values(by=['bet_home', 'bet_draw', 'bet_away'], ascending=False).head(top_n)
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
     df_bets.to_csv(out_csv, index=False)
     _log(f"Apostas Kelly salvas em {out_csv}")
