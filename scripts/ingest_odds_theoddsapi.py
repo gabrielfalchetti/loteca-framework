@@ -7,9 +7,9 @@ import json
 from unidecode import unidecode
 
 def _log(msg: str) -> None:
-    print(f"[ingest_odds_theoddsapi] {msg}", flush=True)
+    print(f"[ingest_odds_apifootball] {msg}", flush=True)
 
-def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, api_key_apifootball):
+def ingest_odds_apifootball(rodada, source_csv, api_key, api_key_theodds, regions, aliases_file):
     try:
         matches = pd.read_csv(source_csv)
     except Exception as e:
@@ -28,27 +28,32 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
         home_aliases = aliases.get(norm_home, [home_team])
         away_aliases = aliases.get(norm_away, [away_team])
 
-        # Tentar múltiplos sport keys
-        sport_keys = ['soccer_brazil_serie_a', 'soccer_brazil_serie_b', 'soccer_brazil_copa_do_brasil']
-        for sport_key in sport_keys:
-            url = f"https://api.theoddsapi.com/v4/sports/{sport_key}/odds/?apiKey={api_key}&regions={regions}"
+        # Tentar múltiplas ligas
+        leagues = [
+            {'league': 71, 'season': 2025},  # Serie A
+            {'league': 72, 'season': 2025},  # Serie B
+            {'league': 73, 'season': 2025}   # Copa do Brasil
+        ]
+        for league in leagues:
+            url = f"https://v3.football.api-sports.io/odds?league={league['league']}&season={league['season']}&apiKey={api_key}"
             try:
-                response = requests.get(url, timeout=10, verify=False)  # Desativar SSL temporariamente
+                response = requests.get(url, timeout=10)
                 response.raise_for_status()
                 data = response.json()
-                # Buscar odds correspondentes
-                for game in data:
-                    if any(h in game.get('home_team', '') for h in home_aliases) and any(a in game.get('away_team', '') for a in away_aliases):
+                for fixture in data.get('response', []):
+                    teams = fixture.get('fixture', {}).get('teams', {})
+                    if any(h in teams.get('home', {}).get('name', '') for h in home_aliases) and \
+                       any(a in teams.get('away', {}).get('name', '') for a in away_aliases):
                         odds_data.append({
                             'team_home': home_team,
                             'team_away': away_team,
-                            'odds_home': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[0].get('price', 2.0),
-                            'odds_draw': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[1].get('price', 3.0),
-                            'odds_away': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[2].get('price', 2.5)
+                            'odds_home': fixture.get('bookmakers', [{}])[0].get('bets', [{}])[0].get('values', [{}])[0].get('odd', 2.0),
+                            'odds_draw': fixture.get('bookmakers', [{}])[0].get('bets', [{}])[0].get('values', [{}])[1].get('odd', 3.0),
+                            'odds_away': fixture.get('bookmakers', [{}])[0].get('bets', [{}])[0].get('values', [{}])[2].get('odd', 2.5)
                         })
                         break
                 else:
-                    _log(f"Sem odds para {home_team} x {away_team} em {sport_key}")
+                    _log(f"Sem odds para {home_team} x {away_team} na liga {league['league']}")
                     odds_data.append({
                         'team_home': home_team,
                         'team_away': away_team,
@@ -58,7 +63,7 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
                     })
                 break
             except Exception as e:
-                _log(f"Erro ao buscar odds para {home_team} x {away_team} em {sport_key}: {e}")
+                _log(f"Erro ao buscar odds para {home_team} x {away_team} na liga {league['league']}: {e}")
                 odds_data.append({
                     'team_home': home_team,
                     'team_away': away_team,
@@ -67,21 +72,21 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
                     'odds_away': 2.5
                 })
 
-    output_file = os.path.join(rodada, 'odds_theoddsapi.csv')
+    output_file = os.path.join(rodada, 'odds_apifootball.csv')
     pd.DataFrame(odds_data).to_csv(output_file, index=False)
-    _log(f"Odds TheOddsAPI salvos em {output_file}")
+    _log(f"Odds APIFootball salvos em {output_file}")
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--source_csv", required=True)
     ap.add_argument("--api_key", required=True)
+    ap.add_argument("--api_key_theodds", required=True)
     ap.add_argument("--regions", required=True)
     ap.add_argument("--aliases_file", required=True)
-    ap.add_argument("--api_key_apifootball", required=True)
     args = ap.parse_args()
 
-    ingest_odds_theoddsapi(args.rodada, args.source_csv, args.api_key, args.regions, args.aliases_file, args.api_key_apifootball)
+    ingest_odds_apifootball(args.rodada, args.source_csv, args.api_key, args.api_key_theodds, args.regions, args.aliases_file)
 
 if __name__ == "__main__":
     main()
