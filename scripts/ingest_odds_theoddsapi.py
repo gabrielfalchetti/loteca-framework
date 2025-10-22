@@ -4,6 +4,8 @@ import pandas as pd
 import requests
 import os
 import json
+import ssl
+import urllib3
 
 def _log(msg: str) -> None:
     print(f"[ingest_odds_theoddsapi] {msg}", flush=True)
@@ -28,6 +30,12 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
         _log(f"Erro ao ler {aliases_file}: {e}")
         aliases = {}
 
+    # Configurar contexto SSL
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
     odds_data = []
     for _, row in matches.iterrows():
         home_team = row['team_home'] if 'team_home' in row else row['home']
@@ -39,9 +47,10 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
 
         sport_keys = ['soccer_brazil_serie_a', 'soccer_brazil_serie_b', 'soccer_brazil_copa_do_brasil']
         for sport_key in sport_keys:
-            url = f"https://api.theoddsapi.com/v4/sports/{sport_key}/odds/?apiKey={api_key}&regions={regions}"
+            url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?apiKey={api_key}&regions={regions}"
             try:
-                response = requests.get(url, timeout=10)
+                _log(f"Tentando conectar a {url}")
+                response = requests.get(url, timeout=10, verify=ssl_context)
                 response.raise_for_status()
                 data = response.json()
                 for game in data:
