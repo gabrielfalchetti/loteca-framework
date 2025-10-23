@@ -9,7 +9,7 @@ from unidecode import unidecode
 def _log(msg: str) -> None:
     print(f"[ingest_odds_theoddsapi] {msg}", flush=True)
 
-def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, api_key_apifootball=None):
+def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, api_key_theodds=None):
     if not os.path.isfile(source_csv):
         _log(f"Arquivo {source_csv} não encontrado")
         return
@@ -27,26 +27,48 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
     for _, match in matches.iterrows():
         home_team = match.get('home', match.get('team_home', ''))
         away_team = match.get('away', match.get('team_away', ''))
-        try:
-            url = f"https://api.the-odds-api.com/v4/sports/soccer_brazil_serie_a/odds/?apiKey={api_key}&regions={regions}"
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            odds = response.json()
-            if odds and 'data' in odds:
-                for odd in odds['data']:
-                    if (unidecode(home_team).lower() in unidecode(odd['teams']).lower() or
-                        unidecode(away_team).lower() in unidecode(odd['teams']).lower()):
-                        odds_data.append({
-                            'home_team': home_team,
-                            'away_team': away_team,
-                            'home_odds': odd.get('sites', [{}])[0].get('odds', {}).get('h2h', [0])[0] or 2.0,
-                            'draw_odds': odd.get('sites', [{}])[0].get('odds', {}).get('h2h', [0])[1] or 3.0,
-                            'away_odds': odd.get('sites', [{}])[0].get('odds', {}).get('h2h', [0])[2] or 2.5
-                        })
+        norm_home = unidecode(home_team).lower().strip()
+        norm_away = unidecode(away_team).lower().strip()
+        home_aliases = aliases.get(norm_home, [home_team])
+        away_aliases = aliases.get(norm_away, [away_team])
+
+        sport_keys = [
+            'soccer_brazil_serie_a',
+            'soccer_brazil_serie_b',
+            'soccer_brazil_copa_do_brasil',
+            'soccer_southamerica_libertadores',  # Para times como Ldu e Universidad de Chile
+            'soccer_uefa_europa_league'          # Para times como Feyenoord e Aston Villa
+        ]
+        found = False
+        for sport_key in sport_keys:
+            try:
+                url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?apiKey={api_key}&regions={regions}"
+                _log(f"Tentando {sport_key} para {home_team} x {away_team}")
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                odds = response.json()
+                if odds and 'data' in odds:
+                    for odd in odds['data']:
+                        if any(h.lower() in unidecode(odd.get('home_team', '')).lower() for h in home_aliases) and \
+                           any(a.lower() in unidecode(odd.get('away_team', '')).lower() for a in away_aliases):
+                            odds_data.append({
+                                'home_team': home_team,
+                                'away_team': away_team,
+                                'home_odds': odd.get('sites', [{}])[0].get('odds', {}).get('h2h', [0])[0] or 2.0,
+                                'draw_odds': odd.get('sites', [{}])[0].get('odds', {}).get('h2h', [0])[1] or 3.0,
+                                'away_odds': odd.get('sites', [{}])[0].get('odds', {}).get('h2h', [0])[2] or 2.5
+                            })
+                            _log(f"Odds encontrados em {sport_key} para {home_team} x {away_team}")
+                            found = True
+                            break
+                    if found:
                         break
-            _log(f"Odds obtidos para {home_team} x {away_team}")
-        except Exception as e:
-            _log(f"Erro ao buscar odds para {home_team} x {away_team}: {e}")
+                else:
+                    _log(f"Nenhum dado para {sport_key}")
+            except Exception as e:
+                _log(f"Erro em {sport_key} para {home_team} x {away_team}: {e}")
+        if not found:
+            _log(f"Nenhuma odds encontrada para {home_team} x {away_team}, usando valores padrão")
             odds_data.append({
                 'home_team': home_team,
                 'away_team': away_team,
