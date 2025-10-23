@@ -34,7 +34,7 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
         response = requests.get(sports_url, timeout=10)
         response.raise_for_status()
         sports = response.json()
-        _log(f"Esportes disponíveis na TheOddsAPI: {json.dumps(sports, indent=2)}")
+        _log(f"Esportes disponíveis na TheOddsAPI: {[sport['key'] for sport in sports]}")
         sport_keys = [sport['key'] for sport in sports if 'soccer' in sport['key'].lower()]
     except Exception as e:
         _log(f"Erro ao listar esportes disponíveis: {e}")
@@ -63,7 +63,7 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
                 response = requests.get(url, timeout=10)
                 response.raise_for_status()
                 odds = response.json()
-                _log(f"Resposta da API para {sport_key}: {json.dumps(odds, indent=2)}")
+                _log(f"Resposta da API para {sport_key}: {len(odds)} jogos encontrados")
                 for game in odds:
                     if any(h.lower() in unidecode(game.get('home_team', '')).lower() for h in home_aliases) and \
                        any(a.lower() in unidecode(game.get('away_team', '')).lower() for a in away_aliases):
