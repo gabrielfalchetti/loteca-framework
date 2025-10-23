@@ -20,8 +20,22 @@ def ingest_odds_apifootball(rodada, source_csv, api_key, regions, aliases_file, 
         _log(f"Erro ao ler {source_csv}: {e}")
         return
 
-    with open(aliases_file, 'r') as f:
-        aliases = json.load(f)
+    try:
+        with open(aliases_file, 'r') as f:
+            aliases = json.load(f)
+    except Exception as e:
+        _log(f"Erro ao ler {aliases_file}: {e}")
+        aliases = {}
+
+    # Verificar validade da chave
+    try:
+        status_url = f"https://v3.football.api-sports.io/status?apiKey={api_key}"
+        response = requests.get(status_url, timeout=10)
+        response.raise_for_status()
+        status = response.json()
+        _log(f"Status da API-Football: {json.dumps(status, indent=2)}")
+    except Exception as e:
+        _log(f"Erro ao verificar status da API-Football: {e}")
 
     odds_data = []
     for _, match in matches.iterrows():
@@ -47,27 +61,51 @@ def ingest_odds_apifootball(rodada, source_csv, api_key, regions, aliases_file, 
                 response = requests.get(url, timeout=10)
                 response.raise_for_status()
                 odds = response.json()
-                if odds and 'response' in odds:
-                    for odd in odds['response']:
-                        teams = odd.get('teams', {})
+                _log(f"Resposta da API para liga {league['league']}: {json.dumps(odds, indent=2)}")
+                for odd in odds.get('response', []):
+                    teams = odd.get('fixture', {}).get('teams', {})
+                    if any(h.lower() in unidecode(teams.get('home', {}).get('name', '')).lower() for h in home_aliases) and \
+                       any(a.lower() in unidecode(teams.get('away', {}).get('name', '')).lower() for a in away_aliases):
+                        odds_data.append({
+                            'home_team': home_team,
+                            'away_team': away_team,
+                            'home_odds': odd.get('bookmakers', [{}])[0].get('bets', [{}])[0].get('values', [{}])[0].get('odd', 2.0),
+                            'draw_odds': odd.get('bookmakers', [{}])[0].get('bets', [{}])[0].get('values', [{}])[1].get('odd', 3.0),
+                            'away_odds': odd.get('bookmakers', [{}])[0].get('bets', [{}])[0].get('values', [{}])[2].get('odd', 2.5)
+                        })
+                        _log(f"Odds encontrados na liga {league['league']} para {home_team} x {away_team}")
+                        found = True
+                        break
+                if found:
+                    break
+            except Exception as e:
+                _log(f"Erro na liga {league['league']} para {home_team} x {away_team}: {e}")
+                # Fallback para /fixtures
+                try:
+                    fixtures_url = f"https://v3.football.api-sports.io/fixtures?league={league['league']}&season={league['season']}&apiKey={api_key}"
+                    _log(f"Tentando fallback /fixtures para liga {league['league']} e {home_team} x {away_team}")
+                    response = requests.get(fixtures_url, timeout=10)
+                    response.raise_for_status()
+                    fixtures = response.json()
+                    _log(f"Resposta do /fixtures para liga {league['league']}: {json.dumps(fixtures, indent=2)}")
+                    for fixture in fixtures.get('response', []):
+                        teams = fixture.get('teams', {})
                         if any(h.lower() in unidecode(teams.get('home', {}).get('name', '')).lower() for h in home_aliases) and \
                            any(a.lower() in unidecode(teams.get('away', {}).get('name', '')).lower() for a in away_aliases):
                             odds_data.append({
                                 'home_team': home_team,
                                 'away_team': away_team,
-                                'home_odds': odd.get('bookmakers', [{}])[0].get('bets', [{}])[0].get('values', [{}])[0].get('odd', 2.0),
-                                'draw_odds': odd.get('bookmakers', [{}])[0].get('bets', [{}])[0].get('values', [{}])[1].get('odd', 3.0),
-                                'away_odds': odd.get('bookmakers', [{}])[0].get('bets', [{}])[0].get('values', [{}])[2].get('odd', 2.5)
+                                'home_odds': 2.0,
+                                'draw_odds': 3.0,
+                                'away_odds': 2.5
                             })
-                            _log(f"Odds encontrados na liga {league['league']} para {home_team} x {away_team}")
+                            _log(f"Jogo encontrado no /fixtures para {home_team} x {away_team}, mas sem odds, usando valores padrão")
                             found = True
                             break
                     if found:
                         break
-                else:
-                    _log(f"Nenhum dado para liga {league['league']}")
-            except Exception as e:
-                _log(f"Erro na liga {league['league']} para {home_team} x {away_team}: {e}")
+                except Exception as e:
+                    _log(f"Erro no fallback /fixtures para liga {league['league']} e {home_team} x {away_team}: {e}")
         if not found:
             _log(f"Nenhuma odds encontrada para {home_team} x {away_team}, usando valores padrão")
             odds_data.append({
