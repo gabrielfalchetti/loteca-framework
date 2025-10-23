@@ -20,8 +20,12 @@ def ingest_odds_apifootball(rodada, source_csv, api_key, regions, aliases_file, 
         _log(f"Erro ao ler {source_csv}: {e}")
         return
 
-    with open(aliases_file, 'r') as f:
-        aliases = json.load(f)
+    try:
+        with open(aliases_file, 'r') as f:
+            aliases = json.load(f)
+    except Exception as e:
+        _log(f"Erro ao ler {aliases_file}: {e}")
+        aliases = {}
 
     # Verificar validade da chave
     try:
@@ -149,4 +153,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-EOF
