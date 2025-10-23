@@ -9,7 +9,7 @@ from unidecode import unidecode
 def _log(msg: str) -> None:
     print(f"[ingest_odds_theoddsapi] {msg}", flush=True)
 
-def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, api_key_theodds):
+def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, api_key_apifootball=None):
     if not os.path.isfile(source_csv):
         _log(f"Arquivo {source_csv} não encontrado")
         return
@@ -68,10 +68,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rodada", required=True)
     ap.add_argument("--source_csv", required=True)
-    ap.add_argument("--api_key", required=True)
+    ap.add_argument("--api_key", required=True, help="Chave API da TheOddsAPI (THEODDS_API_KEY)")
     ap.add_argument("--regions", required=True)
     ap.add_argument("--aliases_file", required=True)
-    ap.add_argument("--api_key_theodds", required=True)  # Altera para api_key_theodds
+    ap.add_argument("--api_key_theodds", nargs="?", default=None, help="Chave API da TheOddsAPI (opcional, para compatibilidade)")
     args = ap.parse_args()
 
     ingest_odds_theoddsapi(args.rodada, args.source_csv, args.api_key, args.regions, args.aliases_file, args.api_key_theodds)
