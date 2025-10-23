@@ -16,6 +16,7 @@ def ingest_odds_apifootball(rodada, source_csv, api_key, regions, aliases_file, 
 
     try:
         matches = pd.read_csv(source_csv)
+        _log(f"Conteúdo de {source_csv}:\n{matches.to_string()}")
     except Exception as e:
         _log(f"Erro ao ler {source_csv}: {e}")
         return
