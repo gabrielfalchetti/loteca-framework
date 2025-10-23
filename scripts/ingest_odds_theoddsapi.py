@@ -27,6 +27,24 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
         _log(f"Erro ao ler {aliases_file}: {e}")
         aliases = {}
 
+    # Listar esportes disponíveis
+    try:
+        sports_url = f"https://api.the-odds-api.com/v4/sports/?apiKey={api_key}"
+        response = requests.get(sports_url, timeout=10)
+        response.raise_for_status()
+        sports = response.json()
+        _log(f"Esportes disponíveis na TheOddsAPI: {json.dumps(sports, indent=2)}")
+        sport_keys = [sport['key'] for sport in sports if 'soccer' in sport['key'].lower()]
+    except Exception as e:
+        _log(f"Erro ao listar esportes disponíveis: {e}")
+        sport_keys = [
+            'soccer_brazil_serie_a',
+            'soccer_brazil_serie_b',
+            'soccer_brazil_copa_do_brasil',
+            'soccer_southamerica_libertadores',
+            'soccer_uefa_europa_league'
+        ]
+
     odds_data = []
     for _, match in matches.iterrows():
         home_team = match.get('home', match.get('team_home', ''))
@@ -36,13 +54,6 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
         home_aliases = aliases.get(norm_home, [home_team])
         away_aliases = aliases.get(norm_away, [away_team])
 
-        sport_keys = [
-            'soccer_brazil_serie_a',
-            'soccer_brazil_serie_b',
-            'soccer_brazil_copa_do_brasil',
-            'soccer_southamerica_libertadores',
-            'soccer_uefa_europa_league'
-        ]
         found = False
         for sport_key in sport_keys:
             try:
@@ -52,7 +63,7 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
                 response.raise_for_status()
                 odds = response.json()
                 _log(f"Resposta da API para {sport_key}: {json.dumps(odds, indent=2)}")
-                for game in odds:  # Ajustado para iterar diretamente sobre a lista retornada
+                for game in odds:  # Iterar diretamente sobre a lista
                     if any(h.lower() in unidecode(game.get('home_team', '')).lower() for h in home_aliases) and \
                        any(a.lower() in unidecode(game.get('away_team', '')).lower() for a in away_aliases):
                         odds_data.append({
