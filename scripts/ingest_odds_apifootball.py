@@ -32,6 +32,7 @@ def ingest_odds_apifootball(rodada, source_csv, api_key, regions, aliases_file, 
     try:
         status_url = f"https://v3.football.api-sports.io/status?apiKey={api_key}"
         response = requests.get(status_url, timeout=10)
+        _log(f"Resposta do /status: {response.status_code} - {response.text}")
         response.raise_for_status()
         status = response.json()
         _log(f"Status da API-Football: {json.dumps(status, indent=2)}")
@@ -121,36 +122,14 @@ def ingest_odds_apifootball(rodada, source_csv, api_key, regions, aliases_file, 
                     break
             except Exception as e:
                 _log(f"Erro no /fixtures para liga {league['league']} e {home_team} x {away_team}: {e}")
-        if not found:
-            _log(f"Nenhuma odds encontrada para {home_team} x {away_team}, usando valores padrão")
-            odds_data.append({
-                'home_team': home_team,
-                'away_team': away_team,
-                'home_odds': 2.0,
-                'draw_odds': 3.0,
-                'away_odds': 2.5
-            })
-
-    if odds_data:
-        df_odds = pd.DataFrame(odds_data)
-        os.makedirs(rodada, exist_ok=True)
-        df_odds.to_csv(f"{rodada}/odds_apifootball.csv", index=False)
-        _log(f"Odds APIFootball salvos em {rodada}/odds_apifootball.csv")
-    else:
-        _log("Nenhum dado de odds APIFootball obtido, criando arquivo vazio")
-        pd.DataFrame(columns=['home_team', 'away_team', 'home_odds', 'draw_odds', 'away_odds']).to_csv(f"{rodada}/odds_apifootball.csv", index=False)
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--source_csv", required=True)
-    ap.add_argument("--api_key", required=True, help="Chave API da API-Football (API_FOOTBALL_KEY)")
-    ap.add_argument("--regions", required=True)
-    ap.add_argument("--aliases_file", required=True)
-    ap.add_argument("--api_key_theodds", nargs="?", default=None, help="Chave API da TheOddsAPI (opcional, para compatibilidade)")
-    args = ap.parse_args()
-
-    ingest_odds_apifootball(args.rodada, args.source_csv, args.api_key, args.regions, args.aliases_file, args.api_key_theodds)
-
-if __name__ == "__main__":
-    main()
+        if found:
+            break
+   if not found:
+       _log(f"Nenhuma odds encontrada para {home_team} x {away_team}, usando valores padrão")
+       odds_data.append({
+           'home_team': home_team,
+           'away_team': away_team,
+           'home_odds': 2.0,
+           'draw_odds': 3.0,
+           'away_odds': 2.5
+       })
