@@ -66,16 +66,18 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
                 for game in odds:  # Iterar diretamente sobre a lista
                     if any(h.lower() in unidecode(game.get('home_team', '')).lower() for h in home_aliases) and \
                        any(a.lower() in unidecode(game.get('away_team', '')).lower() for a in away_aliases):
-                        odds_data.append({
-                            'home_team': home_team,
-                            'away_team': away_team,
-                            'home_odds': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[0].get('price', 2.0),
-                            'draw_odds': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[1].get('price', 3.0),
-                            'away_odds': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[2].get('price', 2.5)
-                        })
-                        _log(f"Odds encontrados em {sport_key} para {home_team} x {away_team}")
-                        found = True
-                        break
+                        outcomes = game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [])
+                        if len(outcomes) >= 3:  # Verificar se há odds para home, draw, away
+                            odds_data.append({
+                                'home_team': home_team,
+                                'away_team': away_team,
+                                'home_odds': outcomes[0].get('price', 2.0),
+                                'draw_odds': outcomes[1].get('price', 3.0),
+                                'away_odds': outcomes[2].get('price', 2.5)
+                            })
+                            _log(f"Odds encontrados em {sport_key} para {home_team} x {away_team}")
+                            found = True
+                            break
                 if found:
                     break
             except Exception as e:
