@@ -9,7 +9,7 @@ from unidecode import unidecode
 def _log(msg: str) -> None:
     print(f"[ingest_odds_theoddsapi] {msg}", flush=True)
 
-def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, api_key_apifootball):
+def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, api_key_theodds):
     if not os.path.isfile(source_csv):
         _log(f"Arquivo {source_csv} não encontrado")
         return
@@ -34,8 +34,8 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
             odds = response.json()
             if odds and 'data' in odds:
                 for odd in odds['data']:
-                    if (aliases.get(home_team, home_team).lower() in odd['teams'].lower() or
-                        aliases.get(away_team, away_team).lower() in odd['teams'].lower()):
+                    if (unidecode(home_team).lower() in unidecode(odd['teams']).lower() or
+                        unidecode(away_team).lower() in unidecode(odd['teams']).lower()):
                         odds_data.append({
                             'home_team': home_team,
                             'away_team': away_team,
@@ -57,9 +57,8 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
 
     if odds_data:
         df_odds = pd.DataFrame(odds_data)
-        consensus = df_odds.groupby(['home_team', 'away_team']).mean().reset_index()
         os.makedirs(rodada, exist_ok=True)
-        consensus.to_csv(f"{rodada}/odds_theoddsapi.csv", index=False)
+        df_odds.to_csv(f"{rodada}/odds_theoddsapi.csv", index=False)
         _log(f"Odds TheOddsAPI salvos em {rodada}/odds_theoddsapi.csv")
     else:
         _log("Nenhum dado de odds TheOddsAPI obtido, criando arquivo vazio")
@@ -72,10 +71,10 @@ def main():
     ap.add_argument("--api_key", required=True)
     ap.add_argument("--regions", required=True)
     ap.add_argument("--aliases_file", required=True)
-    ap.add_argument("--api_key_apifootball", required=True)
+    ap.add_argument("--api_key_theodds", required=True)  # Altera para api_key_theodds
     args = ap.parse_args()
 
-    ingest_odds_theoddsapi(args.rodada, args.source_csv, args.api_key, args.regions, args.aliases_file, args.api_key_apifootball)
+    ingest_odds_theoddsapi(args.rodada, args.source_csv, args.api_key, args.regions, args.aliases_file, args.api_key_theodds)
 
 if __name__ == "__main__":
     main()
