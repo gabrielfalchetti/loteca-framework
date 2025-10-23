@@ -82,9 +82,9 @@ jobs:
             --rodada "${OUT_DIR}" \
             --source_csv "${SOURCE_CSV_NORM}" \
             --api_key "${THEODDS_API_KEY}" \
-            --api_key_theodds "${API_FOOTBALL_KEY}" \
             --regions "${REGIONS}" \
-            --aliases_file "${AUTO_ALIASES_JSON}"
+            --aliases_file "${AUTO_ALIASES_JSON}" \
+            --api_key_theodds "${API_FOOTBALL_KEY}"
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
@@ -96,9 +96,9 @@ jobs:
             --rodada "${OUT_DIR}" \
             --source_csv "${SOURCE_CSV_NORM}" \
             --api_key "${API_FOOTBALL_KEY}" \
-            --api_key_theodds "${THEODDS_API_KEY}" \
             --regions "${REGIONS}" \
-            --aliases_file "${AUTO_ALIASES_JSON}"
+            --aliases_file "${AUTO_ALIASES_JSON}" \
+            --api_key_theodds "${THEODDS_API_KEY}"
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
