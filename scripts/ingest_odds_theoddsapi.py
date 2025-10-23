@@ -16,6 +16,7 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
 
     try:
         matches = pd.read_csv(source_csv)
+        _log(f"Conteúdo de {source_csv}:\n{matches.to_string()}")
     except Exception as e:
         _log(f"Erro ao ler {source_csv}: {e}")
         return
@@ -63,21 +64,19 @@ def ingest_odds_theoddsapi(rodada, source_csv, api_key, regions, aliases_file, a
                 response.raise_for_status()
                 odds = response.json()
                 _log(f"Resposta da API para {sport_key}: {json.dumps(odds, indent=2)}")
-                for game in odds:  # Iterar diretamente sobre a lista
+                for game in odds:
                     if any(h.lower() in unidecode(game.get('home_team', '')).lower() for h in home_aliases) and \
                        any(a.lower() in unidecode(game.get('away_team', '')).lower() for a in away_aliases):
-                        outcomes = game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [])
-                        if len(outcomes) >= 3:  # Verificar se há odds para home, draw, away
-                            odds_data.append({
-                                'home_team': home_team,
-                                'away_team': away_team,
-                                'home_odds': outcomes[0].get('price', 2.0),
-                                'draw_odds': outcomes[1].get('price', 3.0),
-                                'away_odds': outcomes[2].get('price', 2.5)
-                            })
-                            _log(f"Odds encontrados em {sport_key} para {home_team} x {away_team}")
-                            found = True
-                            break
+                        odds_data.append({
+                            'home_team': home_team,
+                            'away_team': away_team,
+                            'home_odds': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[0].get('price', 2.0),
+                            'draw_odds': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[1].get('price', 3.0),
+                            'away_odds': game.get('bookmakers', [{}])[0].get('markets', [{}])[0].get('outcomes', [{}])[2].get('price', 2.5)
+                        })
+                        _log(f"Odds encontrados em {sport_key} para {home_team} x {away_team}")
+                        found = True
+                        break
                 if found:
                     break
             except Exception as e:
