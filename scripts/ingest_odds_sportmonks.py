@@ -137,10 +137,16 @@ def main():
     matches_df = pd.read_csv(args.source_csv)
     print(f"[ingest_odds_sportmonks] Colunas em {args.source_csv}: {matches_df.columns.tolist()}")
     
+    # Validar colunas esperadas
+    required_columns = ['match_id', 'home', 'away', 'date']
+    if not all(col in matches_df.columns for col in required_columns):
+        missing = [col for col in required_columns if col not in matches_df.columns]
+        raise ValueError(f"Colunas ausentes em {args.source_csv}: {missing}")
+    
     odds_data = []
     for _, row in matches_df.iterrows():
-        home_team = row['home_team']
-        away_team = row['away_team']
+        home_team = row['home']  # Corrigido de 'home_team'
+        away_team = row['away']  # Corrigido de 'away_team'
         home_team_id = get_team_id_sportmonks(home_team, args.api_key, aliases)
         away_team_id = get_team_id_sportmonks(away_team, args.api_key, aliases)
         
