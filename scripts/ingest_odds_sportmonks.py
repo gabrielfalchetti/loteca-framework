@@ -28,15 +28,16 @@ def ingest_odds_sportmonks(rodada, source_csv, api_key, regions, aliases_file, a
         _log(f"Erro ao ler {aliases_file}: {e}")
         aliases = {}
 
-    # Verificar validade da chave com endpoint válido
+    # Verificar validade da chave com endpoint válido (ex.: /v3/core/timezones)
     try:
         status_url = f"https://api.sportmonks.com/v3/core/timezones?api_token={api_key}"
         response = requests.get(status_url, timeout=10)
+        _log(f"Resposta do /timezones: {response.status_code} - {response.text}")
         response.raise_for_status()
         status = response.json()
-        _log(f"Resposta do /timezones: {json.dumps(status, indent=2)}")
+        _log(f"Status do Sportmonks: {json.dumps(status, indent=2)}")
     except Exception as e:
-        _log(f"Erro ao verificar API Sportmonks: {e}")
+        _log(f"Erro ao verificar Sportmonks: {e}")
         _log("Chave SPORTMONKS_API_KEY inválida. Usando valores padrão para todos os jogos.")
         odds_data = []
         for _, match in matches.iterrows():
@@ -122,3 +123,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+EOF
