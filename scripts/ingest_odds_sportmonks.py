@@ -1,134 +1,143 @@
-# -*- coding: utf-8 -*-
-import argparse
 import pandas as pd
 import requests
+import unidecode
 import os
-import json
-from unidecode import unidecode
+from datetime import datetime, timedelta
 
-def _log(msg: str) -> None:
-    print(f"[ingest_odds_sportmonks] {msg}", flush=True)
+# Configurações da API Sportmonks (substitua pelo seu token)
+SPORTMONKS_API_TOKEN = os.getenv('SPORTMONKS_API_TOKEN', 'your_api_token_here')
+BASE_URL = 'https://api.sportmonks.com/v3/football'
 
-def ingest_odds_sportmonks(rodada, source_csv, api_key, regions, aliases_file, api_key_theodds=None):
-    if not os.path.isfile(source_csv):
-        _log(f"Arquivo {source_csv} não encontrado")
-        return
+def normalize_team_name(name):
+    """Remove estado, acentos e padroniza nome do time."""
+    if '/' in name:
+        name = name.split('/')[0].strip()
+    name = unidecode.unidecode(name.lower())
+    return name.capitalize()
 
-    try:
-        matches = pd.read_csv(source_csv)
-        _log(f"Conteúdo de {source_csv}:\n{matches.to_string()}")
-    except Exception as e:
-        _log(f"Erro ao ler {source_csv}: {e}")
-        return
+def get_team_id(team_name):
+    """Busca ID do time no Sportmonks."""
+    url = f"{BASE_URL}/teams/search/{normalize_team_name(team_name)}?api_token={SPORTMONKS_API_TOKEN}"
+    response = requests.get(url)
+    if response.status_code == 200 and response.json()['data']:
+        return response.json()['data'][0]['id']
+    return None
 
-    try:
-        with open(aliases_file, 'r') as f:
-            aliases = json.load(f)
-    except Exception as e:
-        _log(f"Erro ao ler {aliases_file}: {e}")
-        aliases = {}
+def get_fixtures(league_id, date_from, date_to, home_team_id, away_team_id):
+    """Busca fixtures para uma liga e filtra por times."""
+    page = 1
+    fixtures = []
+    while True:
+        url = (f"{BASE_URL}/fixtures?league={league_id}&date_from={date_from}&date_to={date_to}"
+               f"&page={page}&api_token={SPORTMONKS_API_TOKEN}&include=participants")
+        response = requests.get(url)
+        if response.status_code != 200:
+            print(f"[ingest_odds_sportmonks] Erro na busca de fixtures: {response.status_code}")
+            break
+        data = response.json()
+        fixtures.extend(data.get('data', []))
+        print(f"[ingest_odds_sportmonks] Resposta de fixtures para liga {league_id}: {len(data.get('data', []))} jogos encontrados")
+        if not data.get('pagination', {}).get('has_more', False):
+            break
+        page += 1
+    
+    # Filtrar por home e away team IDs
+    for fixture in fixtures:
+        home_id = fixture.get('participants', [{}])[0].get('id')
+        away_id = fixture.get('participants', [{}])[1].get('id')
+        if home_id == home_team_id and away_id == away_team_id:
+            return fixture
+    return None
 
-    # Verificar validade da chave com endpoint válido (/v3/core/timezones)
-    try:
-        status_url = f"https://api.sportmonks.com/v3/core/timezones?api_token={api_key}"
-        response = requests.get(status_url, timeout=10)
-        _log(f"Resposta do /timezones: {response.status_code} - {response.text}")
-        response.raise_for_status()
-        status = response.json()
-        _log(f"Status do Sportmonks: {json.dumps(status, indent=2)}")
-    except Exception as e:
-        _log(f"Erro ao verificar API Sportmonks: {e}")
-        _log("Chave SPORTMONKS_API_KEY inválida ou endpoint indisponível. Usando valores padrão para todos os jogos.")
-        odds_data = []
-        for _, match in matches.iterrows():
-            home_team = match.get('home', match.get('team_home', ''))
-            away_team = match.get('away', match.get('team_away', ''))
-            odds_data.append({
-                'home_team': home_team,
-                'away_team': away_team,
-                'home_odds': 2.0,
-                'draw_odds': 3.0,
-                'away_odds': 2.5
-            })
-        df_odds = pd.DataFrame(odds_data)
-        os.makedirs(rodada, exist_ok=True)
-        df_odds.to_csv(f"{rodada}/odds_sportmonks.csv", index=False)
-        _log(f"Odds Sportmonks salvos em {rodada}/odds_sportmonks.csv")
-        return
-
-    odds_data = []
-    for _, match in matches.iterrows():
-        home_team = match.get('home', match.get('team_home', ''))
-        away_team = match.get('away', match.get('team_away', ''))
-        norm_home = unidecode(home_team).lower().strip()
-        norm_away = unidecode(away_team).lower().strip()
-        home_aliases = aliases.get(norm_home, [home_team])
-        away_aliases = aliases.get(norm_away, [away_team])
-
-        # Filtrar por ligas brasileiras (ex.: Série A = 71, Série B = 72, Copa do Brasil = 73)
-        leagues = [71, 72, 73]  # IDs das ligas brasileiras
-        found = False
-        for league_id in leagues:
-            try:
-                fixtures_url = f"https://api.sportmonks.com/v3/football/fixtures?api_token={api_key}&timezone=America/Sao_Paulo&filters=leagues:{league_id}&include=participants;odds"
-                _log(f"Tentando fixtures para liga {league_id} e {home_team} x {away_team}")
-                response = requests.get(fixtures_url, timeout=10)
-                response.raise_for_status()
-                fixtures = response.json()
-                _log(f"Resposta de fixtures para liga {league_id}: {len(fixtures.get('data', []))} jogos encontrados")
-                for fixture in fixtures.get('data', []):
-                    participants = fixture.get('participants', [])
-                    if len(participants) >= 2:
-                        home_team_api = participants[0].get('name', '').lower()
-                        away_team_api = participants[1].get('name', '').lower()
-                        if any(h.lower() in home_team_api for h in home_aliases) and \
-                           any(a.lower() in away_team_api for a in away_aliases):
-                            odds = fixture.get('odds', {}).get('data', [{}])[0] if fixture.get('odds', {}).get('data') else {}
-                            odds_values = {o['label']: o['value'] for o in odds.get('odds', []) if o.get('label') in ['1', 'X', '2']}
-                            odds_data.append({
-                                'home_team': home_team,
-                                'away_team': away_team,
-                                'home_odds': float(odds_values.get('1', 2.0)),
-                                'draw_odds': float(odds_values.get('X', 3.0)),
-                                'away_odds': float(odds_values.get('2', 2.5))
-                            })
-                            _log(f"Odds encontrados na liga {league_id} para {home_team} x {away_team}")
-                            found = True
-                            break
-                if found:
-                    break
-            except Exception as e:
-                _log(f"Erro na liga {league_id} para {home_team} x {away_team}: {e}")
-        if not found:
-            _log(f"Nenhuma odds encontrada para {home_team} x {away_team}, usando valores padrão")
-            odds_data.append({
-                'home_team': home_team,
-                'away_team': away_team,
-                'home_odds': 2.0,
-                'draw_odds': 3.0,
-                'away_odds': 2.5
-            })
-
-    if odds_data:
-        df_odds = pd.DataFrame(odds_data)
-        os.makedirs(rodada, exist_ok=True)
-        df_odds.to_csv(f"{rodada}/odds_sportmonks.csv", index=False)
-        _log(f"Odds Sportmonks salvos em {rodada}/odds_sportmonks.csv")
-    else:
-        _log("Nenhum dado de odds Sportmonks obtido, criando arquivo vazio")
-        pd.DataFrame(columns=['home_team', 'away_team', 'home_odds', 'draw_odds', 'away_odds']).to_csv(f"{rodada}/odds_sportmonks.csv", index=False)
+def get_odds(fixture_id):
+    """Busca odds pre-match para um fixture."""
+    url = f"{BASE_URL}/odds/pre-match/by-fixture/{fixture_id}?api_token={SPORTMONKS_API_TOKEN}&include=bookmakers"
+    response = requests.get(url)
+    if response.status_code == 200 and response.json()['data']:
+        odds_data = response.json()['data']
+        # Assumindo 1x2 market (ID=1, exemplo comum)
+        for odd in odds_data:
+            if odd.get('market_id') == 1:  # 1x2
+                values = {v['name']: v['value'] for v in odd.get('values', [])}
+                return {
+                    'home_odds': values.get('1', 2.0),  # Default 2.0 se não encontrado
+                    'draw_odds': values.get('X', 3.0),
+                    'away_odds': values.get('2', 2.0)
+                }
+    return {'home_odds': 2.0, 'draw_odds': 3.0, 'away_odds': 2.0}  # Defaults
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rodada", required=True)
-    ap.add_argument("--source_csv", required=True)
-    ap.add_argument("--api_key", required=True, help="Chave API do Sportmonks")
-    ap.add_argument("--regions", required=True)
-    ap.add_argument("--aliases_file", required=True)
-    ap.add_argument("--api_key_theodds", nargs="?", default=None, help="Chave API da TheOddsAPI (opcional)")
-    args = ap.parse_args()
+    # Configurações do workflow
+    output_path = os.getenv('CONSENSUS_CSV', 'data/out/odds_sportmonks.csv')
+    look_ahead_days = int(os.getenv('LOOKAHEAD_DAYS', 3))
+    date_from = datetime.now().strftime('%Y-%m-%d')
+    date_to = (datetime.now() + timedelta(days=look_ahead_days)).strftime('%Y-%m-%d')
+    leagues = [71, 72, 73]  # Série A, B, C
 
-    ingest_odds_sportmonks(args.rodada, args.source_csv, args.api_key, args.regions, args.aliases_file, args.api_key_theodds)
+    # Jogos da Loteca (exemplo do log)
+    matches = [
+        ('palmeiras/sp', 'cruzeiro/mg'),
+        ('atletico/mg', 'ceara/ce'),
+        ('vitoria/ba', 'corinthians/sp'),
+        ('athletic club/mg', 'america/mg'),
+        ('fluminense/rj', 'internacional/rs'),
+        ('sport/pe', 'mirassol/sp'),
+        ('fortaleza/ce', 'flamengo/rj'),
+        ('sao paulo/sp', 'bahia/ba'),
+        ('aston villa', 'manchester city'),  # Premier League
+        ('botafogo/rj', 'santos/sp'),
+        ('gremio/rs', 'juventude/rs'),
+        ('crb/al', 'atletico/go'),
+        ('bragantino/sp', 'vasco da gama/rj'),
+        ('vila nova/go', 'ferroviaria/sp')
+    ]
+
+    # DataFrame para armazenar odds
+    odds_data = []
+    
+    for home_team, away_team in matches:
+        home_team_id = get_team_id(home_team)
+        away_team_id = get_team_id(away_team)
+        if not home_team_id or not away_team_id:
+            print(f"[ingest_odds_sportmonks] Time não encontrado: {home_team} ou {away_team}")
+            continue
+
+        found = False
+        for league_id in leagues:
+            fixture = get_fixtures(league_id, date_from, date_to, home_team_id, away_team_id)
+            if fixture:
+                fixture_id = fixture['id']
+                odds = get_odds(fixture_id)
+                odds_data.append({
+                    'match_id': fixture_id,  # Usa fixture_id como match_id
+                    'home_team': normalize_team_name(home_team),
+                    'away_team': normalize_team_name(away_team),
+                    'home_odds': odds['home_odds'],
+                    'draw_odds': odds['draw_odds'],
+                    'away_odds': odds['away_odds'],
+                    'league_id': league_id
+                })
+                found = True
+                print(f"[ingest_odds_sportmonks] Odds encontradas para {home_team} x {away_team} na liga {league_id}")
+                break
+        
+        if not found:
+            print(f"[ingest_odds_sportmonks] Nenhuma odds encontrada para {home_team} x {away_team}, usando valores padrão")
+            odds_data.append({
+                'match_id': f"{normalize_team_name(home_team)}_vs_{normalize_team_name(away_team)}",
+                'home_team': normalize_team_name(home_team),
+                'away_team': normalize_team_name(away_team),
+                'home_odds': 2.0,
+                'draw_odds': 3.0,
+                'away_odds': 2.0,
+                'league_id': None
+            })
+
+    # Salvar CSV
+    df = pd.DataFrame(odds_data)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    df.to_csv(output_path, index=False)
+    print(f"[ingest_odds_sportmonks] Odds Sportmonks salvos em {output_path}")
 
 if __name__ == "__main__":
     main()
