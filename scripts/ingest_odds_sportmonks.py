@@ -47,7 +47,7 @@ def get_current_season_id(league_id, api_key):
     print(f"[ingest_sportmonks] Season não encontrada para liga {league_id}")
     return None
 
-def generate_auto_aliases(api_key, leagues=[71, 72, 73, 76, 8]):
+def generate_auto_aliases(api_key, leagues=[27, 28, 29, 373, 8]):
     """Gera aliases automáticos usando Sportmonks."""
     aliases = {
         "atletico": "Atlético Mineiro",
@@ -98,6 +98,7 @@ def generate_auto_aliases(api_key, leagues=[71, 72, 73, 76, 8]):
     return aliases
 
 def load_aliases(aliases_file, api_key):
+    """Carrega ou gera aliases de times."""
     if os.path.exists(aliases_file):
         with open(aliases_file, 'r') as f:
             return json.load(f)
@@ -110,6 +111,7 @@ def load_aliases(aliases_file, api_key):
         return aliases
 
 def get_team_id_sportmonks(team_name, api_key, aliases):
+    """Busca ID do time no Sportmonks, usando aliases se necessário."""
     team_name_normalized = normalize_team_name(team_name)
     alias = aliases.get(team_name_normalized.lower(), team_name_normalized)
     url = f"{SPORTMONKS_BASE_URL}/teams/search/{alias}"
@@ -122,6 +124,7 @@ def get_team_id_sportmonks(team_name, api_key, aliases):
     return None
 
 def fetch_matches_sportmonks(league_id, date_from, date_to, home_team_id, away_team_id, api_key):
+    """Busca partidas na API restritas a dois times específicos."""
     page = 1
     matches = []
     team_ids_str = f"{home_team_id},{away_team_id}"
@@ -156,6 +159,7 @@ def fetch_matches_sportmonks(league_id, date_from, date_to, home_team_id, away_t
     return matches
 
 def match_fixtures(csv_row, api_matches, aliases):
+    """Compara uma partida do CSV com partidas da API, retornando a correspondência mais próxima."""
     home_team = normalize_team_name(csv_row['home'])
     away_team = normalize_team_name(csv_row['away'])
     csv_date = csv_row['date']
@@ -191,6 +195,7 @@ def match_fixtures(csv_row, api_matches, aliases):
     return None, False
 
 def get_odds_sportmonks(fixture_id, api_key):
+    """Busca odds pre-match para um fixture."""
     url = f"{SPORTMONKS_BASE_URL}/odds/pre-match/by-fixture/{fixture_id}"
     params = {'include': 'bookmakers'}
     data = get_api_data(url, api_key, params)
@@ -207,6 +212,7 @@ def get_odds_sportmonks(fixture_id, api_key):
     return {'match_id': fixture_id, 'home_odds': 2.0, 'draw_odds': 3.0, 'away_odds': 2.0}
 
 def get_team_stats(team_id, season_id, api_key):
+    """Extrai estatísticas de time."""
     url = f"{SPORTMONKS_BASE_URL}/teams/{team_id}"
     params = {'include': 'statistics', 'season': season_id}
     data = get_api_data(url, api_key, params)
@@ -229,6 +235,7 @@ def get_team_stats(team_id, season_id, api_key):
     return stats
 
 def get_player_stats(fixture_id, api_key):
+    """Extrai estatísticas de jogadores do lineup de um fixture."""
     url = f"{SPORTMONKS_BASE_URL}/fixtures/{fixture_id}"
     params = {'include': 'lineups;players;statistics;players.injury'}
     data = get_api_data(url, api_key, params)
@@ -250,6 +257,7 @@ def get_player_stats(fixture_id, api_key):
     return players
 
 def get_transfers(team_id, api_key):
+    """Extrai transferências recentes."""
     url = f"{SPORTMONKS_BASE_URL}/transfers"
     params = {'filters': f'teamIds:{team_id}', 'include': 'player;fromTeam;toTeam'}
     data = get_api_data(url, api_key, params)
@@ -264,6 +272,7 @@ def get_transfers(team_id, api_key):
     return transfers
 
 def get_referee_stats(fixture_id, api_key):
+    """Extrai estatísticas de árbitro para um fixture."""
     url = f"{SPORTMONKS_BASE_URL}/fixtures/{fixture_id}"
     params = {'include': 'referees;referees.statistics'}
     data = get_api_data(url, api_key, params)
@@ -297,10 +306,10 @@ def main():
     referee_path = os.path.join(args.rodada, 'referee_stats.csv')
     
     # Ligas (atualizadas para 2025, incluindo Copa do Brasil)
-    leagues = [71, 72, 73, 76, 8]  # Série A, B, C, Copa do Brasil, EPL
+    leagues = [27, 28, 29, 373, 8]  # Série A, B, C, Copa do Brasil, EPL
     season_ids = {league: get_current_season_id(league, args.api_key) for league in leagues}
     print(f"[debug] Season IDs: {season_ids}")
-    aliases = load_aliases(args.aliases_file, args.api_key)
+    aliases = load_aliases(args.aliases_file, api_key)
     
     # Ler matches_source.csv
     if not os.path.exists(args.source_csv):
@@ -409,8 +418,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Test for syntax errors by parsing the code
-print("Code parsed successfully, no syntax errors.")
-</parameter
-</xai:function_call
