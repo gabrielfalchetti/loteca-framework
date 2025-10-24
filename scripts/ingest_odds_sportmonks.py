@@ -28,9 +28,9 @@ def ingest_odds_sportmonks(rodada, source_csv, api_key, regions, aliases_file, a
         _log(f"Erro ao ler {aliases_file}: {e}")
         aliases = {}
 
-    # Verificar validade da chave com endpoint válido (ex.: /v3/core/timezones)
+    # Verificar validade da chave com endpoint válido
     try:
-        status_url = f"https://api.sportmonks.com/v3/core/timezones?api_token={api_key}"
+        status_url = f"https://api.sportmonks.com/v3/football/timezones?api_token={api_key}"
         response = requests.get(status_url, timeout=10)
         _log(f"Resposta do /timezones: {response.status_code} - {response.text}")
         response.raise_for_status()
@@ -72,7 +72,7 @@ def ingest_odds_sportmonks(rodada, source_csv, api_key, regions, aliases_file, a
             response = requests.get(fixtures_url, timeout=10)
             response.raise_for_status()
             fixtures = response.json()
-            _log(f"Resposta de fixtures: {json.dumps(fixtures, indent=2)}")
+            _log(f"Resposta de fixtures: {len(fixtures.get('data', []))} jogos encontrados")
             for fixture in fixtures.get('data', []):
                 participants = fixture.get('participants', {})
                 if len(participants) >= 2:
