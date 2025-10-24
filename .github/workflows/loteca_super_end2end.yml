@@ -84,23 +84,23 @@ jobs:
             --api_key "${THEODDS_API_KEY}" \
             --regions "${REGIONS}" \
             --aliases_file "${AUTO_ALIASES_JSON}" \
-            --api_key_theodds "${API_FOOTBALL_KEY}"
+            --api_key_theodds "${SPORTMONKS_API_KEY}"
         env:
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-      - name: 5 Ingest odds from API-Football
+          SPORTMONKS_API_KEY: ${{ secrets.SPORTMONKS_API_KEY }}
+      - name: 5 Ingest odds from Sportmonks
         run: |
           set -euo pipefail
-          [ -f scripts/ingest_odds_apifootball.py ] || { echo "::error::scripts/ingest_odds_apifootball.py not found"; exit 5; }
-          python -m scripts.ingest_odds_apifootball \
+          [ -f scripts/ingest_odds_sportmonks.py ] || { echo "::error::scripts/ingest_odds_sportmonks.py not found"; exit 5; }
+          python -m scripts.ingest_odds_sportmonks \
             --rodada "${OUT_DIR}" \
             --source_csv "${SOURCE_CSV_NORM}" \
-            --api_key "${API_FOOTBALL_KEY}" \
+            --api_key "${SPORTMONKS_API_KEY}" \
             --regions "${REGIONS}" \
             --aliases_file "${AUTO_ALIASES_JSON}" \
             --api_key_theodds "${THEODDS_API_KEY}"
         env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          SPORTMONKS_API_KEY: ${{ secrets.SPORTMONKS_API_KEY }}
           THEODDS_API_KEY: ${{ secrets.THEODDS_API_KEY }}
       - name: 6.5 Generate Odds Consensus
         run: |
@@ -108,7 +108,7 @@ jobs:
           [ -f scripts/generate_consensus.py ] || { echo "::error::scripts/generate_consensus.py not found"; exit 6; }
           python -m scripts.generate_consensus \
             --theodds_file "${OUT_DIR}/odds_theoddsapi.csv" \
-            --apifootball_file "${OUT_DIR}/odds_apifootball.csv" \
+            --apifootball_file "${OUT_DIR}/odds_sportmonks.csv" \
             --output_file "${CONSENSUS_CSV}"
       - name: 7 Bivariate Estimator
         run: |
