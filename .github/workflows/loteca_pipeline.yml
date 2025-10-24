@@ -11,13 +11,35 @@ jobs:
       - name: Install dependencies
         run: pip install pandas requests unidecode
 
+      - name: Generate Automatic Aliases
+        run: |
+          set -euo pipefail
+          [ -f scripts/generate_aliases.py ] || { echo "::error::scripts/generate_aliases.py not found"; exit 5; }
+          python -m scripts.generate_aliases \
+            --api_key "${{ secrets.SPORTMONKS_API_KEY }}" \
+            --aliases_file "${{ env.AUTO_ALIASES_JSON }}"
+
+      - name: Normalize Matches
+        run: |
+          set -euo pipefail
+          [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 5; }
+          python -m scripts.normalize_matches \
+            --source_csv "${{ env.SOURCE_CSV }}" \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --season "${{ env.SEASON }}"
+
+      - name: Validate Normalized CSV Columns
+        run: |
+          set -euo pipefail
+          python -c "import pandas as pd; df = pd.read_csv('${{ env.SOURCE_CSV_NORM }}'); assert set(['match_id', 'home', 'away', 'date']).issubset(df.columns), 'Missing required columns in matches_norm.csv'"
+
       - name: Ingest Odds from Sportmonks
         run: |
           set -euo pipefail
           [ -f scripts/ingest_odds_sportmonks.py ] || { echo "::error::scripts/ingest_odds_sportmonks.py not found"; exit 5; }
           python -m scripts.ingest_odds_sportmonks \
             --rodada "${{ env.OUT_DIR }}" \
-            --source_csv "${{ env.SOURCE_CSV }}" \
+            --source_csv "${{ env.SOURCE_CSV_NORM }}" \
             --api_key "${{ secrets.SPORTMONKS_API_KEY }}" \
             --aliases_file "${{ env.AUTO_ALIASES_JSON }}"
 
@@ -49,7 +71,7 @@ jobs:
             --model_pkl "${{ env.MODEL_PKL }}" \
             --out_dir "${{ env.OUT_DIR }}" \
             --predictions_csv "${{ env.PREDICTIONS_CSV }}" \
-            --source_csv_norm "${{ env.SOURCE_CSV }}"
+            --source_csv_norm "${{ env.SOURCE_CSV_NORM }}"
 
       - name: Train Calibrator
         run: |
@@ -115,6 +137,7 @@ jobs:
       SOURCE_CSV: data/in/matches_source.csv
       OUT_DIR: data/out/18774723488
       FEATURES_PARQUET: data/history/features.parquet
+      SOURCE_CSV_NORM: data/out/18774723488/matches_norm.csv
       AUTO_ALIASES_JSON: data/aliases/auto_aliases.json
       BIVARIATE_CSV: data/out/18774723488/bivariate.csv
       MODEL_PKL: data/out/18774723488/dynamic_model.pkl
