@@ -73,7 +73,7 @@ def get_team_id_sportmonks(team_name, api_key, aliases):
     alias = aliases.get(team_name_normalized.lower(), team_name_normalized)
     url = f"{SPORTMONKS_BASE_URL}/teams/search/{alias}"
     data = get_api_data(url, api_key)
-    if data:
+    if data and isinstance(data, list) and len(data) > 0:
         return data[0]['id']
     print(f"[ingest_sportmonks] Time não encontrado no Sportmonks: {team_name} (alias: {alias})")
     return None
@@ -110,7 +110,7 @@ def get_fixtures_sportmonks(league_id, date_from, date_to, home_team_id, away_te
 
 def get_odds_sportmonks(fixture_id, api_key):
     """Busca odds pre-match para um fixture."""
-    url = f"{SPORTMONKS_BASE_URL}/odds/pre-match/fixtures/{fixture_id}"
+    url = f"{SPORTMONKS_BASE_URL}/odds/fixtures/{fixture_id}"
     params = {'include': 'bookmakers'}
     data = get_api_data(url, api_key, params)
     for odd in data:
@@ -128,42 +128,41 @@ def get_odds_sportmonks(fixture_id, api_key):
 def get_team_stats(team_id, season_id, api_key):
     """Extrai estatísticas de time."""
     url = f"{SPORTMONKS_BASE_URL}/teams/{team_id}"
-    params = {'include': 'statistics;statistics.type', 'season': season_id}
+    params = {'include': 'statistics', 'season': season_id}
     data = get_api_data(url, api_key, params)
-    if isinstance(data, list) and data:
-        data = data[0]
     stats = {
         'team_id': team_id,
         'goals_scored_avg': 0.0,
         'goals_conceded_avg': 0.0,
         'win_rate': 0.0
     }
-    statistics = data.get('statistics', [])
+    if isinstance(data, list) and data:
+        data = data[0]  # Pega o primeiro item se for uma lista
+    statistics = data.get('statistics', []) if isinstance(data, dict) else []
     for stat in statistics:
-        stat_type = stat.get('type', {})
-        if stat_type.get('id') == 42:  # Gols marcados por jogo
+        if stat.get('type_id') == 42:  # Gols marcados por jogo
             stats['goals_scored_avg'] = stat.get('value', {}).get('average', 0.0)
-        elif stat_type.get('id') == 43:  # Gols sofridos por jogo
+        elif stat.get('type_id') == 43:  # Gols sofridos por jogo
             stats['goals_conceded_avg'] = stat.get('value', {}).get('average', 0.0)
-        elif stat_type.get('id') == 44:  # Taxa de vitórias
+        elif stat.get('type_id') == 44:  # Taxa de vitórias
             stats['win_rate'] = stat.get('value', {}).get('percentage', 0.0)
     return stats
 
 def get_player_stats(fixture_id, api_key):
     """Extrai estatísticas de jogadores do lineup de um fixture."""
     url = f"{SPORTMONKS_BASE_URL}/fixtures/{fixture_id}"
-    params = {'include': 'lineups.players;lineups.players.statistics;lineups.players.player.injury'}
+    params = {'include': 'lineups;players;players.statistics;players.injury'}
     data = get_api_data(url, api_key, params)
+    players = []
     if isinstance(data, list) and data:
         data = data[0]
-    players = []
-    lineups = data.get('lineups', [])
+    lineups = data.get('lineups', []) if isinstance(data, dict) else []
     for lineup in lineups:
         for player in lineup.get('players', []):
             stats = player.get('statistics', {})
-            injury = player.get('player', {}).get('injury', {})
+            injury = player.get('injury', {})
             players.append({
-                'player_id': player['id'],
+                'player_id': player.get('id', 0),
                 'goals': stats.get('goals', 0),
                 'assists': stats.get('assists', 0),
                 'minutes_played': stats.get('minutes', 0),
@@ -173,8 +172,8 @@ def get_player_stats(fixture_id, api_key):
 
 def get_transfers(team_id, api_key):
     """Extrai transferências recentes."""
-    url = f"{SPORTMONKS_BASE_URL}/transfers/teams/{team_id}"
-    params = {'include': 'player;from_team;to_team'}
+    url = f"{SPORTMONKS_BASE_URL}/transfers"
+    params = {'filters': f'teamIds:{team_id}', 'include': 'player;from_team;to_team'}
     data = get_api_data(url, api_key, params)
     transfers = []
     for transfer in data:
@@ -193,7 +192,7 @@ def get_referee_stats(fixture_id, api_key):
     data = get_api_data(url, api_key, params)
     if isinstance(data, list) and data:
         data = data[0]
-    referees = data.get('referees', [])
+    referees = data.get('referees', []) if isinstance(data, dict) else []
     if referees:
         referee = referees[0]
         return {
@@ -201,7 +200,7 @@ def get_referee_stats(fixture_id, api_key):
             'yellow_cards_avg': referee.get('statistics', {}).get('yellow_cards', {}).get('average', 0.0),
             'red_cards_avg': referee.get('statistics', {}).get('red_cards', {}).get('average', 0.0)
         }
-    return {}
+    return {'referee_id': None, 'yellow_cards_avg': 0.0, 'red_cards_avg': 0.0}
 
 def main():
     parser = argparse.ArgumentParser(description='Ingest maximum data from Sportmonks for predictions.')
