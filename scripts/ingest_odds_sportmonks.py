@@ -45,16 +45,35 @@ def get_current_season_id(league_id, api_key):
     print(f"[ingest_sportmonks] Season não encontrada para liga {league_id}")
     return None
 
-def generate_auto_aliases(api_key, leagues=[71, 72, 73, 8]):
+def generate_auto_aliases(api_key, leagues=[71, 72, 73, 8, 76]):
     """Gera aliases automáticos usando Sportmonks."""
     aliases = {
-        'atletico': 'Atlético Mineiro',
-        'athletic club': 'Athletic Club MG',
-        'sao paulo': 'São Paulo',
-        'vitoria': 'Vitória',
-        'vila nova': 'Vila Nova',
-        'aston villa': 'Aston Villa',
-        'manchester city': 'Manchester City'
+        "atletico": "Atlético Mineiro",
+        "athletic club": "Athletic Club MG",
+        "america": "América Mineiro",
+        "sao paulo": "São Paulo",
+        "vitoria": "Vitória",
+        "vila nova": "Vila Nova",
+        "aston villa": "Aston Villa",
+        "manchester city": "Manchester City",
+        "palmeiras": "Palmeiras",
+        "cruzeiro": "Cruzeiro",
+        "ceara": "Ceará",
+        "corinthians": "Corinthians",
+        "fluminense": "Fluminense",
+        "internacional": "Internacional",
+        "sport": "Sport",
+        "mirassol": "Mirassol",
+        "fortaleza": "Fortaleza",
+        "flamengo": "Flamengo",
+        "botafogo": "Botafogo",
+        "santos": "Santos",
+        "gremio": "Grêmio",
+        "juventude": "Juventude",
+        "crb": "CRB",
+        "bragantino": "Red Bull Bragantino",
+        "vasco da gama": "Vasco da Gama",
+        "ferroviaria": "Ferroviária"
     }
     for league_id in leagues:
         url = f"{SPORTMONKS_BASE_URL}/teams"
@@ -119,7 +138,7 @@ def get_fixtures_sportmonks(league_id, date_from, date_to, home_team_id, away_te
             home_id = participants[0].get('id')
             away_id = participants[1].get('id')
             print(f"[debug] Fixture: {fixture.get('name')} - home_id = {home_id} ({participants[0].get('name')}), away_id = {away_id} ({participants[1].get('name')})")
-            if home_id == home_team_id and away_id == away_team_id:
+            if (home_id == home_team_id and away_id == away_team_id) or (home_id == away_team_id and away_id == home_team_id):
                 return fixture
     return None
 
@@ -218,9 +237,9 @@ def get_referee_stats(fixture_id, api_key):
     return {'referee_id': None, 'yellow_cards_avg': 0.0, 'red_cards_avg': 0.0}
 
 def main():
-    parser = argparse.ArgumentParser(description='Ingest maximum data from Sportmonks for predictions.')
+    parser = argparse.ArgumentParser(description='Ingest data from Sportmonks for matches in matches_source.csv.')
     parser.add_argument('--rodada', required=True, help='Output directory')
-    parser.add_argument('--source_csv', required=True, help='Path to matches_norm.csv')
+    parser.add_argument('--source_csv', required=True, help='Path to matches_source.csv')
     parser.add_argument('--api_key', required=True, help='Sportmonks API key')
     parser.add_argument('--aliases_file', required=True, help='Path to auto_aliases.json')
     
@@ -233,12 +252,13 @@ def main():
     transfers_path = os.path.join(args.rodada, 'transfers.csv')
     referee_path = os.path.join(args.rodada, 'referee_stats.csv')
     
-    leagues = [71, 72, 73, 8]  # Série A, B, C, EPL
+    # Lista de ligas para buscar (atualize com IDs corretos após verificação)
+    leagues = [71, 72, 73, 8, 76]  # Inclui Série A, B, C, EPL, Copa do Brasil
     season_ids = {league: get_current_season_id(league, args.api_key) for league in leagues}
     print(f"[debug] Season IDs: {season_ids}")
     aliases = load_aliases(args.aliases_file, args.api_key)
     
-    # Ler matches_norm.csv
+    # Ler matches_source.csv
     if not os.path.exists(args.source_csv):
         raise FileNotFoundError(f"Arquivo {args.source_csv} não encontrado")
     matches_df = pd.read_csv(args.source_csv)
@@ -267,12 +287,13 @@ def main():
         home_team = row['home']
         away_team = row['away']
         match_date = row['date']
+        match_id = row['match_id']
         home_team_id = get_team_id_sportmonks(home_team, args.api_key, aliases)
         away_team_id = get_team_id_sportmonks(away_team, args.api_key, aliases)
         
         if not home_team_id or not away_team_id:
             print(f"[ingest_sportmonks] Time não encontrado para {home_team} x {away_team}, usando odds padrão")
-            odds = {'match_id': f"{home_team}_vs_{away_team}", 'home_odds': 2.0, 'draw_odds': 3.0, 'away_odds': 2.0}
+            odds = {'match_id': match_id, 'home_odds': 2.0, 'draw_odds': 3.0, 'away_odds': 2.0}
             odds['home_team'] = normalize_team_name(home_team)
             odds['away_team'] = normalize_team_name(away_team)
             odds['league_id'] = None
@@ -281,7 +302,7 @@ def main():
         
         # Stats de times (usar season_id da liga correspondente ou default)
         for league_id in leagues:
-            season_id = season_ids.get(league_id, 19735)
+            season_id = season_ids.get(league_id, 19735)  # Default season_id
             team_stats_data.append(get_team_stats(home_team_id, season_id, args.api_key))
             team_stats_data.append(get_team_stats(away_team_id, season_id, args.api_key))
         
@@ -297,7 +318,7 @@ def main():
                 date_to = (datetime.strptime(match_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
             except ValueError:
                 print(f"[ingest_sportmonks] Data inválida para {home_team} x {away_team}: {match_date}, usando odds padrão")
-                odds = {'match_id': f"{home_team}_vs_{away_team}", 'home_odds': 2.0, 'draw_odds': 3.0, 'away_odds': 2.0}
+                odds = {'match_id': match_id, 'home_odds': 2.0, 'draw_odds': 3.0, 'away_odds': 2.0}
                 odds['home_team'] = normalize_team_name(home_team)
                 odds['away_team'] = normalize_team_name(away_team)
                 odds['league_id'] = None
@@ -307,6 +328,7 @@ def main():
             fixture = get_fixtures_sportmonks(league_id, date_from, date_to, home_team_id, away_team_id, args.api_key)
             if fixture:
                 odds = get_odds_sportmonks(fixture['id'], args.api_key)
+                odds['match_id'] = match_id  # Usar match_id do CSV
                 odds['home_team'] = normalize_team_name(home_team)
                 odds['away_team'] = normalize_team_name(away_team)
                 odds['league_id'] = league_id
@@ -322,7 +344,7 @@ def main():
         
         if not found:
             print(f"[ingest_sportmonks] Nenhuma odds encontrada para {home_team} x {away_team}, usando odds padrão")
-            odds = {'match_id': f"{home_team}_vs_{away_team}", 'home_odds': 2.0, 'draw_odds': 3.0, 'away_odds': 2.0}
+            odds = {'match_id': match_id, 'home_odds': 2.0, 'draw_odds': 3.0, 'away_odds': 2.0}
             odds['home_team'] = normalize_team_name(home_team)
             odds['away_team'] = normalize_team_name(away_team)
             odds['league_id'] = None
