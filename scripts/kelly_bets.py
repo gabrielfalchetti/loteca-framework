@@ -1,98 +1,65 @@
-# -*- coding: utf-8 -*-
-import argparse
-import sys
 import pandas as pd
+import sys
 import os
 
-def _log(msg: str) -> None:
-    print(f"[kelly_bets] {msg}", flush=True)
-
-def kelly_bets(probs_csv, odds_source, bankroll, fraction, cap, top_n, round_to, out_csv):
-    if not os.path.isfile(probs_csv):
-        _log(f"Arquivo {probs_csv} não encontrado")
-        sys.exit(10)
-
-    try:
-        probs = pd.read_csv(probs_csv)
-    except Exception as e:
-        _log(f"Erro ao ler {probs_csv}: {e}")
-        sys.exit(10)
-
-    # Verificar se odds_source existe
-    odds = pd.DataFrame(columns=['match_id', 'home_team', 'away_team', 'home_odds', 'draw_odds', 'away_odds'])
-    if os.path.isfile(odds_source):
-        try:
-            odds = pd.read_csv(odds_source)
-        except Exception as e:
-            _log(f"Erro ao ler {odds_source}: {e}, usando odds padrão")
-    else:
-        _log(f"Arquivo {odds_source} não encontrado, usando odds padrão")
-        # Criar odds padrão com base em probs
-        odds = pd.DataFrame({
-            'match_id': probs.get('match_id', range(len(probs))),
-            'home_team': probs.get('home_team', probs.get('team_home', pd.Series(['unknown']*len(probs)))),
-            'away_team': probs.get('away_team', probs.get('team_away', pd.Series(['unknown']*len(probs)))),
-            'home_odds': 2.0,
-            'draw_odds': 3.0,
-            'away_odds': 2.5
-        })
-
-    # Alinhar probs e odds por match_id ou teams
+def kelly_bets(probs_path, odds_source_path, bankroll, fraction, cap, top_n, round_to, out_path):
+    # Carregar DataFrames com verificações
+    if not os.path.exists(probs_path):
+        raise FileNotFoundError(f"Arquivo {probs_path} não encontrado. Verifique etapas upstream.")
+    probs_df = pd.read_csv(probs_path)
+    print(f"Colunas em {probs_path}: {probs_df.columns.tolist()}")  # Debug: mostre isso no log do workflow
+    
+    if not os.path.exists(odds_source_path):
+        raise FileNotFoundError(f"Arquivo {odds_source_path} não encontrado. Verifique geração de odds_consensus.csv.")
+    odds_df = pd.read_csv(odds_source_path)
+    if odds_df.empty:
+        raise ValueError(f"{odds_source_path} está vazio. Sem dados de odds para processar.")
+    print(f"Colunas em {odds_source_path}: {odds_df.columns.tolist()}")  # Debug: identifique colunas reais
+    print(f"Primeiras linhas de odds:\n{odds_df.head()}")  # Debug: estrutura dos dados
+    
+    # Identificar coluna de ID comum (flexível para variações)
+    possible_id_cols = ['match_id', 'id', 'fixture_id', 'event_id', 'game_id']
+    probs_id_col = next((col for col in possible_id_cols if col in probs_df.columns), None)
+    odds_id_col = next((col for col in possible_id_cols if col in odds_df.columns), None)
+    
+    if not probs_id_col:
+        raise ValueError(f"Nenhuma coluna de ID encontrada em {probs_path}. Colunas disponíveis: {probs_df.columns.tolist()}")
+    if not odds_id_col:
+        raise ValueError(f"Nenhuma coluna de ID encontrada em {odds_source_path}. Colunas disponíveis: {odds_df.columns.tolist()}")
+    
+    if probs_id_col != odds_id_col:
+        print(f"Aviso: Usando '{probs_id_col}' em probs e '{odds_id_col}' em odds. Renomeando para padronizar.")
+        odds_df = odds_df.rename(columns={odds_id_col: 'match_id'})
+        odds_id_col = 'match_id'
+        probs_df = probs_df.rename(columns={probs_id_col: 'match_id'})
+        probs_id_col = 'match_id'
+    
+    # Merge automático em vez de loop frágil (mais eficiente e seguro)
+    merged_df = pd.merge(probs_df, odds_df, on='match_id', how='inner')
+    if merged_df.empty:
+        raise ValueError("Nenhuma correspondência entre probs e odds. Verifique IDs ou fontes de dados (ex.: Sportmonks fixtures).")
+    
+    print(f"Merge realizado: {len(merged_df)} partidas correspondentes.")  # Debug
+    
+    # Agora, processe o merged_df em vez de loop manual
+    # Exemplo: Calcule Kelly para cada linha (ajuste conforme o resto do seu código)
     bets = []
-    for _, prob_row in probs.iterrows():
-        match_id = prob_row.get('match_id', 0)
-        home_team = prob_row.get('home_team', prob_row.get('team_home', 'unknown'))
-        away_team = prob_row.get('away_team', prob_row.get('team_away', 'unknown'))
-        home_prob = prob_row.get('home_prob_calibrated', prob_row.get('home_prob', 0.33))
-        draw_prob = prob_row.get('draw_prob_calibrated', prob_row.get('draw_prob', 0.33))
-        away_prob = prob_row.get('away_prob_calibrated', prob_row.get('away_prob', 0.34))
-        # Encontrar odds correspondentes
-        odds_row = odds[(odds['match_id'] == match_id) | 
-                       ((odds['home_team'] == home_team) & (odds['away_team'] == away_team))].iloc[0] if not odds.empty else None
-        if odds_row is not None:
-            home_odds = odds_row['home_odds']
-            draw_odds = odds_row['draw_odds']
-            away_odds = odds_row['away_odds']
-        else:
-            home_odds = 2.0
-            draw_odds = 3.0
-            away_odds = 2.5
-            _log(f"Sem odds para {home_team} x {away_team}, usando odds padrão")
-
-        kelly_home = max(0, (home_prob * home_odds - 1) / (home_odds - 1)) * fraction
-        kelly_draw = max(0, (draw_prob * draw_odds - 1) / (draw_odds - 1)) * fraction
-        kelly_away = max(0, (away_prob * away_odds - 1) / (away_odds - 1)) * fraction
-        kelly_home = min(kelly_home, cap)
-        kelly_draw = min(kelly_draw, cap)
-        kelly_away = min(kelly_away, cap)
-        bets.append({
-            'match_id': match_id,
-            'home_team': home_team,
-            'away_team': away_team,
-            'bet_home': round(bankroll * kelly_home, round_to),
-            'bet_draw': round(bankroll * kelly_draw, round_to),
-            'bet_away': round(bankroll * kelly_away, round_to)
-        })
-
-    df_bets = pd.DataFrame(bets)
-    df_bets = df_bets.sort_values(by=['bet_home', 'bet_draw', 'bet_away'], ascending=False).head(top_n)
-    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
-    df_bets.to_csv(out_csv, index=False)
-    _log(f"Apostas Kelly salvas em {out_csv}")
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--probs", required=True)
-    ap.add_argument("--odds_source", required=True)
-    ap.add_argument("--bankroll", type=float, required=True)
-    ap.add_argument("--fraction", type=float, required=True)
-    ap.add_argument("--cap", type=float, required=True)
-    ap.add_argument("--top_n", type=int, required=True)
-    ap.add_argument("--round_to", type=int, required=True)
-    ap.add_argument("--out", required=True)
-    args = ap.parse_args()
-
-    kelly_bets(args.probs, args.odds_source, args.bankroll, args.fraction, args.cap, args.top_n, args.round_to, args.out)
-
-if __name__ == "__main__":
-    main()
+    for _, row in merged_df.iterrows():
+        match_id = row['match_id']
+        # Assuma colunas como 'home_prob', 'away_prob', 'draw_prob' em probs; 'home_odds', etc. em odds
+        # Calcule edge, kelly_fraction, etc. (implemente sua lógica aqui)
+        edge = (row['home_prob'] * (row['home_odds'] - 1) - (1 - row['home_prob']))  # Exemplo simplificado
+        kelly_frac = fraction * (edge / (row['home_odds'] - 1)) if edge > 0 else 0
+        kelly_frac = min(kelly_frac, cap)  # Cap
+        stake = round(bankroll * kelly_frac, round_to)
+        if stake > 0:
+            bets.append({
+                'match_id': match_id,
+                'stake': stake,
+                # Adicione outras colunas...
+            })
+    
+    # Salve top_n
+    top_bets = sorted(bets, key=lambda x: x['stake'], reverse=True)[:top_n]
+    pd.DataFrame(top_bets).to_csv(out_path, index=False)
+    print(f"Bets salvas em {out_path}: {len(top_bets)} apostas.")
