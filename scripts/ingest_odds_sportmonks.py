@@ -197,7 +197,6 @@ def main():
     parser.add_argument('--rodada', required=True, help='Output directory')
     parser.add_argument('--source_csv', required=True, help='Path to matches_norm.csv')
     parser.add_argument('--api_key', required=True, help='Sportmonks API key')
-    parser.add_argument('--regions', required=True, help='Regions (not used, kept for compatibility)')
     parser.add_argument('--aliases_file', required=True, help='Path to auto_aliases.json')
     
     args = parser.parse_args()
