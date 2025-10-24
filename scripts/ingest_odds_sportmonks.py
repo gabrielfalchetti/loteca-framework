@@ -33,6 +33,22 @@ def get_api_data(url, api_key, params=None):
         print(f"[ingest_sportmonks] Erro na chamada API {url}: {e}")
     return []
 
+def list_available_leagues(api_key):
+    """Lista ligas disponíveis para verificar IDs válidos."""
+    url = f"{SPORTMONKS_BASE_URL}/leagues"
+    params = {'include': 'country'}
+    data = get_api_data(url, api_key, params)
+    leagues = []
+    for league in data:
+        if league.get('country', {}).get('name') == 'Brazil':
+            leagues.append({
+                'league_id': league.get('id'),
+                'name': league.get('name'),
+                'season_id': league.get('current_season_id', None)
+            })
+    print(f"[ingest_sportmonks] Ligas brasileiras disponíveis: {leagues}")
+    return leagues
+
 def generate_auto_aliases(api_key, leagues=[71, 72, 73]):
     """Gera aliases automáticos usando Sportmonks."""
     aliases = {}
@@ -89,7 +105,7 @@ def get_fixtures_sportmonks(league_id, date_from, date_to, home_team_id, away_te
             'date_from': date_from,
             'date_to': date_to,
             'page': page,
-            'include': 'participants;weather_report;referees;venue'
+            'include': 'participants;weatherReport;referees;venue'
         }
         data = get_api_data(url, api_key, params)
         fixtures.extend(data)
@@ -173,14 +189,14 @@ def get_player_stats(fixture_id, api_key):
 def get_transfers(team_id, api_key):
     """Extrai transferências recentes."""
     url = f"{SPORTMONKS_BASE_URL}/transfers"
-    params = {'filters': f'teamIds:{team_id}', 'include': 'player;from_team;to_team'}
+    params = {'filters': f'teamIds:{team_id}', 'include': 'player;fromTeam;toTeam'}
     data = get_api_data(url, api_key, params)
     transfers = []
     for transfer in data:
         transfers.append({
             'player_id': transfer.get('player', {}).get('id'),
-            'from_team': transfer.get('from_team', {}).get('name'),
-            'to_team': transfer.get('to_team', {}).get('name'),
+            'from_team': transfer.get('fromTeam', {}).get('name'),
+            'to_team': transfer.get('toTeam', {}).get('name'),
             'date': transfer.get('date')
         })
     return transfers
@@ -211,6 +227,9 @@ def main():
     
     args = parser.parse_args()
     
+    # Verificar ligas disponíveis
+    available_leagues = list_available_leagues(args.api_key)
+    
     # Configurações
     output_path = os.path.join(args.rodada, 'odds_consensus.csv')
     team_stats_path = os.path.join(args.rodada, 'team_stats.csv')
@@ -219,7 +238,7 @@ def main():
     referee_path = os.path.join(args.rodada, 'referee_stats.csv')
     
     date_from = datetime.now().strftime('%Y-%m-%d')
-    date_to = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d')
+    date_to = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')  # Expandido para 7 dias
     season_id = 19735  # Brasileirão 2025, ajuste se necessário
     leagues = [71, 72, 73]  # Série A, B, C
     aliases = load_aliases(args.aliases_file, args.api_key)
