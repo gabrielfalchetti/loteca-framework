@@ -108,7 +108,7 @@ jobs:
           [ -f scripts/generate_consensus.py ] || { echo "::error::scripts/generate_consensus.py not found"; exit 6; }
           python -m scripts.generate_consensus \
             --theodds_file "${OUT_DIR}/odds_theoddsapi.csv" \
-            --apifootball_file "${OUT_DIR}/odds_sportmonks.csv" \
+            --sportmonks_file "${OUT_DIR}/odds_sportmonks.csv" \
             --output_file "${CONSENSUS_CSV}"
       - name: 7 Bivariate Estimator
         run: |
