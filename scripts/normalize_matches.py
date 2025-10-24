@@ -1,52 +1,57 @@
-# -*- coding: utf-8 -*-
 import pandas as pd
-import argparse
+import unidecode
 import os
+import argparse
 
-def _log(msg: str) -> None:
-    print(f"[normalize_matches] {msg}", flush=True)
-
-def normalize_matches(in_csv, out_csv):
-    if not os.path.isfile(in_csv):
-        _log(f"Arquivo {in_csv} não encontrado")
-        return
-
-    try:
-        df = pd.read_csv(in_csv)
-        _log(f"Conteúdo de {in_csv}:\n{df.to_string()}")
-    except Exception as e:
-        _log(f"Erro ao ler {in_csv}: {e}")
-        return
-
-    # Verificar colunas esperadas
-    required_columns = ['home', 'away']
-    if not all(col in df.columns for col in required_columns):
-        _log(f"Erro: {in_csv} não contém as colunas esperadas: {required_columns}")
-        return
-
-    # Filtrar apenas jogos brasileiros (se houver coluna 'league')
-    brazilian_leagues = ['Série A', 'Série B', 'Copa do Brasil']
-    if 'league' in df.columns:
-        df = df[df['league'].isin(brazilian_leagues)]
-        _log(f"Filtrado {len(df)} jogos brasileiros")
-    else:
-        _log("Aviso: coluna 'league' não encontrada, processando todos os jogos")
-
-    # Normalização dos nomes dos times
-    df['home'] = df['home'].str.strip().str.lower()
-    df['away'] = df['away'].str.strip().str.lower()
-
-    # Salvar o resultado
-    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
-    df.to_csv(out_csv, index=False)
-    _log(f"Arquivo salvo em {out_csv}")
+def normalize_team_name(name):
+    """Normaliza nome do time, removendo estado e acentos."""
+    if not name:
+        return ""
+    if '/' in name:
+        name = name.split('/')[0].strip()
+    name = unidecode.unidecode(name.lower())
+    return name.capitalize()
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--in_csv", required=True)
-    ap.add_argument("--out_csv", required=True)
-    args = ap.parse_args()
-    normalize_matches(args.in_csv, args.out_csv)
+    parser = argparse.ArgumentParser(description='Normaliza arquivo de matches.')
+    parser.add_argument('--source_csv', required=True, help='Caminho para matches_source.csv')
+    parser.add_argument('--out_dir', required=True, help='Diretório de saída')
+    parser.add_argument('--season', required=True, help='Temporada (ex.: 2025)')
+    
+    args = parser.parse_args()
+    
+    # Ler o CSV fonte
+    if not os.path.exists(args.source_csv):
+        raise FileNotFoundError(f"Arquivo {args.source_csv} não encontrado")
+    df = pd.read_csv(args.source_csv)
+    
+    # Assumindo colunas no source_csv: ex. 'id', 'home_team', 'away_team', 'match_date'
+    # Renomear e normalizar
+    if 'id' in df.columns:
+        df = df.rename(columns={'id': 'match_id'})
+    else:
+        # Se não tiver match_id, gerar um simples
+        df['match_id'] = range(1, len(df) + 1)
+    
+    if 'home_team' in df.columns:
+        df = df.rename(columns={'home_team': 'home'})
+    if 'away_team' in df.columns:
+        df = df.rename(columns={'away_team': 'away'})
+    if 'match_date' in df.columns:
+        df = df.rename(columns={'match_date': 'date'})
+    
+    # Normalizar nomes de times
+    df['home'] = df['home'].apply(normalize_team_name)
+    df['away'] = df['away'].apply(normalize_team_name)
+    
+    # Selecionar apenas colunas necessárias
+    df = df[['match_id', 'home', 'away', 'date']]
+    
+    # Salvar no out_dir
+    output_path = os.path.join(args.out_dir, 'matches_norm.csv')
+    os.makedirs(args.out_dir, exist_ok=True)
+    df.to_csv(output_path, index=False)
+    print(f"[normalize_matches] Arquivo normalizado salvo em {output_path}")
 
 if __name__ == "__main__":
     main()
