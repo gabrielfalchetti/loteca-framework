@@ -1,57 +1,146 @@
-name: Loteca Pipeline
-
-on:
-  workflow_dispatch:
-    inputs:
-      rodada:
-        description: "Identificador da rodada (ex.: 2025-09-27_1213)"
-        required: true
-  push:
-    branches:
-      - main
-
+name: Full Loteca Framework Pipeline
+on: [push]
 jobs:
-  run-pipeline:
+  pipeline:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Normalize Matches
         run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy
+          set -euo pipefail
+          [ -f scripts/normalize_matches.py ] || { echo "::error::scripts/normalize_matches.py not found"; exit 5; }
+          python -m scripts.normalize_matches \
+            --source_csv "${{ env.SOURCE_CSV }}" \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --season "${{ env.SEASON }}"
 
-      - name: HOTFIX — corrigir merge inseguro no ingest_odds.py
+      - name: Validate Normalized CSV Columns
         run: |
-          python scripts/patch_merge_hotfix.py
-          echo '>>> Verificação do merge em scripts/ingest_odds.py'
-          nl -ba scripts/engest_odds.py 2>/dev/null || true
-          nl -ba scripts/ingest_odds.py | sed -n '1,220p' | grep -n 'merge(.*on=\["home_n","away_n"\].*how="left")' || true
+          set -euo pipefail
+          python -c "import pandas as pd; df = pd.read_csv('${{ env.SOURCE_CSV_NORM }}'); assert set(['match_id', 'home', 'away', 'date']).issubset(df.columns), 'Missing required columns in matches_norm.csv'"
 
-      - name: Prepare sample input if missing
+      - name: Ingest Odds from Sportmonks
         run: |
-          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-          mkdir -p "data/in/$RODADA" "data/out/$RODADA"
-          FILE="data/in/$RODADA/matches_source.csv"
-          if [ ! -f "$FILE" ]; then
-            printf 'match_id,home,away,date\n1,Time A,Time B,2025-09-27\n2,Time C,Time D,2025-09-27\n' > "$FILE"
-            echo "Criado arquivo de exemplo: $FILE"
-          else
-            echo "Arquivo já existe: $FILE"
-          fi
+          set -euo pipefail
+          [ -f scripts/ingest_odds_sportmonks.py ] || { echo "::error::scripts/ingest_odds_sportmonks.py not found"; exit 5; }
+          python -m scripts.ingest_odds_sportmonks \
+            --rodada "${{ env.OUT_DIR }}" \
+            --source_csv "${{ env.SOURCE_CSV_NORM }}" \
+            --api_key "${{ secrets.SPORTMONKS_API_KEY }}" \
+            --aliases_file "${{ env.AUTO_ALIASES_JSON }}"
 
-      - name: Run ingest_odds_apifootball (placeholder resiliente)
+      - name: Generate Bivariate Analysis
         run: |
-          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-          python scripts/ingest_odds_apifootball_rapidapi.py --rodada "$RODADA"
+          set -euo pipefail
+          [ -f scripts/generate_bivariate.py ] || { echo "::error::scripts/generate_bivariate.py not found"; exit 5; }
+          python -m scripts.generate_bivariate \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --consensus_csv "${{ env.CONSENSUS_CSV }}" \
+            --bivariate_csv "${{ env.BIVARIATE_CSV }}"
 
-      - name: Run ingest_odds (final merge & consenso)
+      - name: Train Dynamic Model (including xG)
         run: |
-          RODADA="${{ github.event.inputs.rodada || '2025-09-27_1213' }}"
-          python scripts/ingest_odds.py --rodada "$RODADA"
+          set -euo pipefail
+          [ -f scripts/train_model.py ] || { echo "::error::scripts/train_model.py not found"; exit 5; }
+          python -m scripts.train_model \
+            --features_parquet "${{ env.FEATURES_PARQUET }}" \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --model_pkl "${{ env.MODEL_PKL }}" \
+            --state_json "${{ env.STATE_JSON }}" \
+            --season "${{ env.SEASON }}"
+
+      - name: Make Predictions
+        run: |
+          set -euo pipefail
+          [ -f scripts/make_predictions.py ] || { echo "::error::scripts/make_predictions.py not found"; exit 5; }
+          python -m scripts.make_predictions \
+            --model_pkl "${{ env.MODEL_PKL }}" \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --predictions_csv "${{ env.PREDICTIONS_CSV }}" \
+            --source_csv_norm "${{ env.SOURCE_CSV_NORM }}"
+
+      - name: Train Calibrator
+        run: |
+          set -euo pipefail
+          [ -f scripts/train_calibrator.py ] || { echo "::error::scripts/train_calibrator.py not found"; exit 5; }
+          python -m scripts.train_calibrator \
+            --train_calibrator "${{ env.TRAIN_CALIBRATOR }}" \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --calibrator_pkl "${{ env.CALIBRATOR_PKL }}" \
+            --predictions_csv "${{ env.PREDICTIONS_CSV }}"
+
+      - name: Generate Calibrated Predictions
+        run: |
+          set -euo pipefail
+          [ -f scripts/generate_calibrated_predictions.py ] || { echo "::error::scripts/generate_calibrated_predictions.py not found"; exit 5; }
+          python -m scripts.generate_calibrated_predictions \
+            --calibrator_pkl "${{ env.CALIBRATOR_PKL }}" \
+            --predictions_csv "${{ env.PREDICTIONS_CSV }}" \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --predictions_calib_csv "${{ env.PREDICTIONS_CALIB_CSV }}"
+
+      - name: Calculate Odds Consensus
+        run: |
+          set -euo pipefail
+          [ -f scripts/calculate_consensus.py ] || { echo "::error::scripts/calculate_consensus.py not found"; exit 5; }
+          python -m scripts.calculate_consensus \
+            --consensus_csv "${{ env.CONSENSUS_CSV }}" \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --predictions_calib_csv "${{ env.PREDICTIONS_CALIB_CSV }}"
+
+      - name: Apply Kelly Criterion Bets
+        run: |
+          set -euo pipefail
+          [ -f scripts/apply_kelly.py ] || { echo "::error::scripts/apply_kelly.py not found"; exit 5; }
+          python -m scripts.apply_kelly \
+            --bankroll "${{ env.BANKROLL }}" \
+            --kelly_fraction "${{ env.KELLY_FRACTION }}" \
+            --kelly_cap "${{ env.KELLY_CAP }}" \
+            --kelly_top_n "${{ env.KELLY_TOP_N }}" \
+            --round_to "${{ env.ROUND_TO }}" \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --consensus_csv "${{ env.CONSENSUS_CSV }}" \
+            --kelly_bets_csv "${{ env.KELLY_BETS_CSV }}"
+
+      - name: Generate Loteca Card
+        run: |
+          set -euo pipefail
+          [ -f scripts/generate_loteca_card.py ] || { echo "::error::scripts/generate_loteca_card.py not found"; exit 5; }
+          python -m scripts.generate_loteca_card \
+            --out_dir "${{ env.OUT_DIR }}" \
+            --predictions_calib_csv "${{ env.PREDICTIONS_CALIB_CSV }}" \
+            --loteca_card_csv "${{ env.LOTECA_CARD_CSV }}"
+
+    env:
+      SEASON: 2025
+      LOOKAHEAD_DAYS: 3
+      BANKROLL: 1000
+      KELLY_FRACTION: 0.5
+      KELLY_CAP: 0.1
+      KELLY_TOP_N: 14
+      ROUND_TO: 1
+      TRAIN_CALIBRATOR: true
+      SOURCE_CSV: data/in/matches_source.csv
+      OUT_DIR: data/out/18774723488
+      FEATURES_PARQUET: data/history/features.parquet
+      SOURCE_CSV_NORM: data/out/18774723488/matches_norm.csv
+      AUTO_ALIASES_JSON: data/aliases/auto_aliases.json
+      BIVARIATE_CSV: data/out/18774723488/bivariate.csv
+      MODEL_PKL: data/out/18774723488/dynamic_model.pkl
+      STATE_JSON: data/out/18774723488/state_params.json
+      PREDICTIONS_CSV: data/out/18774723488/predictions.csv
+      CALIBRATOR_PKL: data/out/18774723488/calibrator.pkl
+      PREDICTIONS_CALIB_CSV: data/out/18774723488/predictions_calibrated.csv
+      CONSENSUS_CSV: data/out/18774723488/odds_consensus.csv
+      KELLY_BETS_CSV: data/out/18774723488/bets_kelly.csv
+      LOTECA_CARD_CSV: data/out/18774723488/loteca_card.csv
+      pythonLocation: /opt/hostedtoolcache/Python/3.11.13/x64
+      PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.11.13/x64/lib/pkgconfig
+      Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.13/x64
+      Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.13/x64
+      Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.13/x64
+      LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.11.13/x64/lib
