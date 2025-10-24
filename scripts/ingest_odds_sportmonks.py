@@ -28,17 +28,17 @@ def ingest_odds_sportmonks(rodada, source_csv, api_key, regions, aliases_file, a
         _log(f"Erro ao ler {aliases_file}: {e}")
         aliases = {}
 
-    # Verificar validade da chave com endpoint válido
+    # Verificar validade da chave com endpoint válido (/v3/core/timezones)
     try:
-        status_url = f"https://api.sportmonks.com/v3/football/timezones?api_token={api_key}"
+        status_url = f"https://api.sportmonks.com/v3/core/timezones?api_token={api_key}"
         response = requests.get(status_url, timeout=10)
         _log(f"Resposta do /timezones: {response.status_code} - {response.text}")
         response.raise_for_status()
         status = response.json()
         _log(f"Status do Sportmonks: {json.dumps(status, indent=2)}")
     except Exception as e:
-        _log(f"Erro ao verificar Sportmonks: {e}")
-        _log("Chave SPORTMONKS_API_KEY inválida. Usando valores padrão para todos os jogos.")
+        _log(f"Erro ao verificar API Sportmonks: {e}")
+        _log("Chave SPORTMONKS_API_KEY inválida ou endpoint indisponível. Usando valores padrão para todos os jogos.")
         odds_data = []
         for _, match in matches.iterrows():
             home_team = match.get('home', match.get('team_home', ''))
@@ -65,33 +65,42 @@ def ingest_odds_sportmonks(rodada, source_csv, api_key, regions, aliases_file, a
         home_aliases = aliases.get(norm_home, [home_team])
         away_aliases = aliases.get(norm_away, [away_team])
 
-        # Exemplo para Série A (league=71)
-        try:
-            fixtures_url = f"https://api.sportmonks.com/v3/football/fixtures?api_token={api_key}&timezone=America/Sao_Paulo&include=participants;odds"
-            _log(f"Tentando fixtures para {home_team} x {away_team}")
-            response = requests.get(fixtures_url, timeout=10)
-            response.raise_for_status()
-            fixtures = response.json()
-            _log(f"Resposta de fixtures: {len(fixtures.get('data', []))} jogos encontrados")
-            for fixture in fixtures.get('data', []):
-                participants = fixture.get('participants', {})
-                if len(participants) >= 2:
-                    home_team_api = participants[0].get('name', '').lower()
-                    away_team_api = participants[1].get('name', '').lower()
-                    if any(h.lower() in home_team_api for h in home_aliases) and \
-                       any(a.lower() in away_team_api for a in away_aliases):
-                        odds = fixture.get('odds', {})
-                        odds_data.append({
-                            'home_team': home_team,
-                            'away_team': away_team,
-                            'home_odds': odds.get('1X2', {}).get('home', 2.0),
-                            'draw_odds': odds.get('1X2', {}).get('draw', 3.0),
-                            'away_odds': odds.get('1X2', {}).get('away', 2.5)
-                        })
-                        _log(f"Odds encontrados para {home_team} x {away_team}")
-                        break
-        except Exception as e:
-            _log(f"Erro para {home_team} x {away_team}: {e}")
+        # Filtrar por ligas brasileiras (ex.: Série A = 71, Série B = 72, Copa do Brasil = 73)
+        leagues = [71, 72, 73]  # IDs das ligas brasileiras
+        found = False
+        for league_id in leagues:
+            try:
+                fixtures_url = f"https://api.sportmonks.com/v3/football/fixtures?api_token={api_key}&timezone=America/Sao_Paulo&filters=leagues:{league_id}&include=participants;odds"
+                _log(f"Tentando fixtures para liga {league_id} e {home_team} x {away_team}")
+                response = requests.get(fixtures_url, timeout=10)
+                response.raise_for_status()
+                fixtures = response.json()
+                _log(f"Resposta de fixtures para liga {league_id}: {len(fixtures.get('data', []))} jogos encontrados")
+                for fixture in fixtures.get('data', []):
+                    participants = fixture.get('participants', [])
+                    if len(participants) >= 2:
+                        home_team_api = participants[0].get('name', '').lower()
+                        away_team_api = participants[1].get('name', '').lower()
+                        if any(h.lower() in home_team_api for h in home_aliases) and \
+                           any(a.lower() in away_team_api for a in away_aliases):
+                            odds = fixture.get('odds', {}).get('data', [{}])[0] if fixture.get('odds', {}).get('data') else {}
+                            odds_values = {o['label']: o['value'] for o in odds.get('odds', []) if o.get('label') in ['1', 'X', '2']}
+                            odds_data.append({
+                                'home_team': home_team,
+                                'away_team': away_team,
+                                'home_odds': float(odds_values.get('1', 2.0)),
+                                'draw_odds': float(odds_values.get('X', 3.0)),
+                                'away_odds': float(odds_values.get('2', 2.5))
+                            })
+                            _log(f"Odds encontrados na liga {league_id} para {home_team} x {away_team}")
+                            found = True
+                            break
+                if found:
+                    break
+            except Exception as e:
+                _log(f"Erro na liga {league_id} para {home_team} x {away_team}: {e}")
+        if not found:
+            _log(f"Nenhuma odds encontrada para {home_team} x {away_team}, usando valores padrão")
             odds_data.append({
                 'home_team': home_team,
                 'away_team': away_team,
