@@ -110,16 +110,18 @@ def load_aliases(aliases_file, api_key):
             json.dump(aliases, f, indent=4)
         return aliases
 
-def get_team_id_sportmonks(team_name, api_key, aliases):
-    """Busca ID do time no Sportmonks, usando aliases se necessário."""
+def get_team_id_sportmonks(team_name, api_key, aliases, leagues=[71, 72, 73, 76, 8]):
+    """Busca ID do time no Sportmonks, usando aliases se necessário, filtrando por ligas brasileiras."""
     team_name_normalized = normalize_team_name(team_name)
     alias = aliases.get(team_name_normalized.lower(), team_name_normalized)
-    url = f"{SPORTMONKS_BASE_URL}/teams/search/{alias}"
-    data = get_api_data(url, api_key)
-    if data and isinstance(data, list) and len(data) > 0:
-        team_id = data[0]['id']
-        print(f"[debug] Time {team_name} (alias: {alias}) encontrado com ID: {team_id}")
-        return team_id
+    for league_id in leagues:
+        url = f"{SPORTMONKS_BASE_URL}/teams/search/{alias}"
+        params = {'filters': f'leagueIds:{league_id}'}
+        data = get_api_data(url, api_key, params)
+        if data and isinstance(data, list) and len(data) > 0:
+            team_id = data[0]['id']
+            print(f"[debug] Time {team_name} (alias: {alias}) encontrado com ID: {team_id} na liga {league_id}")
+            return team_id
     print(f"[ingest_sportmonks] Time não encontrado no Sportmonks: {team_name} (alias: {alias})")
     return None
 
@@ -141,17 +143,21 @@ def fetch_matches_sportmonks(league_id, date_from, date_to, home_team_id, away_t
         for fixture in data:
             participants = fixture.get('participants', [{}])
             if len(participants) >= 2:
-                match = {
-                    'fixture_id': fixture.get('id'),
-                    'home_team_id': participants[0].get('id'),
-                    'home_team_name': normalize_team_name(participants[0].get('name', '')),
-                    'away_team_id': participants[1].get('id'),
-                    'away_team_name': normalize_team_name(participants[1].get('name', '')),
-                    'date': fixture.get('starting_at', '').split(' ')[0],
-                    'league_id': league_id
-                }
-                matches.append(match)
-                print(f"[debug] Partida encontrada na API: {match['home_team_name']} x {match['away_team_name']} (league_id: {league_id}, date: {match['date']})")
+                fixture_home_id = participants[0].get('id')
+                fixture_away_id = participants[1].get('id')
+                # Restrict to only matches where both teams are the exact pair
+                if set([fixture_home_id, fixture_away_id]) == set([home_team_id, away_team_id]):
+                    match = {
+                        'fixture_id': fixture.get('id'),
+                        'home_team_id': fixture_home_id,
+                        'home_team_name': normalize_team_name(participants[0].get('name', '')),
+                        'away_team_id': fixture_away_id,
+                        'away_team_name': normalize_team_name(participants[1].get('name', '')),
+                        'date': fixture.get('starting_at', '').split(' ')[0],
+                        'league_id': league_id
+                    }
+                    matches.append(match)
+                    print(f"[debug] Partida encontrada na API: {match['home_team_name']} x {match['away_team_name']} (league_id: {league_id}, date: {match['date']})")
         if len(data) < 100:  # Assume 100 por página
             break
         page += 1
@@ -336,8 +342,8 @@ def main():
         match_date = row['date']
         match_id = row['match_id']
         
-        home_team_id = get_team_id_sportmonks(home_team, args.api_key, aliases)
-        away_team_id = get_team_id_sportmonks(away_team, args.api_key, aliases)
+        home_team_id = get_team_id_sportmonks(home_team, args.api_key, aliases, leagues)
+        away_team_id = get_team_id_sportmonks(away_team, args.api_key, aliases, leagues)
         
         if not home_team_id or not away_team_id:
             print(f"[ingest_sportmonks] Time não encontrado para {home_team} x {away_team}, usando odds padrão")
