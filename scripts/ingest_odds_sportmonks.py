@@ -52,6 +52,7 @@ def generate_auto_aliases(api_key, leagues=[71, 72, 73, 76, 8]):
     aliases = {
         "atletico": "Atlético Mineiro",
         "athletic club": "Athletic Club MG",
+        "athletic club mg": "Athletic Club MG",
         "america": "América Mineiro",
         "sao paulo": "São Paulo",
         "vitoria": "Vitória",
@@ -74,6 +75,7 @@ def generate_auto_aliases(api_key, leagues=[71, 72, 73, 76, 8]):
         "juventude": "Juventude",
         "crb": "CRB",
         "bragantino": "Red Bull Bragantino",
+        "red bull bragantino": "Red Bull Bragantino",
         "vasco da gama": "Vasco da Gama",
         "ferroviaria": "Ferroviária"
     }
@@ -161,6 +163,14 @@ def match_fixtures(csv_row, api_matches, aliases):
     away_team = normalize_team_name(csv_row['away'])
     csv_date = csv_row['date']
     
+    try:
+        csv_date_obj = datetime.strptime(csv_date, '%Y-%m-%d')
+        date_window = [csv_date_obj + timedelta(days=x) for x in [-1, 0, 1]]
+        date_window_str = [d.strftime('%Y-%m-%d') for d in date_window]
+    except ValueError:
+        print(f"[ingest_sportmonks] Data inválida no CSV para {home_team} x {away_team}: {csv_date}")
+        return None, False
+    
     home_alias = aliases.get(home_team.lower(), home_team)
     away_alias = aliases.get(away_team.lower(), away_team)
     
@@ -169,16 +179,19 @@ def match_fixtures(csv_row, api_matches, aliases):
         api_away = normalize_team_name(api_match['away_team_name'])
         api_date = api_match['date']
         
-        # Verifica correspondência de times (considerando aliases) e data
-        if (api_home.lower() == home_alias.lower() or api_home.lower() == home_team.lower()) and \
-           (api_away.lower() == away_alias.lower() or api_away.lower() == away_team.lower()) and \
-           api_date == csv_date:
-            return api_match, False  # Não invertido
-        elif (api_home.lower() == away_alias.lower() or api_home.lower() == away_team.lower()) and \
-             (api_away.lower() == home_alias.lower() or api_away.lower() == home_team.lower()) and \
-             api_date == csv_date:
-            return api_match, True  # Invertido
+        # Verifica correspondência de times (considerando aliases) e data na janela
+        if (api_home.lower() in [home_alias.lower(), home_team.lower()] and
+            api_away.lower() in [away_alias.lower(), away_team.lower()] and
+            api_date in date_window_str):
+            print(f"[debug] Correspondência encontrada: {home_team} x {away_team} (CSV) com {api_home} x {api_away} (API)")
+            return api_match, False
+        elif (api_home.lower() in [away_alias.lower(), away_team.lower()] and
+              api_away.lower() in [home_alias.lower(), home_team.lower()] and
+              api_date in date_window_str):
+            print(f"[debug] Correspondência invertida encontrada: {home_team} x {away_team} (CSV) com {api_home} x {api_away} (API)")
+            return api_match, True
     
+    print(f"[ingest_sportmonks] Nenhuma correspondência encontrada para {home_team} x {away_team} em {csv_date}")
     return None, False
 
 def get_odds_sportmonks(fixture_id, api_key):
@@ -281,6 +294,7 @@ def main():
     parser.add_argument('--source_csv', required=True, help='Path to matches_norm.csv')
     parser.add_argument('--api_key', required=True, help='Sportmonks API key')
     parser.add_argument('--aliases_file', required=True, help='Path to auto_aliases.json')
+    parser.add_argument('--lookahead_days', type=int, default=3, help='Days to look ahead for fixtures')
     
     args = parser.parse_args()
     
@@ -311,10 +325,10 @@ def main():
     
     # Buscar todas as partidas disponíveis na API
     api_matches = []
+    date_from = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    date_to = (datetime.now() + timedelta(days=args.lookahead_days)).strftime('%Y-%m-%d')
     for league_id in leagues:
         try:
-            date_from = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-            date_to = (datetime.now() + timedelta(days=args.lookahead_days)).strftime('%Y-%m-%d')
             matches = fetch_matches_sportmonks(league_id, date_from, date_to, args.api_key)
             api_matches.extend(matches)
         except Exception as e:
