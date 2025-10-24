@@ -123,14 +123,15 @@ def get_team_id_sportmonks(team_name, api_key, aliases):
     print(f"[ingest_sportmonks] Time não encontrado no Sportmonks: {team_name} (alias: {alias})")
     return None
 
-def fetch_matches_sportmonks(league_id, date_from, date_to, api_key):
-    """Busca todas as partidas disponíveis na API para uma liga e intervalo de datas."""
+def fetch_matches_sportmonks(league_id, date_from, date_to, home_team_id, away_team_id, api_key):
+    """Busca partidas na API restritas a dois times específicos."""
     page = 1
     matches = []
+    team_ids_str = f"{home_team_id},{away_team_id}"
     while True:
         url = f"{SPORTMONKS_BASE_URL}/fixtures/between/{date_from}/{date_to}"
         params = {
-            'filters': f'leagueIds:{league_id}',
+            'filters': f'leagueIds:{league_id};participantIds:{team_ids_str}',
             'page': page,
             'include': 'participants;league'
         }
@@ -183,12 +184,12 @@ def match_fixtures(csv_row, api_matches, aliases):
         if (api_home.lower() in [home_alias.lower(), home_team.lower()] and
             api_away.lower() in [away_alias.lower(), away_team.lower()] and
             api_date in date_window_str):
-            print(f"[debug] Correspondência encontrada: {home_team} x {away_team} (CSV) com {api_home} x {api_away} (API)")
+            print(f"[debug] Correspondência encontrada: {home_team} x {away_team} (CSV) com {api_home} x {api_away} (API) em {api_date}")
             return api_match, False
         elif (api_home.lower() in [away_alias.lower(), away_team.lower()] and
               api_away.lower() in [home_alias.lower(), home_team.lower()] and
               api_date in date_window_str):
-            print(f"[debug] Correspondência invertida encontrada: {home_team} x {away_team} (CSV) com {api_home} x {api_away} (API)")
+            print(f"[debug] Correspondência invertida encontrada: {home_team} x {away_team} (CSV) com {api_home} x {api_away} (API) em {api_date}")
             return api_match, True
     
     print(f"[ingest_sportmonks] Nenhuma correspondência encontrada para {home_team} x {away_team} em {csv_date}")
@@ -291,7 +292,7 @@ def get_referee_stats(fixture_id, api_key):
 def main():
     parser = argparse.ArgumentParser(description='Ingest maximum data from Sportmonks for predictions.')
     parser.add_argument('--rodada', required=True, help='Output directory')
-    parser.add_argument('--source_csv', required=True, help='Path to matches_norm.csv')
+    parser.add_argument('--source_csv', required=True, help='Path to matches_source.csv')
     parser.add_argument('--api_key', required=True, help='Sportmonks API key')
     parser.add_argument('--aliases_file', required=True, help='Path to auto_aliases.json')
     parser.add_argument('--lookahead_days', type=int, default=3, help='Days to look ahead for fixtures')
@@ -311,7 +312,7 @@ def main():
     print(f"[debug] Season IDs: {season_ids}")
     aliases = load_aliases(args.aliases_file, args.api_key)
     
-    # Ler matches_norm.csv
+    # Ler matches_source.csv
     if not os.path.exists(args.source_csv):
         raise FileNotFoundError(f"Arquivo {args.source_csv} não encontrado")
     matches_df = pd.read_csv(args.source_csv)
@@ -322,17 +323,6 @@ def main():
     if not all(col in matches_df.columns for col in required_columns):
         missing = [col for col in required_columns if col not in matches_df.columns]
         raise ValueError(f"Colunas ausentes em {args.source_csv}: {missing}")
-    
-    # Buscar todas as partidas disponíveis na API
-    api_matches = []
-    date_from = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    date_to = (datetime.now() + timedelta(days=args.lookahead_days)).strftime('%Y-%m-%d')
-    for league_id in leagues:
-        try:
-            matches = fetch_matches_sportmonks(league_id, date_from, date_to, args.api_key)
-            api_matches.extend(matches)
-        except Exception as e:
-            print(f"[ingest_sportmonks] Erro ao buscar partidas para liga {league_id}: {e}")
     
     odds_data = []
     team_stats_data = []
@@ -368,6 +358,23 @@ def main():
         # Transferências
         transfers_data.extend(get_transfers(home_team_id, args.api_key))
         transfers_data.extend(get_transfers(away_team_id, args.api_key))
+        
+        # Buscar partidas específicas para esta dupla de times
+        api_matches = []
+        try:
+            date_from = (datetime.strptime(match_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
+            date_to = (datetime.strptime(match_date, '%Y-%m-%d') + timedelta(days=args.lookahead_days)).strftime('%Y-%m-%d')
+            for league_id in leagues:
+                matches = fetch_matches_sportmonks(league_id, date_from, date_to, home_team_id, away_team_id, args.api_key)
+                api_matches.extend(matches)
+        except ValueError:
+            print(f"[ingest_sportmonks] Data inválida para {home_team} x {away_team}: {match_date}, usando odds padrão")
+            odds = {'match_id': match_id, 'home_odds': 2.0, 'draw_odds': 3.0, 'away_odds': 2.0}
+            odds['home_team'] = normalize_team_name(home_team)
+            odds['away_team'] = normalize_team_name(away_team)
+            odds['league_id'] = None
+            odds_data.append(odds)
+            continue
         
         # Tentar casar a partida do CSV com as partidas da API
         api_match, inverted = match_fixtures(row, api_matches, aliases)
