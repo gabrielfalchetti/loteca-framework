@@ -309,7 +309,7 @@ def main():
     leagues = [27, 28, 29, 373, 8]  # Série A, B, C, Copa do Brasil, EPL
     season_ids = {league: get_current_season_id(league, args.api_key) for league in leagues}
     print(f"[debug] Season IDs: {season_ids}")
-    aliases = load_aliases(args.aliases_file, api_key)
+    aliases = load_aliases(args.aliases_file, args.api_key)
     
     # Ler matches_source.csv
     if not os.path.exists(args.source_csv):
@@ -393,7 +393,7 @@ def main():
             
             player_stats_data.extend(get_player_stats(fixture_id, args.api_key))
             
-            referee_data.append(get_referee_stats(fixture_id, api_key))
+            referee_data.append(get_referee_stats(fixture_id, args.api_key))
             
             print(f"[ingest_sportmonks] Dados completos encontrados para {home_team} x {away_team} na liga {api_match['league_id']}")
         else:
